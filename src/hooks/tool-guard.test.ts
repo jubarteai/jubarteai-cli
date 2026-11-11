@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { GUARD_INPUT_MAX_BYTES, GUARD_SCAN_BUDGET, GUARD_SCAN_PARSE_COST, GUARD_SCAN_VALUE_COST } from "../constants.js";
 import { AGENT_COMMANDS, PERSON_COMMANDS } from "../harness/agent-commands.js";
 import { SHELL_TOOL_MATCHER, personCommandIn, toolGuardDecision } from "./tool-guard.js";
 
@@ -174,8 +175,8 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
   });
 
   it("a large JSON-shaped command with no person command: its raw text and every string scanned, decided quickly (review R-S3, round 11)", () => {
-    // Under the scan budget, so every one of the 250k strings is collected and scanned before the answer, which is {}.
-    const items = Array.from({ length: 250_000 }, () => "a b c d e");
+    // Under the scan budget, so every one of the 80k strings is collected and scanned before the answer, which is {}.
+    const items = Array.from({ length: 80_000 }, () => "a b c d e");
     let out: unknown;
     expect(time(() => (out = toolGuardDecision(camel(JSON.stringify(items)))))).toBeLessThan(3_000);
     expect(out).toEqual({});
@@ -184,11 +185,11 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
   });
 
   describe("millions of tiny strings: refused as too large to check, quickly, not scanned into the timeout (review R-S1, round 11)", () => {
-    /** The largest payload `wrap` builds from `head` plus copies of `item` that stays under the 16 MiB read cap. */
+    /** The largest payload `wrap` builds from `head` plus copies of `item` that stays under the read cap. */
     const fill = (head: unknown[], item: unknown, wrap: (items: unknown[]) => string): string => {
       const base = wrap(head).length;
       const per = wrap([...head, item]).length - base;
-      return wrap([...head, ...Array.from({ length: Math.floor((16 * 1024 * 1024 - 1024 - base) / per) }, () => item)]);
+      return wrap([...head, ...Array.from({ length: Math.floor((GUARD_INPUT_MAX_BYTES - 1024 - base) / per) }, () => item)]);
     };
     const vscode = (items: unknown[]): string => JSON.stringify({ tool_name: "run_in_terminal", tool_input: { command: JSON.stringify(items) } });
     const argv = (items: unknown[]): string => JSON.stringify({ tool_name: "bash", tool_input: { command: "echo", args: items } });
@@ -204,8 +205,8 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     for (const [name, build] of shapes) {
       it(name, () => {
         const raw = build();
-        expect(raw.length).toBeGreaterThan(15 * 1024 * 1024);
-        expect(raw.length).toBeLessThan(16 * 1024 * 1024);
+        expect(raw.length).toBeGreaterThan(GUARD_INPUT_MAX_BYTES * 0.99);
+        expect(raw.length).toBeLessThan(GUARD_INPUT_MAX_BYTES);
         let out: unknown;
         expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(2_000);
         expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
@@ -213,12 +214,47 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     }
 
     it("just under the budget, the slowest per-string shape still answers well inside the timeout", () => {
-      // About a hundred thousand failed parse attempts, the costliest step per string, and no person command: {}.
-      const raw = argv(["echo", ...Array.from({ length: 100_000 }, () => "[]]")]);
+      // As many failed parse attempts as the budget admits, the costliest step per string, and no person command: {}.
+      const count = Math.floor((GUARD_SCAN_BUDGET * 0.95) / (GUARD_SCAN_VALUE_COST + "[]]".length + GUARD_SCAN_PARSE_COST));
+      const raw = argv(["echo", ...Array.from({ length: count }, () => "[]]")]);
       let out: unknown;
       expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(3_000);
       expect(out).toEqual({});
     });
+  });
+
+  describe("the slowest content per character at the largest admitted size: decided well inside the timeout (review R-S1, round 12)", () => {
+    /** VS Code's shape: the tool input as an object, a JSON-shaped string in it scanned as raw text and parsed strings. */
+    const vscode = (input: Record<string, string>): string => JSON.stringify({ tool_name: "run_in_terminal", tool_input: input });
+    /** The largest `build(n)` that stays 16 KiB under the read cap (the margin keeps the doubled scan under the budget). */
+    const largest = (build: (n: number) => string): string => {
+      let lo = 1;
+      let hi = GUARD_INPUT_MAX_BYTES;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (Buffer.byteLength(build(mid)) > GUARD_INPUT_MAX_BYTES - 16 * 1024) hi = mid - 1;
+        else lo = mid;
+      }
+      return build(lo);
+    };
+    const cases: ReadonlyArray<[string, () => string, unknown]> = [
+      [
+        "a decoy key of backticks and separators before the person command: the deny is not delayed into the timeout",
+        () => largest((n) => vscode({ explanation: JSON.stringify(["`;".repeat(n)]), command: "jubarteai login" })),
+        { permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") },
+      ],
+      ["backticks and separators after the program, in a JSON-shaped command", () => largest((n) => vscode({ command: JSON.stringify([`jubarteai${"`;".repeat(n)}`]) })), {}],
+      ["backslash-backticks after the program, in a JSON-shaped command", () => largest((n) => vscode({ command: JSON.stringify([`jubarteai${"\\`".repeat(n)}`]) })), {}],
+    ];
+    for (const [name, build, expected] of cases) {
+      it(name, () => {
+        const raw = build();
+        expect(Buffer.byteLength(raw)).toBeGreaterThan(GUARD_INPUT_MAX_BYTES * 0.99);
+        let out: unknown;
+        expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(4_000);
+        expect(out).toEqual(expected);
+      }, 20_000);
+    }
   });
 
   it("nested JSON past the scan budget is denied as too large to check, without scanning it (review R-S1, round 9)", () => {
@@ -229,9 +265,9 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
   });
 
-  it("a ten-megabyte single word, then a person command: a deny, not an engine stack overflow that fails open", () => {
+  it("a three-megabyte single word, then a person command: a deny, not an engine stack overflow that fails open", () => {
     let out: unknown;
-    expect(time(() => (out = toolGuardDecision(camel(`jubarteai ${"x".repeat(10 * 1024 * 1024)}>&2; jubarteai login`))))).toBeLessThan(3_000);
+    expect(time(() => (out = toolGuardDecision(camel(`jubarteai ${"x".repeat(3 * 1024 * 1024)}>&2; jubarteai login`))))).toBeLessThan(3_000);
     expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
   });
 
@@ -285,6 +321,13 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
       "jubarteai inbox 2>&1 | grep login",
       "jubarteai inbox &>/dev/null & echo login",
     ]) {
+      expect(toolGuardDecision(camel(line)), line).toEqual({});
+    }
+  });
+
+  it("the gaps spec I6 records: a program word built by glob or brace expansion, other than the tarball glob (review R-S3, round 12)", () => {
+    // Bash expands each of these to jubarteai before it runs, so they do run login; if one starts being denied, update I6.
+    for (const line of ["jubarteai* login", "/opt/homebrew/bin/jubarteai* login", "/opt/homebrew/bin/jubartea? login", "~/.local/bin/jub*ai login", "{jubarteai,} login", "jubarteai{,} login", "npx ./*.tgz login", "npx ./jubarte?i-0.1.0.tgz login"]) {
       expect(toolGuardDecision(camel(line)), line).toEqual({});
     }
   });

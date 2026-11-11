@@ -7,9 +7,10 @@
 // blocked", whatever was approved. So this hook answers a deny for a shell tool call whose command names one of the
 // five, and `{}` (no decision: the normal permission flow) for everything else. It never answers "allow".
 //
-// It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen, nor a glob that
-// doesn't start with the literal name (`npx ./*.tgz login`, `/opt/homebrew/bin/jubartea? login`; spec I6). Quoting is undone
-// before matching, so `jubarteai "login"`, `j"ubarteai" login`, `jubarteai \login`, `jubarteai $'login'` and PowerShell's
+// It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen, nor a program word
+// the shell builds by glob or brace expansion (`jubarteai* login`, `/opt/homebrew/bin/jubartea? login`, `{jubarteai,} login`,
+// `npx ./*.tgz login`; spec I6): only a glob for the npm pack tarball is matched. Quoting is undone before matching,
+// so `jubarteai "login"`, `j"ubarteai" login`, `jubarteai \login`, `jubarteai $'login'` and PowerShell's
 // ``jubarteai l`ogin`` match, and the program may follow any shell separator or close a lookup, so chained, `$(…)`,
 // backtick, path, `$(command -v jubarteai) login` and `(Get-Command jubarteai) login` forms match too. Matching errs
 // toward a deny: text that only mentions a person command after the program name (a commit message, the title or
@@ -92,8 +93,10 @@ const PROGRAM_WORD = /(?:^|[<>{}$=/\\])jubarteai(?:\.(?:cmd|exe|ps1|js|mjs))?(?:
  * word of its own (review R-S2, round 9). A glob in place of the version (`npx ./jubarteai-*.tgz login`) is the
  * program too, since bash expands it before npx starts (review R-S2, round 10). Tested on the word's last segment
  * (after `:`, a path separator or a redirection/brace/`$`/`=` character), so `jubarteai-cli-0.1.0.tgz` and
- * `my-jubarteai-1.0.0.tgz` are not the program. A glob that doesn't start with the literal name (`./*.tgz`,
- * `./jubarte?i-0.1.0.tgz`) is not seen; spec I6 records it rather than widening the match (review R-S2, round 11).
+ * `my-jubarteai-1.0.0.tgz` are not the program. Any other glob or brace expansion is not seen, for the tarball
+ * (`./*.tgz`, `./jubarte?i-0.1.0.tgz`) or the program (`jubarteai*`, `{jubarteai,}`): spec I6 records it rather than
+ * widening the match, since a glob can't be told from a mention without expanding it (review round 11 R-S2, round 12
+ * R-S3).
  */
 const TARBALL_SEGMENT = /^jubarteai(?:-[\d*?[]|[*?[]).*\.tgz$/i;
 

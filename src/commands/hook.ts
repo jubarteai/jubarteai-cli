@@ -16,7 +16,7 @@ export type HookDeps = {
   budgetMs: number;
   networkTimeoutMs: number;
   endTimeoutMs: number;
-  /** The guard's read cap (GUARD_INPUT_MAX_BYTES); a parameter so a test can reach it without 16 MiB of input. */
+  /** The guard's read cap (GUARD_INPUT_MAX_BYTES); a parameter so a test can reach it without megabytes of input. */
   guardMaxBytes: number;
   env: NodeJS.ProcessEnv;
 };

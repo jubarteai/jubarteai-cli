@@ -59,10 +59,12 @@ export const ARG_INPUT_MAX_BYTES = 1024 * 1024;
 
 /**
  * Largest `preToolUse` payload the guard reads (`jubarteai hook pre-tool-use`). The whole payload must be read for a
- * padded command to be seen, and a model never emits a tool call anywhere near this size; past it the call is denied
- * as too large to check (review R-S14).
+ * padded command to be seen; past it the call is denied as too large to check (review R-S14). A model's whole output
+ * turn is a few hundred KiB at most (128k tokens), so 4 MiB is still far beyond any one tool call, and it is what keeps
+ * the scan's worst case well inside the hook's fail-open timeout: GUARD_SCAN_BUDGET is twice this, and the slowest
+ * content scans at about 235 ns a character (review round 12 R-S1).
  */
-export const GUARD_INPUT_MAX_BYTES = 16 * 1024 * 1024;
+export const GUARD_INPUT_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * The guard's scan budget for one payload, in characters: every string collected from the tool arguments counts its
@@ -71,14 +73,17 @@ export const GUARD_INPUT_MAX_BYTES = 16 * 1024 * 1024;
  * not only its characters. Twice the read cap covers the Copilot runtime's own nesting (`toolArgs` is a JSON string
  * holding `command`); JSON nested deeper than that inside a large argument, or millions of tiny strings, would otherwise
  * push the scan into the hook's timeout, which fails open, so past this budget the call is denied as too large to check
- * (review R-S1, rounds 9 and 11).
+ * (review R-S1, rounds 9 and 11). Every character the matcher scans is charged here, so the scan's time is bounded by
+ * this budget times the slowest content per character (a backslash or backtick between separators: at most about 235 ns
+ * on an M1 Pro, a JSON-shaped string's raw text and its parsed strings both counted): under 2 s for 8 Mi characters,
+ * against the 8 s timeout (review round 12 R-S1, R-S2).
  */
 export const GUARD_SCAN_BUDGET = 2 * GUARD_INPUT_MAX_BYTES;
 
 /**
  * What every value the guard walks costs in GUARD_SCAN_BUDGET on top of a string's own length: an array, an object, a
  * key, a number or a string. A string's fixed cost (its readings and their scans) is about a microsecond whatever its
- * length, so this caps a payload at about half a million values, far beyond any tool call a model emits (review R-S1,
+ * length, so this caps a payload at about 130 thousand values, far beyond any tool call a model emits (review R-S1,
  * round 11).
  */
 export const GUARD_SCAN_VALUE_COST = 64;
@@ -86,7 +91,7 @@ export const GUARD_SCAN_VALUE_COST = 64;
 /**
  * What every JSON.parse attempt on a JSON-looking string costs in GUARD_SCAN_BUDGET on top of the string: a failed parse
  * throws, and an exception costs a few microseconds, so a payload of tiny invalid JSON strings (`"[]]"`) is capped at
- * about a hundred thousand attempts (review R-S1, round 11).
+ * about 26 thousand attempts (review R-S1, round 11).
  */
 export const GUARD_SCAN_PARSE_COST = 256;
 
