@@ -73,6 +73,12 @@ const PERSON_FORMS: ReadonlyArray<string | ((command: string) => string)> = [
   "npx --yes https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz %s",
   "npm exec ./JubarteAI-1.2.3-beta.1.tgz -- %s",
   "npx C:\\Users\\me\\jubarteai-0.1.0.tgz %s",
+  "npx ./jubarteai-*.tgz %s",
+  "npx ./jubarteai*.tgz %s",
+  "npm exec ./jubarteai-?.?.?.tgz -- %s",
+  '["$(npm exec jubarteai --cache ", " %s)"]',
+  '["`npm exec jubarteai --cache ", " %s`"]',
+  '["$(npx jubarteai --workspace ", " %s)"]',
   // A redirection between the program and the command (review R-S3, round 9): bash and PowerShell take one anywhere.
   "jubarteai 2>/dev/null %s",
   "jubarteai 2> /dev/null %s",
@@ -105,7 +111,7 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
     expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "jubarteai login" } }))).toBe(true);
   });
 
-  it("reads object keys and JSON nested in a string, unescaped (the raw JSON text itself is not scanned twice)", () => {
+  it("reads object keys and JSON nested in a string, unescaped, and the JSON's raw text too (a shell runs that text)", () => {
     expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "echo", "jubarteai login": 1 } }))).toBe(true);
     expect(denied(camel('["echo hi", "jubarteai \\u006cogin"]'))).toBe(true);
     expect(denied(camel(JSON.stringify({ argv: ["sh", "-c", "jubarteai update"] })))).toBe(true);
@@ -155,6 +161,14 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     for (let level = 0; level < 10; level += 1) nested = JSON.stringify([nested]);
     let out: unknown;
     expect(time(() => (out = toolGuardDecision(camel(nested))))).toBeLessThan(2_000);
+    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+  });
+
+  it("a large JSON-shaped command: its raw text and its strings scanned, decided quickly (review R-S1, round 10)", () => {
+    const items = Array.from({ length: 400_000 }, () => "a b c d e");
+    const line = JSON.stringify([...items, "$(npm exec jubarteai --cache ", " login)"]);
+    let out: unknown;
+    expect(time(() => (out = toolGuardDecision(camel(line))))).toBeLessThan(3_000);
     expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
   });
 
@@ -213,6 +227,9 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
     for (const line of [
       "npx ./jubarteai-cli-0.1.0.tgz login",
       "npx ./my-jubarteai-1.0.0.tgz login",
+      "npx ./jubarteai-cli-*.tgz login",
+      "npx ./my-jubarteai-*.tgz login",
+      "npx ./jubarteai-c*.tgz login",
       "npx ./jubarteai-0.1.0.tgz inbox --agent 11111111-1111-4111-8111-111111111111",
       "tar -tzf jubarteai-0.1.0.tgz | grep login",
       "jubarteai 2>/dev/null inbox",

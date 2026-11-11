@@ -87,10 +87,12 @@ const PROGRAM_WORD = /(?:^|[<>{}$=/\\])jubarteai(?:\.(?:cmd|exe|ps1|js|mjs))?(?:
 /**
  * The file name `npm pack` gives the package, `jubarteai-<version>.tgz`: `npx ./jubarteai-0.1.0.tgz login`,
  * `npx file:/tmp/jubarteai-0.1.0.tgz login` or a registry tarball URL run the CLI's one bin without `jubarteai` as a
- * word of its own (review R-S2, round 9). Tested on the word's last segment (after `:`, a path separator or a
- * redirection/brace/`$`/`=` character), so `jubarteai-cli` and `my-jubarteai-1.0.0.tgz` are not the program.
+ * word of its own (review R-S2, round 9). A glob in place of the version (`npx ./jubarteai-*.tgz login`) is the
+ * program too, since bash expands it before npx starts (review R-S2, round 10). Tested on the word's last segment
+ * (after `:`, a path separator or a redirection/brace/`$`/`=` character), so `jubarteai-cli-0.1.0.tgz` and
+ * `my-jubarteai-1.0.0.tgz` are not the program.
  */
-const TARBALL_SEGMENT = /^jubarteai-\d.*\.tgz$/i;
+const TARBALL_SEGMENT = /^jubarteai(?:-[\d*?[]|[*?[]).*\.tgz$/i;
 
 /** Where a word's last segment starts: after the last character a program name may follow. */
 const SEGMENT_START = /[<>{}$=/\\:]/;
@@ -200,11 +202,14 @@ interface Collected {
 
 /**
  * Every string anywhere in `value`, object keys included (tool arguments nest differently per harness). A JSON-looking
- * string that parses as an object or array is replaced by what it holds: every word a shell could run from it is in one
- * of its strings, already unescaped, so its raw text is not scanned a second time. Every string read counts toward
- * `maxChars`, parsed or scanned, and false means the arguments go past it or nest deeper than GUARD_SCAN_MAX_DEPTH:
- * JSON nested level after level inside a large argument would otherwise multiply the work into the hook's timeout,
- * which fails open, and a level never walked could hold the command (review R-S1, round 9).
+ * string that parses as an object or array is walked into as well, so what it holds is scanned unescaped
+ * (`"jubarteai \u006cogin"`). Below the top level its raw text is scanned too: a shell runs that text, not the parsed
+ * strings, and re-reads `$(…)` or a backtick across JSON string boundaries, so `["$(npm exec jubarteai --cache ", " login)"]`
+ * runs `login` although no single string holds it (review R-S1, round 10). The top level is the arguments themselves
+ * (Copilot CLI's `toolArgs` JSON string), the runtime's wrapper rather than anything a shell runs, so it is only parsed.
+ * Every string read counts toward `maxChars` once, and false means the arguments go past it or nest deeper than
+ * GUARD_SCAN_MAX_DEPTH: JSON nested level after level inside a large argument would otherwise multiply the work into
+ * the hook's timeout, which fails open, and a level never walked could hold the command (review R-S1, round 9).
  */
 function collectStrings(value: unknown, into: Collected, maxChars: number, depth = 0): boolean {
   if (depth > GUARD_SCAN_MAX_DEPTH) return false;
@@ -219,7 +224,10 @@ function collectStrings(value: unknown, into: Collected, maxChars: number, depth
       } catch {
         // Not JSON (a brace group, a test expression): scanned as it is, below.
       }
-      if (parsed !== null && typeof parsed === "object") return collectStrings(parsed, into, maxChars, depth + 1);
+      if (parsed !== null && typeof parsed === "object") {
+        if (depth > 0) into.strings.push(value);
+        return collectStrings(parsed, into, maxChars, depth + 1);
+      }
     }
     into.strings.push(value);
     return true;
