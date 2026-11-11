@@ -22,10 +22,14 @@
 // `--flag value` with the value as the next word (a bare `--` takes none), so `npm exec jubarteai --loglevel silent
 // login` runs the person command and is denied. A program word is tested on its own, so a package spec or flag value
 // that itself names the package (`npx jubarteai@https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz login`,
-// `--prefix=../jubarteai-cli`) is one word and can't hide the command after it.
+// `--prefix=../jubarteai-cli`) is one word and can't hide the command after it. The package's `npm pack` tarball is the
+// program too (`npx ./jubarteai-0.1.0.tgz login`), and a redirection between the program and its command is skipped
+// (`jubarteai 2>/dev/null login`). The work is bounded: JSON nested in a large argument past a character budget, or
+// nested too deep, is denied as too large to check rather than scanned level after level (review round 9).
 //
 // Pure: no network, no file reads, no binding lookup. It runs in every repo, bound or not, because login and logout
 // change user-level credentials (the stated exception to I7's bound-repo rule).
+import { GUARD_SCAN_MAX_CHARS, GUARD_SCAN_MAX_DEPTH } from "../constants.js";
 import { AGENT_COMMANDS, PERSON_COMMANDS } from "../harness/agent-commands.js";
 
 /** The `hook` event name of the guard: `jubarteai hook pre-tool-use --harness vscode`. Not a session event. */
@@ -50,8 +54,18 @@ const PERSON = new Set<string>(PERSON_COMMANDS);
 /** The agent commands: a word after a flag that names one is the subcommand, not the flag's value. */
 const AGENT = new Set<string>(AGENT_COMMANDS.map((command) => command.toLowerCase()));
 
-/** A reading split into words and shell separators (whitespace dropped): one pass, linear. */
+/**
+ * A reading split into words and shell separators (whitespace dropped): one pass, linear. A single character class
+ * under `+`, never an alternation group: V8 keeps a backtrack entry per repetition of a group, so a group here would
+ * overflow the stack on a multi-megabyte word, and the hook fails open on an exception.
+ */
 const PIECES = /[;&|()`]|[^\s;&|()`]+/g;
+
+/**
+ * A redirection's own `&` or `|` (`2>&1`, `>&2`, `&>/dev/null`, `>|out`), folded into a plain `>`/`<` before the split
+ * so the redirection stays one word instead of reading as a separator. Linear: no quantifier.
+ */
+const REDIRECTION_AMP = /([<>])[&|]|&(>)/g;
 
 /** The one-character pieces PIECES returns as separators. */
 const SEPARATORS = new Set([";", "&", "|", "(", ")", "`"]);
@@ -70,6 +84,36 @@ const CLOSERS = new Set([")", "`"]);
  */
 const PROGRAM_WORD = /(?:^|[<>{}$=/\\])jubarteai(?:\.(?:cmd|exe|ps1|js|mjs))?(?:@.*)?$/i;
 
+/**
+ * The file name `npm pack` gives the package, `jubarteai-<version>.tgz`: `npx ./jubarteai-0.1.0.tgz login`,
+ * `npx file:/tmp/jubarteai-0.1.0.tgz login` or a registry tarball URL run the CLI's one bin without `jubarteai` as a
+ * word of its own (review R-S2, round 9). Tested on the word's last segment (after `:`, a path separator or a
+ * redirection/brace/`$`/`=` character), so `jubarteai-cli` and `my-jubarteai-1.0.0.tgz` are not the program.
+ */
+const TARBALL_SEGMENT = /^jubarteai-\d.*\.tgz$/i;
+
+/** Where a word's last segment starts: after the last character a program name may follow. */
+const SEGMENT_START = /[<>{}$=/\\:]/;
+
+/** Whether a word runs `jubarteai`: the program name (PROGRAM_WORD) or the package's npm pack tarball. */
+function isProgramWord(word: string): boolean {
+  if (PROGRAM_WORD.test(word)) return true;
+  if (!/\.tgz$/i.test(word)) return false;
+  let start = word.length;
+  while (start > 0 && !SEGMENT_START.test(word.charAt(start - 1))) start -= 1;
+  return TARBALL_SEGMENT.test(word.slice(start));
+}
+
+/**
+ * A redirection word (`2>/dev/null`, `>out`, `<in`, `2>&1`, `&>log`, PowerShell's `*>$null`): bash and PowerShell
+ * accept one anywhere in a simple command, so between the program and its command it is skipped, not read as the
+ * command (review R-S3, round 9). Anchored at the word's start, so linear.
+ */
+const REDIRECTION = /^(?:\d+|\*)?[<>]/;
+
+/** A redirection operator standing alone (`2>`, `>>`, `*>`, `>&` once folded): its target is the next word, skipped too. */
+const BARE_REDIRECTION = /^(?:\d+|\*)?[<>]+$/;
+
 /** A word's command part, lowercased: what comes before a redirection or brace (`login>out` is `login`). */
 function commandPart(word: string): string {
   const cut = word.search(/[<>{}]/);
@@ -85,15 +129,27 @@ type ScanState = "outside" | "program" | "flags" | "flagValue";
 /** The person command one reading runs, or null. One left-to-right pass over its pieces. */
 function scanReading(reading: string): string | null {
   let state: ScanState = "outside";
-  for (const [piece] of reading.matchAll(PIECES)) {
+  // A bare redirection operator was just skipped, so this word is its target (`jubarteai 2> /dev/null login`).
+  let redirectionTarget = false;
+  for (const [piece] of reading.replace(REDIRECTION_AMP, "$1$2").matchAll(PIECES)) {
     // A program word starts a new call wherever it appears, a flag's value included, so no piece is walked twice.
-    if (PROGRAM_WORD.test(piece)) {
+    if (isProgramWord(piece)) {
       state = "program";
+      redirectionTarget = false;
       continue;
     }
     if (state === "outside") continue;
     if (SEPARATORS.has(piece)) {
       state = state === "program" && CLOSERS.has(piece) ? "flags" : "outside";
+      redirectionTarget = false;
+      continue;
+    }
+    if (redirectionTarget) {
+      redirectionTarget = false;
+      continue;
+    }
+    if (REDIRECTION.test(piece)) {
+      redirectionTarget = BARE_REDIRECTION.test(piece);
       continue;
     }
     if (piece.startsWith("-")) {
@@ -136,25 +192,41 @@ export function personCommandIn(text: string): string | null {
   return null;
 }
 
-/** Every string anywhere in `value` (tool arguments nest differently per harness); a JSON-looking string is parsed first. */
-function stringsIn(value: unknown, out: string[] = [], depth = 0): string[] {
-  if (depth > 20) return out;
+/** The strings collected from tool arguments for scanning, and how many characters were read to collect them. */
+interface Collected {
+  strings: string[];
+  chars: number;
+}
+
+/**
+ * Every string anywhere in `value`, object keys included (tool arguments nest differently per harness). A JSON-looking
+ * string that parses as an object or array is replaced by what it holds: every word a shell could run from it is in one
+ * of its strings, already unescaped, so its raw text is not scanned a second time. Every string read counts toward
+ * `maxChars`, parsed or scanned, and false means the arguments go past it or nest deeper than GUARD_SCAN_MAX_DEPTH:
+ * JSON nested level after level inside a large argument would otherwise multiply the work into the hook's timeout,
+ * which fails open, and a level never walked could hold the command (review R-S1, round 9).
+ */
+function collectStrings(value: unknown, into: Collected, maxChars: number, depth = 0): boolean {
+  if (depth > GUARD_SCAN_MAX_DEPTH) return false;
   if (typeof value === "string") {
-    out.push(value);
+    into.chars += value.length;
+    if (into.chars > maxChars) return false;
     const trimmed = value.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      let parsed: unknown;
       try {
-        stringsIn(JSON.parse(trimmed) as unknown, out, depth + 1);
+        parsed = JSON.parse(trimmed);
       } catch {
-        // Not JSON: the string itself was already collected.
+        // Not JSON (a brace group, a test expression): scanned as it is, below.
       }
+      if (parsed !== null && typeof parsed === "object") return collectStrings(parsed, into, maxChars, depth + 1);
     }
-  } else if (Array.isArray(value)) {
-    for (const item of value) stringsIn(item, out, depth + 1);
-  } else if (value !== null && typeof value === "object") {
-    for (const item of Object.values(value)) stringsIn(item, out, depth + 1);
+    into.strings.push(value);
+    return true;
   }
-  return out;
+  if (value === null || typeof value !== "object") return true;
+  if (Array.isArray(value)) return value.every((item) => collectStrings(item, into, maxChars, depth + 1));
+  return Object.entries(value).every(([key, item]) => collectStrings(key, into, maxChars, depth + 1) && collectStrings(item, into, maxChars, depth + 1));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -190,11 +262,11 @@ function deny(command: string): ToolGuardOutput {
   };
 }
 
-/** The answer for a payload over the guard's read cap: what it can't read, it can't clear. */
+/** The answer for a payload over the guard's read cap or scan budget: what it can't read, it can't clear. */
 const TOO_LARGE: ToolGuardOutput = Object.freeze({
   permissionDecision: "deny",
   permissionDecisionReason:
-    "This tool call is too large for the JubarteAI guard to check for jubarteai login, logout, link, init or update. " +
+    "This tool call is too large (or too deeply nested) for the JubarteAI guard to check for jubarteai login, logout, link, init or update. " +
     "Split the command into smaller ones.",
 });
 
@@ -202,10 +274,12 @@ const TOO_LARGE: ToolGuardOutput = Object.freeze({
  * The decision for one `preToolUse` payload (camelCase `toolName`/`toolArgs` or snake_case `tool_name`/`tool_input`).
  * `tooLarge` means stdin went past the guard's read cap (GUARD_INPUT_MAX_BYTES, far beyond what a model emits as one
  * tool call): the unread rest could hold a person command anywhere, so the call is denied rather than scanned in part
- * (review R-S14). Below the cap the whole payload is read and parsed, however the command is padded. Anything
+ * (review R-S14). Below the cap the whole payload is read and parsed, however the command is padded. A shell call whose
+ * arguments would take more than `maxScanChars` characters of scanning (JSON nested in a large argument), or nest
+ * deeper than GUARD_SCAN_MAX_DEPTH, is denied the same way, so the scan stays bounded (review R-S1, round 9). Anything
  * unparsable or unrecognised is `{}`: the guard never blocks a call it can read and finds nothing in.
  */
-export function toolGuardDecision(raw: string, tooLarge = false): ToolGuardOutput {
+export function toolGuardDecision(raw: string, tooLarge = false, maxScanChars = GUARD_SCAN_MAX_CHARS): ToolGuardOutput {
   if (tooLarge) return TOO_LARGE;
   let payload: unknown;
   try {
@@ -217,9 +291,17 @@ export function toolGuardDecision(raw: string, tooLarge = false): ToolGuardOutpu
   const toolName = payload["toolName"] ?? payload["tool_name"];
   const args = payload["toolArgs"] ?? payload["tool_input"];
   if (!isShellCall(toolName, args)) return {};
-  for (const text of stringsIn(args)) {
-    const command = personCommandIn(text);
-    if (command !== null) return deny(command);
+  try {
+    const collected: Collected = { strings: [], chars: 0 };
+    if (!collectStrings(args, collected, maxScanChars)) return TOO_LARGE;
+    for (const text of collected.strings) {
+      const command = personCommandIn(text);
+      if (command !== null) return deny(command);
+    }
+  } catch {
+    // A shell call the scan couldn't finish (an engine limit such as the stack or memory) is not cleared: the hook's
+    // own catch would answer `{}` and let it through.
+    return TOO_LARGE;
   }
   return {};
 }

@@ -67,6 +67,23 @@ const PERSON_FORMS: ReadonlyArray<string | ((command: string) => string)> = [
   "npm exec jubarteai --prefix ../jubarteai-cli %s",
   // Redirection or a brace right after the command word.
   "{ jubarteai %s>/dev/null; }",
+  // The package's npm pack tarball runs its one bin, whether named by path, file: spec or registry URL (review R-S2, round 9).
+  "npx ./jubarteai-0.1.0.tgz %s",
+  "npx file:/tmp/jubarteai-0.1.0.tgz %s",
+  "npx --yes https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz %s",
+  "npm exec ./JubarteAI-1.2.3-beta.1.tgz -- %s",
+  "npx C:\\Users\\me\\jubarteai-0.1.0.tgz %s",
+  // A redirection between the program and the command (review R-S3, round 9): bash and PowerShell take one anywhere.
+  "jubarteai 2>/dev/null %s",
+  "jubarteai 2> /dev/null %s",
+  "npx jubarteai 2>&1 %s",
+  "jubarteai &>/dev/null %s",
+  "jubarteai >&2 %s",
+  "jubarteai >| out %s",
+  "jubarteai <<<x %s",
+  "jubarteai *>$null %s",
+  "jubarteai *> $null %s",
+  "npm exec jubarteai --loglevel silent 2>&1 %s",
 ];
 
 const render = (form: string | ((command: string) => string), command: string): string => (typeof form === "string" ? form.replace("%s", command) : form(command));
@@ -86,6 +103,12 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
 
   it("reads toolArgs given as an object as well as a JSON string", () => {
     expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "jubarteai login" } }))).toBe(true);
+  });
+
+  it("reads object keys and JSON nested in a string, unescaped (the raw JSON text itself is not scanned twice)", () => {
+    expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "echo", "jubarteai login": 1 } }))).toBe(true);
+    expect(denied(camel('["echo hi", "jubarteai \\u006cogin"]'))).toBe(true);
+    expect(denied(camel(JSON.stringify({ argv: ["sh", "-c", "jubarteai update"] })))).toBe(true);
   });
 
   it("a tool with another name counts as a shell when its arguments carry a command string", () => {
@@ -127,8 +150,30 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     expect(out).toMatchObject({ permissionDecision: "deny" });
   });
 
+  it("JSON nested ten deep in a shell argument: scanned whole and decided quickly (review R-S1, round 9)", () => {
+    let nested = `echo ${"x".repeat(1024 * 1024)}; jubarteai login`;
+    for (let level = 0; level < 10; level += 1) nested = JSON.stringify([nested]);
+    let out: unknown;
+    expect(time(() => (out = toolGuardDecision(camel(nested))))).toBeLessThan(2_000);
+    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+  });
+
+  it("nested JSON past the scan budget is denied as too large to check, without scanning it (review R-S1, round 9)", () => {
+    let nested = `echo ${"x".repeat(4 * 1024 * 1024)}`;
+    for (let level = 0; level < 10; level += 1) nested = JSON.stringify([nested]);
+    let out: unknown;
+    expect(time(() => (out = toolGuardDecision(camel(nested))))).toBeLessThan(2_000);
+    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+  });
+
+  it("a ten-megabyte single word, then a person command: a deny, not an engine stack overflow that fails open", () => {
+    let out: unknown;
+    expect(time(() => (out = toolGuardDecision(camel(`jubarteai ${"x".repeat(10 * 1024 * 1024)}>&2; jubarteai login`))))).toBeLessThan(3_000);
+    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+  });
+
   it("one long token holding many program names (paths, versions, lookups) stays linear", () => {
-    const units = ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t", "--x=/jubarteai ", "jubarteai@>=", "jubarteai --a=b ", "-->jubarteai ", "jubarteai@jubarteai@", "jubarteai --a b ", "jubarteai --a login ", "=jubarteai --a b c ", "jubarteai -- ", "jubarteai@x/jubarteai-1.tgz --a ", "jubarteai --a jubarteai ", "x/jubarteai-cli "];
+    const units = ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t", "--x=/jubarteai ", "jubarteai@>=", "jubarteai --a=b ", "-->jubarteai ", "jubarteai@jubarteai@", "jubarteai --a b ", "jubarteai --a login ", "=jubarteai --a b c ", "jubarteai -- ", "jubarteai@x/jubarteai-1.tgz --a ", "jubarteai --a jubarteai ", "x/jubarteai-cli ", "jubarteai 2> ", "jubarteai 2>&1 ", "jubarteai >| ", "=jubarteai-1=", "jubarteai-1.tgz:", "/jubarteai-1.tgz ", ":jubarteai-1", "1", "jubarteai 1", ">"];
     for (const unit of units) {
       const line = unit.repeat(Math.ceil(400_000 / unit.length));
       expect(time(() => toolGuardDecision(camel(line))), unit).toBeLessThan(2_000);
@@ -162,6 +207,30 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
     for (const line of ["git status", "jubarteai-cli login", "myjubarteai login", "jubarteai loginx", "jubarteai inbox --login", "echo jubarteai", "npm run login", "ls /tmp/my-jubarteai-cache login", "jubarteai; login", "jubarteai | login", "jubarteai@1 inbox && echo login", "jubarteai search-knowledge --query \"how does init work\""]) {
       expect(toolGuardDecision(camel(line)), line).toEqual({});
     }
+  });
+
+  it("lookalike tarballs, an agent command from a tarball, and a redirection before an agent command", () => {
+    for (const line of [
+      "npx ./jubarteai-cli-0.1.0.tgz login",
+      "npx ./my-jubarteai-1.0.0.tgz login",
+      "npx ./jubarteai-0.1.0.tgz inbox --agent 11111111-1111-4111-8111-111111111111",
+      "tar -tzf jubarteai-0.1.0.tgz | grep login",
+      "jubarteai 2>/dev/null inbox",
+      "jubarteai inbox 2>&1 | grep login",
+      "jubarteai inbox &>/dev/null & echo login",
+    ]) {
+      expect(toolGuardDecision(camel(line)), line).toEqual({});
+    }
+  });
+
+  it("the scan budget and depth: a shell call it can't scan whole is denied, a non-shell one is left alone", () => {
+    const nested = JSON.stringify([JSON.stringify(["echo hi"])]);
+    expect(toolGuardDecision(camel(nested))).toEqual({});
+    expect(toolGuardDecision(camel(nested), false, 40)).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+    let deep: unknown = "echo hi";
+    for (let level = 0; level < 25; level += 1) deep = [deep];
+    expect(toolGuardDecision(JSON.stringify({ toolName: "bash", toolArgs: { command: "echo hi", extra: deep } }))).toMatchObject({ permissionDecision: "deny" });
+    expect(toolGuardDecision(JSON.stringify({ toolName: "view", toolArgs: { path: "x", extra: deep } }))).toEqual({});
   });
 
   it("a non-shell tool that only mentions a person command (an edit, a new file, a view)", () => {

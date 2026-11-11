@@ -64,6 +64,18 @@ export const ARG_INPUT_MAX_BYTES = 1024 * 1024;
  */
 export const GUARD_INPUT_MAX_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Most characters the guard scans for one payload: every string collected from the tool arguments, a JSON-looking
+ * string and each string parsed out of it counted separately. Twice the read cap covers the Copilot runtime's own
+ * nesting (`toolArgs` is a JSON string holding `command`); JSON nested deeper than that inside a large argument would
+ * multiply the scan into the hook's timeout, which fails open, so past this budget the call is denied as too large to
+ * check (review R-S1, round 9). Bounds the scan at about a second on a laptop.
+ */
+export const GUARD_SCAN_MAX_CHARS = 2 * GUARD_INPUT_MAX_BYTES;
+
+/** Deepest nesting of arrays, objects and JSON-in-strings the guard walks; deeper arguments are denied, not skipped. */
+export const GUARD_SCAN_MAX_DEPTH = 20;
+
 /** Longest answer accepted at an interactive prompt. */
 export const PROMPT_MAX_CHARS = 8192;
 
