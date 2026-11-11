@@ -11,7 +11,7 @@ import { isAbsolute, join } from "node:path";
 import { runCommand } from "../install/run.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
-import { AGENT_COMMANDS } from "./agent-commands.js";
+import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "opencode" as const;
@@ -19,11 +19,13 @@ const LABEL = "OpenCode: allow the jubarteai agent commands";
 const VERSION_TIMEOUT_MS = 5_000;
 /** Only the start of the version output is read. */
 const VERSION_HEAD_CHARS = 200;
-/** One allow pattern per agent command; a person command is never listed. */
-const COMMAND_PATTERNS: readonly string[] = AGENT_COMMANDS.map((command) => `jubarteai ${command}*`);
+/**
+ * One allow pattern per agent command (and `--help`/`--version`); a person command is never listed. `*` has no word
+ * boundary, so no agent command may be a prefix of a person command (agent-commands.test.ts holds that).
+ */
+export const COMMAND_PATTERNS: readonly string[] = AGENT_RULE_WORDS.map((word) => `jubarteai ${word}*`);
 /** Written by an earlier unreleased version: it pre-approves every jubarteai command, the person commands included. */
 const LEGACY_PATTERN = "jubarteai *";
-const PERSON_COMMAND_LIST = "login, logout, link, init and update";
 const V2_FILES: readonly string[] = ["opencode.jsonc", "opencode.json"];
 const V1_FILES: readonly string[] = ["opencode.json", "opencode.jsonc"];
 
@@ -167,11 +169,12 @@ function addV1(doc: Obj, blocked: Blocked): boolean {
 }
 
 function resultOf(id: string, edit: JsonEditResult, blocked: string | null): StepResult {
+  // A failed write is a failure whatever else the edit found (review R-N7).
+  if (edit.status === "refused" || edit.status === "missing") return { id, label: LABEL, status: "failed", detail: `could not write (${edit.reason ?? edit.status})` };
   // Some rules written, others left to the user's own: configured, with what was left said.
   if (edit.status === "changed") return blocked === null ? { id, label: LABEL, status: "configured" } : { id, label: LABEL, status: "configured", detail: blocked };
   if (blocked !== null) return { id, label: LABEL, status: "skipped", detail: blocked };
-  if (edit.status === "unchanged") return { id, label: LABEL, status: "already configured" };
-  return { id, label: LABEL, status: "failed", detail: `could not write (${edit.reason ?? edit.status})` };
+  return { id, label: LABEL, status: "already configured" };
 }
 
 function v2Lines(): string[] {

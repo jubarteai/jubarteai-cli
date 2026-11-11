@@ -1,16 +1,22 @@
 // Windsurf ("Devin Desktop (Windsurf)") adapter (spec §9). Only detection, the skill id and MCP cleanup are verified.
 // The permission and hook formats that are documented belong to Devin Local, a different product surface the
 // coordinator did not adopt for v1, and the legacy Cascade formats are undocumented, so both come back as printed
-// instructions (D25). Cleanup touches install.sh's one path, ~/.codeium/windsurf/mcp_config.json (`mcpServers.jubarteai`).
+// instructions (D25). The permission lines write no rule for the bare program: Windsurf's allow list matches by prefix, so
+// `jubarteai` would also pre-approve the person commands, and Windsurf sets no variable the CLI could use to refuse
+// them (spec I6, review R-M3). They name agent commands only and put the person commands on the deny list. Cleanup touches install.sh's one path, ~/.codeium/windsurf/mcp_config.json (`mcpServers.jubarteai`).
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { PlanStep } from "../safe-edit/plan.js";
+import { PERSON_COMMANDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { cleanupScopeOf, manual } from "./cursor.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "windsurf" as const;
 const LABEL = "Windsurf";
+
+/** The deny-list entries for the person commands, quoted for prose. */
+const DENY_ENTRIES = PERSON_COMMANDS.map((command) => `"jubarteai ${command}"`).join(", ");
 
 const windsurfDir = (home: string): string => join(home, ".codeium", "windsurf");
 
@@ -28,9 +34,14 @@ export const windsurfAdapter: HarnessAdapter = {
   async permission(): Promise<PlanStep | ManualInstructions | null> {
     return manual(
       HARNESS,
-      "Windsurf: allow the jubarteai command",
-      ["In Windsurf, add the command jubarteai to the terminal command allow list in its settings.", "(Windsurf documents no settings file for it, so the CLI does not write one)"],
-      "Windsurf's permission format is not verified (D25)",
+      "Windsurf: approve jubarteai commands as Windsurf asks",
+      [
+        `Windsurf's terminal allow list matches by prefix, so an entry for jubarteai would also pre-approve ${PERSON_COMMAND_LIST}: the commands that change your saved account, the repo binding and your harness files.`,
+        "The CLI therefore writes no Windsurf rule. Approve jubarteai commands when Windsurf asks.",
+        `To skip some prompts, add agent commands one by one to the allow list (for example "jubarteai search-knowledge", "jubarteai inbox"), never jubarteai alone, and add ${DENY_ENTRIES} to the deny list. How Windsurf matches a chained command such as "jubarteai inbox && jubarteai login" is not verified, so approving as asked is the safe choice.`,
+        "(Windsurf documents no settings file for these lists, so the CLI does not write one)",
+      ],
+      "Windsurf's permission format is not verified (D25); a whole-program entry would also pre-approve the person commands",
     );
   },
 
@@ -51,7 +62,7 @@ export const windsurfAdapter: HarnessAdapter = {
       permission: "manual",
       hooks: "manual",
       mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)),
-      notes: ["Windsurf's permission and hook formats are not verified; add jubarteai to its terminal allow list by hand"],
+      notes: [`Windsurf's permission and hook formats are not verified; approve jubarteai commands as Windsurf asks, and never allow jubarteai alone (it would also pre-approve ${PERSON_COMMAND_LIST})`],
     };
   },
 

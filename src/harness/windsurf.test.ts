@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlanStep } from "../safe-edit/plan.js";
+import { PERSON_COMMANDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { windsurfAdapter } from "./windsurf.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -52,6 +53,11 @@ describe("windsurf adapter", () => {
     const hooks = await windsurfAdapter.hooks(ctx());
     expect(isManual(permission) && permission.reason).toContain("not verified (D25)");
     expect(isManual(permission) && permission.lines.join("\n")).toContain("jubarteai");
+    // No whole-program entry: the caveat names the person commands and puts each one on the deny list.
+    const text = isManual(permission) ? permission.lines.join("\n") : "";
+    expect(text).toContain(PERSON_COMMAND_LIST);
+    for (const command of PERSON_COMMANDS) expect(text).toContain(`"jubarteai ${command}"`);
+    expect(text).not.toMatch(/add the command jubarteai to/i);
     expect(isManual(hooks) && hooks.reason).toContain("not verified (D25)");
     expect(isManual(hooks) && hooks.lines.join("\n")).toContain("--agent");
     expect(isStep(permission) || isStep(hooks)).toBe(false);

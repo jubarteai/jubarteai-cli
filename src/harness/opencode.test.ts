@@ -1,9 +1,9 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PlanStep } from "../safe-edit/plan.js";
-import { AGENT_COMMANDS } from "./agent-commands.js";
+import { AGENT_RULE_WORDS } from "./agent-commands.js";
 import { opencodeAdapter } from "./opencode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -78,7 +78,7 @@ async function manual(): Promise<ManualInstructions> {
   return out;
 }
 
-const PATTERNS = AGENT_COMMANDS.map((command) => `jubarteai ${command}*`);
+const PATTERNS = AGENT_RULE_WORDS.map((word) => `jubarteai ${word}*`);
 const V2_RULES = PATTERNS.map((resource) => ({ action: "shell", resource, effect: "allow" }));
 const V1_BASH = Object.fromEntries(PATTERNS.map((pattern) => [pattern, "allow"]));
 const LEGACY_V2 = { action: "shell", resource: "jubarteai *", effect: "allow" };
@@ -191,6 +191,19 @@ describe.skipIf(!POSIX)("permission, OpenCode 2.x", () => {
     const text = readFileSync(jsonc(), "utf8");
     const again = await (await step()).apply();
     expect(again.status).toBe("skipped");
+    expect(readFileSync(jsonc(), "utf8")).toBe(text);
+  });
+
+  it.skipIf(process.platform === "win32")("reports a refused write as failed even when a conflicting rule was also found (review R-N7)", async () => {
+    stubOpencode("2.1.3");
+    const deny = { action: "shell", resource: "jubarteai connect*", effect: "deny" };
+    put(jsonc(), JSON.stringify({ permissions: [deny] }));
+    // A hard-linked config is never rewritten (it would split the link), so the write is refused.
+    linkSync(jsonc(), join(dirname(jsonc()), "other-link.jsonc"));
+    const text = readFileSync(jsonc(), "utf8");
+    const result = await (await step()).apply();
+    expect(result.status).toBe("failed");
+    expect(result.detail).toContain("could not write");
     expect(readFileSync(jsonc(), "utf8")).toBe(text);
   });
 

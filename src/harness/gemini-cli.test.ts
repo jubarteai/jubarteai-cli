@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PlanStep } from "../safe-edit/plan.js";
-import { AGENT_COMMANDS } from "./agent-commands.js";
+import { AGENT_RULE_WORDS } from "./agent-commands.js";
 import { geminiCliAdapter } from "./gemini-cli.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -42,7 +42,7 @@ function isManual(value: unknown): value is ManualInstructions {
   return typeof value === "object" && value !== null && "kind" in value && value.kind === "manual";
 }
 
-const ENTRIES = AGENT_COMMANDS.map((command) => `run_shell_command(jubarteai ${command})`);
+const ENTRIES = AGENT_RULE_WORDS.map((word) => `run_shell_command(jubarteai ${word})`);
 const LEGACY = "run_shell_command(jubarteai)";
 
 /** Gemini's matcher as documented: a command is approved when some entry's prefix equals it or ends at a word boundary. */

@@ -10,14 +10,14 @@ import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
-import { AGENT_COMMANDS } from "./agent-commands.js";
+import { AGENT_RULE_WORDS } from "./agent-commands.js";
 import { hookCommand as commandFor, hooksPreview, inspectCommandHooks, mergeCommandHooks, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "gemini-cli" as const;
 const SETTINGS_FILE = "settings.json";
-/** One allow entry per agent command; a person command is never listed. */
-const SHELL_TOOL_ENTRIES: readonly string[] = AGENT_COMMANDS.map((command) => `run_shell_command(jubarteai ${command})`);
+/** One allow entry per agent command (and `--help`/`--version`); a person command is never listed. */
+export const SHELL_TOOL_ENTRIES: readonly string[] = AGENT_RULE_WORDS.map((word) => `run_shell_command(jubarteai ${word})`);
 /** Written by an earlier unreleased version: it pre-approves every jubarteai command, the person commands included. */
 const LEGACY_SHELL_TOOL_ENTRY = "run_shell_command(jubarteai)";
 const PERMISSION_LABEL = "Gemini CLI: allow the jubarteai agent commands";

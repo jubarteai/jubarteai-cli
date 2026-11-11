@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { COMMANDS } from "../cli/commands.js";
-import { AGENT_COMMANDS, INFO_FLAGS, PERSON_COMMANDS, agentCommandPattern, commandPattern, personCommandPattern } from "./agent-commands.js";
+import { AGENT_COMMANDS, AGENT_RULE_WORDS, INFO_FLAGS, PERSON_COMMANDS, PERSON_COMMAND_LIST, agentCommandPattern, commandPattern, personCommandPattern } from "./agent-commands.js";
+import { SHELL_TOOL_ENTRIES } from "./gemini-cli.js";
+import { COMMAND_PATTERNS } from "./opencode.js";
 
 const APPROVED = [
   "jubarteai search-knowledge --query x",
@@ -59,5 +61,27 @@ describe("agent and person commands", () => {
   it("escapes the program name", () => {
     expect(new RegExp(commandPattern("a.b", ["x"])).test("aXb x")).toBe(false);
     expect(INFO_FLAGS).toEqual(["--help", "-h", "--version", "-v"]);
+  });
+
+  it("no pre-approvable word is a prefix of a person command (prefix matchers have no word boundary)", () => {
+    // The reverse (update-knowledge starts with update) only makes a prefix-matched deny entry stricter: never an approval.
+    for (const word of AGENT_RULE_WORDS) {
+      for (const person of PERSON_COMMANDS) expect(person.startsWith(word), `${word} / ${person}`).toBe(false);
+    }
+    expect(PERSON_COMMAND_LIST).toBe("login, logout, link, init and update");
+  });
+
+  it("no OpenCode glob matches a person command line (`*` matches any characters, none included)", () => {
+    const glob = (pattern: string): RegExp => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "s");
+    const globs = COMMAND_PATTERNS.map(glob);
+    for (const line of [...PERSON, ...PERSON_COMMANDS.map((c) => `jubarteai ${c}`)]) expect(globs.some((g) => g.test(line)), line).toBe(false);
+    for (const line of APPROVED) expect(globs.some((g) => g.test(line)), line).toBe(true);
+  });
+
+  it("Gemini and OpenCode pre-approve `jubarteai --help` and `--version`, which the skill tells every agent to run", () => {
+    expect(SHELL_TOOL_ENTRIES).toContain("run_shell_command(jubarteai --help)");
+    expect(SHELL_TOOL_ENTRIES).toContain("run_shell_command(jubarteai --version)");
+    expect(COMMAND_PATTERNS).toContain("jubarteai --help*");
+    expect(COMMAND_PATTERNS).toContain("jubarteai --version*");
   });
 });

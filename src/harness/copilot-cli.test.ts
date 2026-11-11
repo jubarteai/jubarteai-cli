@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PlanStep } from "../safe-edit/plan.js";
+import { AGENT_COMMANDS, AGENT_RULE_WORDS, PERSON_COMMANDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { copilotCliAdapter } from "./copilot-cli.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 import { COPILOT_HOOKS_STEP_ID, vscodeAdapter } from "./vscode.js";
@@ -86,14 +87,55 @@ describe("detect", () => {
   });
 });
 
+/** The `shell(...)` rules in a printed line, split into allows and denies. */
+function shellRules(line: string): { allow: string[]; deny: string[] } {
+  const allow = [...line.matchAll(/--allow-tool='shell\(([^)]*)\)'/g)].map((m) => m[1] ?? "");
+  const deny = [...line.matchAll(/--deny-tool='shell\(([^)]*)\)'/g)].map((m) => m[1] ?? "");
+  return { allow, deny };
+}
+
+/**
+ * Copilot CLI's documented rule (GitHub "Allowing tools"): `shell(git push)` matches that first-level subcommand with
+ * any arguments, `shell(git:*)` every subcommand of the stem, and a deny always wins.
+ */
+function copilotApproves(rules: { allow: string[]; deny: string[] }, line: string): boolean {
+  const matches = (rule: string): boolean => (rule.endsWith(":*") ? line === rule.slice(0, -2) || line.startsWith(`${rule.slice(0, -2)} `) : line === rule || line.startsWith(`${rule} `));
+  return rules.allow.some(matches) && !rules.deny.some(matches);
+}
+
 describe("permission", () => {
-  it("is printed instructions naming the --allow-tool flag, never a step", async () => {
+  it("prints flags that allow each agent command and deny each person command, never a step", async () => {
     const out = await copilotCliAdapter.permission(ctx());
     expect(isManual(out)).toBe(true);
     if (!isManual(out)) return;
     expect(out.harness).toBe("copilot-cli");
-    expect(out.lines.join("\n")).toContain("--allow-tool='shell(jubarteai:*)'");
     expect(out.reason).toContain("D25");
+    const start = out.lines.find((line) => line.startsWith("copilot --allow-tool"));
+    const alias = out.lines.find((line) => line.includes('alias copilot="copilot '));
+    if (start === undefined || alias === undefined) throw new Error("expected the start line and the alias");
+    const rules = shellRules(start);
+    // The alias carries exactly the same flags.
+    expect(shellRules(alias)).toEqual(rules);
+    expect(rules.allow).toEqual(AGENT_RULE_WORDS.map((word) => `jubarteai ${word}`));
+    expect(rules.deny).toEqual(PERSON_COMMANDS.map((command) => `jubarteai ${command}`));
+    expect(rules.allow.some((rule) => rule.endsWith(":*"))).toBe(false);
+    for (const command of AGENT_COMMANDS) expect(copilotApproves(rules, `jubarteai ${command} --agent x`), command).toBe(true);
+    expect(copilotApproves(rules, "jubarteai --help")).toBe(true);
+    for (const command of PERSON_COMMANDS) {
+      expect(copilotApproves(rules, `jubarteai ${command}`), command).toBe(false);
+      expect(copilotApproves(rules, `jubarteai ${command} --yes`), command).toBe(false);
+      // Even next to the whole-program allow a person might add, the denies win.
+      expect(copilotApproves({ ...rules, allow: [...rules.allow, "jubarteai:*"] }, `jubarteai ${command} --with-token`), command).toBe(false);
+    }
+  });
+
+  it("warns against a whole-program allow without the denies, naming the person commands", async () => {
+    const out = await copilotCliAdapter.permission(ctx());
+    if (!isManual(out)) throw new Error("expected printed instructions");
+    const text = out.lines.join("\n");
+    expect(text).toContain(PERSON_COMMAND_LIST);
+    const broad = out.lines.find((line) => line.includes("shell(jubarteai:*)"));
+    expect(broad).toMatch(/^Don't use/);
   });
 });
 

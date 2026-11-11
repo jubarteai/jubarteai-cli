@@ -15,6 +15,7 @@ import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import type { HarnessId } from "../session/harness-env.js";
+import { PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { isOurHookCommand } from "./claude-code.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
@@ -160,7 +161,6 @@ const HARNESS = "cursor" as const;
 const LABEL = "Cursor";
 /** The one rule Cursor's syntax offers for this program. Never written: it also covers the person commands. */
 const SHELL_ENTRY = "Shell(jubarteai)";
-const PERSON_COMMAND_LIST = "login, logout, link, init and update";
 /** Cursor's hook timeout is in seconds. sessionEnd is fire-and-forget, so it only needs to be quick. */
 const START_TIMEOUT_S = HOOK_REGISTERED_TIMEOUT_S;
 const END_TIMEOUT_S = 3;

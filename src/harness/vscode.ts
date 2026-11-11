@@ -3,8 +3,11 @@
 //     slashes as a regular expression): the agent commands (connect, search-knowledge, inbox, ...) are approved by name,
 //     and the person commands (login, logout, link, init, update) get an explicit `false`, which VS Code lets win over
 //     any `true`. So the allowlist never pre-approves a command that changes the saved account, the repo binding or
-//     harness files (spec I6, review R-M1), even next to a broad `"jubarteai": true` an older version or the person
-//     added. VS Code sets no environment variable the CLI could detect, so the rule itself is the guard.
+//     harness files (spec I6, review R-M1). The false entry does not neutralise a broad `"jubarteai": true` (an older
+//     version's, or the person's): VS Code matches the raw command text, so a shell-quoted `jubarteai "login"` misses
+//     the false regex and matches the broad key (review R-S10). The exact `"jubarteai": true` key is therefore removed,
+//     as Zed, Gemini and OpenCode remove theirs. VS Code sets no environment variable the CLI could detect, so the rule
+//     itself is the guard.
 //     VS Code's settings.json is often JSONC; a file with comments is never rewritten, the exact entries are printed instead.
 //   - hooks: session start and end only, in ~/.copilot/hooks/jubarteai.json. That one file serves VS Code and Copilot CLI,
 //     so the writer is exported (copilotHooksStep) for the Copilot CLI adapter, which runs it under the same step id.
@@ -31,7 +34,7 @@ import {
   type EditOutcome,
   type Obj,
 } from "./cursor.js";
-import { agentCommandPattern, personCommandPattern } from "./agent-commands.js";
+import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
@@ -103,7 +106,10 @@ function addAutoApprove(doc: Obj): EditOutcome {
   const person = current[PERSON_RULE];
   if (agent !== undefined && agent !== true) return { blocked: `${AUTO_APPROVE_KEY} already has the jubarteai agent-commands rule set to something other than true; left as you set it` };
   if (person !== undefined && person !== false) return { blocked: `${AUTO_APPROVE_KEY} already has the jubarteai person-commands rule set to something other than false; left as you set it` };
-  if (agent === true && person === false) return "same";
+  const legacy = current[LEGACY_RULE] === true;
+  if (agent === true && person === false && !legacy) return "same";
+  // The broad key approves `jubarteai "login" …`, which the false regex can't see; only an exact `true` is ours to drop.
+  if (legacy) delete current[LEGACY_RULE];
   current[AGENT_RULE] = true;
   current[PERSON_RULE] = false;
   return "changed";
@@ -214,16 +220,28 @@ export const vscodeAdapter: HarnessAdapter = {
       manual(
         HARNESS,
         PERMISSION_LABEL,
-        [`Open ${file} (Command Palette: Preferences: Open User Settings (JSON)) and add:`, ...autoApproveJson(), "(merge it into the existing setting; the false entry keeps login, logout, link, init and update asking)"],
+        [
+          `Open ${file} (Command Palette: Preferences: Open User Settings (JSON)) and add:`,
+          ...autoApproveJson(),
+          `(merge it into the existing setting; the false entry keeps ${PERSON_COMMAND_LIST} asking)`,
+          `(and remove a "${LEGACY_RULE}": true entry if there is one: VS Code matches the raw command text, so it would still pre-approve a quoted spelling such as jubarteai "login")`,
+        ],
         reason,
       );
     if (!existsSync(dir)) return printed("VS Code's user settings directory was not found");
     if (readable(file).status === "unwritable") return printed("settings.json has comments or is not plain JSON, so it is not rewritten");
+    const current = readable(file);
+    const rules = current.status === "ok" ? current.doc[AUTO_APPROVE_KEY] : undefined;
+    const legacy = isObject(rules) && rules[LEGACY_RULE] === true;
     return jsonEditStep({
       id: `${HARNESS}:permission`,
       label: PERMISSION_LABEL,
       file,
-      preview: [`  ${AUTO_APPROVE_KEY}["${AGENT_RULE}"]: true   (agent commands: connect, search-knowledge, inbox, ...)`, `  ${AUTO_APPROVE_KEY}["${PERSON_RULE}"]: false  (login, logout, link, init, update keep asking)`].join("\n"),
+      preview: [
+        `  ${AUTO_APPROVE_KEY}["${AGENT_RULE}"]: true   (agent commands: connect, search-knowledge, inbox, ...)`,
+        `  ${AUTO_APPROVE_KEY}["${PERSON_RULE}"]: false  (login, logout, link, init, update keep asking)`,
+        ...(legacy ? [`  removes ${AUTO_APPROVE_KEY}["${LEGACY_RULE}"]: true  (it also pre-approves a quoted spelling such as jubarteai "login")`] : []),
+      ].join("\n"),
       createIfMissing: true,
       edit: addAutoApprove,
     });
@@ -244,7 +262,7 @@ export const vscodeAdapter: HarnessAdapter = {
       if (isObject(rules)) {
         if (rules[AGENT_RULE] === true && rules[PERSON_RULE] === false) permission = "configured";
         if (rules[LEGACY_RULE] === true) {
-          notes.push(`${AUTO_APPROVE_KEY} has a broad "${LEGACY_RULE}": true entry; the false entry for login/logout/link/init/update still keeps those asking, but you can remove the broad one`);
+          notes.push(`${AUTO_APPROVE_KEY} has a broad "${LEGACY_RULE}": true entry, which also pre-approves ${PERSON_COMMAND_LIST} when spelled with quotes (VS Code matches the raw text); re-run \`jubarteai init\` to remove it`);
         }
       }
     }

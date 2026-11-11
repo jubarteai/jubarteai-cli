@@ -59,6 +59,8 @@ function approved(rules: Record<string, boolean>, line: string): boolean {
 
 const AGENT_LINES = ["jubarteai search-knowledge --query x", "jubarteai connect", "jubarteai inbox", "jubarteai --help"];
 const PERSON_LINES = ["jubarteai login --with-token", "jubarteai link --workspace x", "jubarteai init --yes", "jubarteai update", "jubarteai logout", "jubarteai --yes init"];
+/** Spellings the shell turns back into a person command; VS Code sees them as written. */
+const QUOTED_PERSON_LINES = ['jubarteai "login" --with-token', "jubarteai 'init' --yes", "jubarteai lo\\gin --with-token", 'jubarteai "link" --workspace x'];
 
 describe("vscode adapter facts", () => {
   it("declares the verified cells", () => {
@@ -122,16 +124,38 @@ describe("vscode permission", () => {
     expect(JSON.stringify(rules)).not.toContain("(?!");
   });
 
-  it("keeps the person commands asking next to a broad jubarteai: true entry, which is left alone", async () => {
-    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: true } }));
+  it("removes a broad jubarteai: true entry, which would approve a shell-quoted person command, and says so in the preview", async () => {
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: true, git: true } }));
+    // VS Code matches the raw text, so the quoted spelling misses the false regex and the broad key approves it.
+    expect(approved({ jubarteai: true, [AGENT_KEY]: true, [PERSON_KEY]: false }, 'jubarteai "login" --with-token')).toBe(true);
     const step = await vscodeAdapter.permission(ctx());
     if (!isStep(step)) throw new Error("expected a step");
+    expect(step.sensitive).toBe(true);
+    expect(step.preview).toContain('removes chat.tools.terminal.autoApprove["jubarteai"]: true');
     expect((await step.apply()).status).toBe("configured");
     const rules = autoApprove();
-    expect(rules["jubarteai"]).toBe(true);
+    expect(rules).toEqual({ git: true, [AGENT_KEY]: true, [PERSON_KEY]: false });
     for (const line of AGENT_LINES) expect(approved(rules, line), line).toBe(true);
-    // `jubarteai --yes init` is the router's to refuse (no flag before the command name); the broad key the user kept does match it.
-    for (const line of PERSON_LINES.filter((l) => !l.startsWith("jubarteai --yes"))) expect(approved(rules, line), line).toBe(false);
+    for (const line of [...PERSON_LINES, ...QUOTED_PERSON_LINES]) expect(approved(rules, line), line).toBe(false);
+  });
+
+  it("removes the broad entry even when both of ours are already in place", async () => {
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: true, [AGENT_KEY]: true, [PERSON_KEY]: false } }));
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect(step.sensitive).toBe(true);
+    expect((await step.apply()).status).toBe("configured");
+    expect(autoApprove()).toEqual({ [AGENT_KEY]: true, [PERSON_KEY]: false });
+    expect((await step.apply()).status).toBe("already configured");
+  });
+
+  it("leaves a jubarteai key the user set to false alone (only an exact true is removed)", async () => {
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: false } }));
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect(step.preview).not.toContain("removes");
+    await step.apply();
+    expect(autoApprove()).toEqual({ jubarteai: false, [AGENT_KEY]: true, [PERSON_KEY]: false });
   });
 
   it("adds only the missing key when one of the two is already there", async () => {

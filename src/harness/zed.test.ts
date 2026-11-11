@@ -180,7 +180,7 @@ describe("zed hooks and inspect", () => {
     put(settings(), JSON.stringify({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: LEGACY }] } } } } }));
     const state = await zedAdapter.inspect(ctx());
     expect(state.permission).toBe("missing");
-    expect(state.notes.join("\n")).toContain("login, link, init and update");
+    expect(state.notes.join("\n")).toContain("login, logout, link, init and update");
   });
 
   it("reports a JSONC settings file as manual", async () => {

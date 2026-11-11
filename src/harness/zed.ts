@@ -21,7 +21,7 @@ import {
   type EditOutcome,
   type Obj,
 } from "./cursor.js";
-import { agentCommandPattern } from "./agent-commands.js";
+import { PERSON_COMMAND_LIST, agentCommandPattern } from "./agent-commands.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
@@ -119,7 +119,7 @@ export const zedAdapter: HarnessAdapter = {
       return manual(
         HARNESS,
         LABEL_PERMISSION,
-        [`Open ${file} and add:`, ...permissionJson(), "(merge it into the existing agent.tool_permissions setting; if it has a \"^jubarteai\\\\b\" pattern, replace that, it also approves login, link, init and update)"],
+        [`Open ${file} and add:`, ...permissionJson(), `(merge it into the existing agent.tool_permissions setting; ${PERSON_COMMAND_LIST} keep asking. If it has a ${JSON.stringify(LEGACY_PATTERN)} pattern, replace that: it also approves ${PERSON_COMMAND_LIST})`],
         "settings.json has comments or is not plain JSON, so it is not rewritten",
       );
     }
@@ -127,7 +127,7 @@ export const zedAdapter: HarnessAdapter = {
       id: `${HARNESS}:permission`,
       label: LABEL_PERMISSION,
       file,
-      preview: `  agent.tool_permissions.tools.terminal.always_allow += { "pattern": ${JSON.stringify(ALLOW_PATTERN)} }   (agent commands only: login, logout, link, init, update keep asking)\n  an earlier "${LEGACY_PATTERN}" entry, if present, is replaced: it also approved login, link, init and update`,
+      preview: `  agent.tool_permissions.tools.terminal.always_allow += { "pattern": ${JSON.stringify(ALLOW_PATTERN)} }   (agent commands only: login, logout, link, init, update keep asking)\n  an earlier "${LEGACY_PATTERN}" entry, if present, is replaced: it also approved ${PERSON_COMMAND_LIST}`,
       createIfMissing: true,
       edit: addPermission,
     });
@@ -154,7 +154,7 @@ export const zedAdapter: HarnessAdapter = {
       const list = alwaysAllow(read.doc);
       if (Array.isArray(list)) {
         if (list.some(isRule)) permission = "configured";
-        if (list.some(isLegacyRule)) notes.push(`always_allow still has the "${LEGACY_PATTERN}" pattern, which also approves login, link, init and update; re-run \`jubarteai init\` to replace it`);
+        if (list.some(isLegacyRule)) notes.push(`always_allow still has the "${LEGACY_PATTERN}" pattern, which also approves ${PERSON_COMMAND_LIST}; re-run \`jubarteai init\` to replace it`);
       }
     }
     return { permission, hooks: "manual", mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };
