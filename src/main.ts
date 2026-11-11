@@ -1,37 +1,30 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const HELP = `jubarteai - command-line interface for JubarteAI
+import { route } from "./cli/router.js";
+import { takeEnvToken } from "./process-env.js";
 
-Usage:
-  jubarteai [options]
+let brokenPipeHandled = false;
 
-Options:
-  --version   Print the version
-  --help      Print this help
-`;
-
-function readVersion(): string {
-  const manifest = new URL("../package.json", import.meta.url);
-  const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
-  if (typeof parsed === "object" && parsed !== null && "version" in parsed && typeof parsed.version === "string") {
-    return parsed.version;
-  }
-  throw new Error("package.json has no version");
+/** `jubarteai … | head` closes stdout early; that is not an error worth a stack trace. */
+function ignoreBrokenPipe(): void {
+  if (brokenPipeHandled) return;
+  brokenPipeHandled = true;
+  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
 }
 
 export async function main(argv: string[]): Promise<number> {
-  const [first] = argv;
-  if (first === undefined || first === "--help" || first === "-h") {
-    process.stdout.write(HELP);
-    return 0;
-  }
-  if (first === "--version" || first === "-v") {
-    process.stdout.write(`${readVersion()}\n`);
-    return 0;
-  }
-  process.stderr.write(`Unknown argument: ${first}\nRun "jubarteai --help" for usage.\n`);
-  return 2;
+  // Take the key out of process.env before any command can start a child process.
+  takeEnvToken();
+  ignoreBrokenPipe();
+  return route(argv, {
+    stdout: process.stdout,
+    stderr: process.stderr,
+    stdin: process.stdin,
+    cwd: process.cwd(),
+  });
 }
 
 function isEntry(): boolean {
