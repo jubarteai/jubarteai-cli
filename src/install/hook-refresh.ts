@@ -7,7 +7,9 @@
 // program, timeout or duplicates differ (mergeCommandHooks and its siblings), and it is sensitive with the exact entries
 // as its preview, like init's. What this module adds is the restriction: only an adapter whose hooks are present but
 // stale is touched. An adapter with no hooks of ours, or with only some of the events registered, is init's to
-// finish (update adds no entries), and an adapter that can only print instructions gets the `init` hint instead.
+// finish (update adds no session entries), and an adapter that can only print instructions gets the `init` hint instead.
+// One exception: the shared Copilot file's step writes its entries as a set, so refreshing it also adds the deny-only
+// preToolUse guard when it is missing (a file from before the guard); the step stays sensitive and previews it.
 import { ownHookEvents, ownHookRegistered } from "../hooks/events.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import type { HarnessAdapter, InitCtx, ManualInstructions } from "../harness/types.js";

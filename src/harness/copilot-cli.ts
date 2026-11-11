@@ -4,19 +4,21 @@
 // session approval of one command approves every command with that name. So `--allow-tool='shell(jubarteai
 // search-knowledge)'` most likely matches nothing, and a `--deny-tool='shell(jubarteai login)'` can't be trusted to keep
 // login out of a session or repository approval of jubarteai. Copilot CLI sets no environment variable the CLI could
-// detect, so nothing on the CLI side refuses login, link, init, update or logout either (spec I6). The printed lines
-// are therefore Cursor's: approve each jubarteai command once, and know that a session or repository approval, a
-// whole-program `shell(jubarteai:*)`, `--allow-all-tools` and `--yolo` also approve the person commands. Unverified
-// on a real Copilot CLI; if subcommand matching is confirmed for any program, per-command flags can come back.
-// Hooks are session start
-// and end only, in the same ~/.copilot/hooks/jubarteai.json that VS Code uses: the shared writer in vscode.ts does the
-// write (through editJsonFile, I6), so this module writes nothing itself. Per-prompt injection is unsupported (the
-// `userPromptSubmitted` output is dropped). install.sh never wrote a Copilot CLI MCP entry, so there is nothing to clean.
+// detect, so the `jubarteai` commands themselves can't refuse login, link, init, update or logout either (spec I6).
+// The guard is the deny-only `preToolUse` hook the shared hooks step registers (review R-S12): GitHub documents that
+// a hook's deny blocks the call whatever was approved, so a session or repository approval, a whole-program
+// `shell(jubarteai:*)`, `--allow-all-tools` or `--yolo` no longer lets an agent run the five. It is best effort (a
+// script file or a variable hides a command), so the printed lines still say to approve each jubarteai command once.
+// Unverified on a real Copilot CLI; if subcommand matching is confirmed for any program, per-command flags can come back.
+// Hooks are session start, session end and the guard, in the same ~/.copilot/hooks/jubarteai.json that VS Code uses:
+// the shared writer in vscode.ts does the write (through editJsonFile, I6), so this module writes nothing itself.
+// Per-prompt injection is unsupported (the `userPromptSubmitted` output is dropped). install.sh never wrote a Copilot
+// CLI MCP entry, so there is nothing to clean.
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { PlanStep } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
-import { copilotHooksPlan, copilotHooksState } from "./vscode.js";
+import { GUARD_MISSING_NOTE, copilotGuardMissing, copilotHooksPlan, copilotHooksState } from "./vscode.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "copilot-cli" as const;
@@ -47,8 +49,9 @@ export const copilotCliAdapter: HarnessAdapter = {
       title: "GitHub Copilot CLI: approve jubarteai commands one at a time",
       lines: [
         `Copilot CLI approves programs other than git and gh by name, so approving any jubarteai command for the session or for this repository also approves ${PERSON_COMMAND_LIST}: the commands that change your saved account, the repo binding and your harness files.`,
+        `The session hooks step also registers a preToolUse guard in ~/.copilot/hooks/jubarteai.json that denies an agent's shell call naming ${PERSON_COMMAND_LIST}, whatever was approved. It approves nothing, and it is best effort: a command hidden in a script file or a variable gets past it.`,
         "The CLI therefore prints no Copilot CLI allow flags. When Copilot CLI asks before a jubarteai command, approve that one command, not every jubarteai command for the session or the repository.",
-        `--allow-tool='shell(jubarteai)', --allow-tool='shell(jubarteai:*)', --allow-all-tools and --yolo also pre-approve ${PERSON_COMMAND_LIST}, and Copilot CLI sets no variable the CLI can use to refuse them: run those five yourself in a terminal.`,
+        `--allow-tool='shell(jubarteai)', --allow-tool='shell(jubarteai:*)', --allow-all-tools and --yolo also pre-approve ${PERSON_COMMAND_LIST}, leaving only the guard in the way: run those five yourself in a terminal.`,
       ],
       reason: "Copilot CLI matches a shell rule by subcommand only for git and gh, so no rule can approve the agent commands without the person commands (D25, review R-M4)",
       rules: [],
@@ -60,15 +63,12 @@ export const copilotCliAdapter: HarnessAdapter = {
   },
 
   async inspect(ctx: InitCtx): Promise<AdapterState> {
-    return {
-      permission: "manual",
-      hooks: copilotHooksState(ctx),
-      mcpEntries: [],
-      notes: [
-        "Copilot CLI has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill",
-        `no permission rule is written or printed: approve each jubarteai command once when Copilot CLI asks; a session or repository approval of jubarteai also approves ${PERSON_COMMAND_LIST}`,
-      ],
-    };
+    const notes = [
+      "Copilot CLI has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill",
+      `no permission rule is written or printed: approve each jubarteai command once when Copilot CLI asks; a session or repository approval of jubarteai also approves ${PERSON_COMMAND_LIST}, which only the preToolUse guard then denies`,
+    ];
+    if (copilotGuardMissing(ctx)) notes.push(GUARD_MISSING_NOTE);
+    return { permission: "manual", hooks: copilotHooksState(ctx), mcpEntries: [], notes };
   },
 
   // install.sh never wrote a Copilot CLI MCP entry.

@@ -6,7 +6,7 @@ import type { PlanStep } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { copilotCliAdapter } from "./copilot-cli.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
-import { COPILOT_HOOKS_STEP_ID, vscodeAdapter } from "./vscode.js";
+import { COPILOT_HOOKS_STEP_ID, GUARD_MISSING_NOTE, vscodeAdapter } from "./vscode.js";
 
 let root: string;
 let home: string;
@@ -114,10 +114,19 @@ describe("permission", () => {
     // No sentence suggests a broad approval is safe with some other flag in place.
     expect(out.lines.join("\n")).not.toMatch(/without those/);
   });
+
+  it("names the preToolUse guard as best effort, never as a reason to approve broadly (review R-S12)", async () => {
+    const out = await copilotCliAdapter.permission(ctx());
+    if (!isManual(out)) throw new Error("expected printed instructions");
+    const guard = out.lines.find((line) => line.includes("preToolUse"));
+    expect(guard).toContain("approves nothing");
+    expect(guard).toContain("best effort");
+    expect(out.lines.join("\n")).toContain("approve that one command");
+  });
 });
 
 describe("hooks (the shared ~/.copilot/hooks/jubarteai.json)", () => {
-  it("returns the shared step under the shared id and writes session start and end only", async () => {
+  it("returns the shared step under the shared id and writes session start, session end and the preToolUse guard", async () => {
     const step = await hookStep();
     expect(step.id).toBe(COPILOT_HOOKS_STEP_ID);
     expect(step.sensitive).toBe(true);
@@ -125,7 +134,8 @@ describe("hooks (the shared ~/.copilot/hooks/jubarteai.json)", () => {
     expect((await step.apply()).status).toBe("configured");
     const doc = read(hooksFile());
     const hooks = doc["hooks"] as Record<string, Array<{ command: string }>>;
-    expect(Object.keys(hooks).sort()).toEqual(["sessionEnd", "sessionStart"]);
+    expect(Object.keys(hooks).sort()).toEqual(["preToolUse", "sessionEnd", "sessionStart"]);
+    expect((hooks["preToolUse"]?.[0] as unknown as { bash: string }).bash).toContain("hook pre-tool-use --harness vscode || true");
     expect(hooks["sessionStart"]?.[0]?.command).toContain("hook session-start --harness");
     expect(hooks["sessionEnd"]?.[0]?.command).toContain("hook session-end --harness");
     const before = readFileSync(hooksFile(), "utf8");
@@ -171,6 +181,13 @@ describe("inspect", () => {
     expect((await copilotCliAdapter.inspect(ctx())).hooks).toBe("partial");
     put(hooksFile(), "{ // c\n}");
     expect((await copilotCliAdapter.inspect(ctx())).hooks).toBe("manual");
+  });
+
+  it("notes a hook file that has the session hooks but not the guard", async () => {
+    put(hooksFile(), JSON.stringify({ version: 1, hooks: { sessionStart: [{ type: "command", command: "jubarteai hook session-start --harness vscode", timeoutSec: 8 }] } }));
+    expect((await copilotCliAdapter.inspect(ctx())).notes).toContain(GUARD_MISSING_NOTE);
+    await (await hookStep()).apply();
+    expect((await copilotCliAdapter.inspect(ctx())).notes).not.toContain(GUARD_MISSING_NOTE);
   });
 
   it("notes that there is no per-prompt injection", async () => {

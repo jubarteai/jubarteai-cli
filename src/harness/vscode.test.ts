@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
-import { COPILOT_HOOKS_STEP_ID, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
+import { spawnSync } from "node:child_process";
+import { COPILOT_HOOKS_STEP_ID, GUARD_MISSING_NOTE, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
 let home: string;
@@ -48,6 +49,14 @@ async function applyAll(steps: Array<PlanStep | ManualInstructions>): Promise<St
 const AGENT_KEY = `/${agentCommandPattern()}/`;
 const PERSON_KEY = `/${personCommandPattern()}/`;
 const AUTO_APPROVE = "chat.tools.terminal.autoApprove";
+/** The preToolUse guard entry init writes for `program`. */
+const GUARD = (program: string): Record<string, unknown> => ({
+  type: "command",
+  matcher: "bash|powershell",
+  bash: `${program} hook pre-tool-use --harness vscode || true`,
+  powershell: `try { & ${program === "jubarteai" ? "jubarteai.cmd" : program} hook pre-tool-use --harness vscode } catch { }; exit 0`,
+  timeoutSec: 8,
+});
 const autoApprove = (): Record<string, boolean> => readJson(settings())[AUTO_APPROVE] as Record<string, boolean>;
 
 /** VS Code's rule: a `/regex/` key is a regular expression, any other key matches the command word; a false match wins over a true one. */
@@ -214,7 +223,7 @@ describe("vscode permission", () => {
 });
 
 describe("vscode hooks (the shared Copilot file)", () => {
-  it("writes sessionStart and sessionEnd only, with timeoutSec, and no per-prompt hook", async () => {
+  it("writes sessionStart, sessionEnd and the preToolUse guard, with timeoutSec, and no per-prompt hook", async () => {
     const steps = await vscodeAdapter.hooks(ctx());
     if (steps === null || isManual(steps)) throw new Error("expected steps");
     expect(steps).toHaveLength(1);
@@ -224,7 +233,8 @@ describe("vscode hooks (the shared Copilot file)", () => {
     const doc = readJson(hooksFile());
     expect(doc["version"]).toBe(1);
     const hooks = doc["hooks"] as Record<string, Array<Record<string, unknown>>>;
-    expect(Object.keys(hooks).sort()).toEqual(["sessionEnd", "sessionStart"]);
+    expect(Object.keys(hooks).sort()).toEqual(["preToolUse", "sessionEnd", "sessionStart"]);
+    expect(hooks["preToolUse"]).toEqual([GUARD("jubarteai")]);
     expect(hooks["sessionStart"]).toEqual([{ type: "command", command: "jubarteai hook session-start --harness vscode", timeoutSec: 8 }]);
     expect(hooks["sessionEnd"]?.[0]?.["command"]).toBe("jubarteai hook session-end --harness vscode");
   });
@@ -238,7 +248,8 @@ describe("vscode hooks (the shared Copilot file)", () => {
     expect((await step.apply()).status).toBe("already configured");
     expect(read(hooksFile())).toBe(once);
     const hooks = readJson(hooksFile())["hooks"] as Record<string, unknown>;
-    expect(hooks["preToolUse"]).toEqual([{ type: "command", command: "./guard.sh" }]);
+    // Another tool's preToolUse entry stays first; ours is appended after it.
+    expect(hooks["preToolUse"]).toEqual([{ type: "command", command: "./guard.sh" }, GUARD("jubarteai")]);
     expect(copilotHooksState(ctx())).toBe("configured");
   });
 
@@ -258,6 +269,7 @@ describe("vscode hooks (the shared Copilot file)", () => {
     const hooks = readJson(hooksFile())["hooks"] as Record<string, unknown>;
     expect(hooks["sessionStart"]).toEqual([{ type: "command", command: `${program("/new/node")} hook session-start --harness vscode`, timeoutSec: 8 }]);
     expect(hooks["sessionEnd"]).toEqual([{ type: "command", command: `${program("/new/node")} hook session-end --harness vscode`, timeoutSec: 3 }]);
+    expect(hooks["preToolUse"]).toEqual([GUARD(program("/new/node"))]);
     expect(copilotHooksState(ctx({ hookCommand: program("/new/node") }))).toBe("configured");
   });
 
@@ -276,6 +288,62 @@ describe("vscode hooks (the shared Copilot file)", () => {
     expect(isManual(plan) && plan.lines.join("\n")).toContain("jubarteai hook session-start --harness vscode");
     expect(read(hooksFile())).toBe(text);
     expect(copilotHooksState(ctx())).toBe("manual");
+  });
+});
+
+describe("the preToolUse guard in the shared Copilot file (review R-S12)", () => {
+  const SESSION_ONLY = {
+    version: 1,
+    hooks: {
+      sessionStart: [{ type: "command", command: "jubarteai hook session-start --harness vscode", timeoutSec: 8 }],
+      sessionEnd: [{ type: "command", command: "jubarteai hook session-end --harness vscode", timeoutSec: 3 }],
+    },
+  };
+
+  it("a file with the session hooks only is partial, doctor notes the missing guard, and init adds it", async () => {
+    put(hooksFile(), JSON.stringify(SESSION_ONLY, null, 2) + "\n");
+    expect(copilotHooksState(ctx())).toBe("partial");
+    expect((await vscodeAdapter.inspect(ctx())).notes).toContain(GUARD_MISSING_NOTE);
+    const step = copilotHooksStep(ctx());
+    expect(step.sensitive).toBe(true);
+    expect(step.preview).toContain("hooks.preToolUse: jubarteai hook pre-tool-use --harness vscode");
+    expect((await step.apply()).status).toBe("configured");
+    expect((readJson(hooksFile())["hooks"] as Record<string, unknown>)["preToolUse"]).toEqual([GUARD("jubarteai")]);
+    expect(copilotHooksState(ctx())).toBe("configured");
+    expect((await vscodeAdapter.inspect(ctx())).notes).not.toContain(GUARD_MISSING_NOTE);
+  });
+
+  it("no guard note when there is no hook file of ours at all (the hooks state says missing)", async () => {
+    expect((await vscodeAdapter.inspect(ctx())).notes).not.toContain(GUARD_MISSING_NOTE);
+  });
+
+  it("drops a second copy of ours and rewrites a stale one in place, keeping other tools' entries", async () => {
+    const other = { type: "command", bash: "./audit.sh", matcher: "bash" };
+    const stale = { ...GUARD('"/old/node" "/x/jubarteai.js"'), timeoutSec: 30 };
+    put(hooksFile(), JSON.stringify({ ...SESSION_ONLY, hooks: { ...SESSION_ONLY.hooks, preToolUse: [stale, other, GUARD("jubarteai")] } }));
+    expect(copilotHooksState(ctx())).toBe("partial");
+    expect((await copilotHooksStep(ctx()).apply()).status).toBe("configured");
+    expect((readJson(hooksFile())["hooks"] as Record<string, unknown>)["preToolUse"]).toEqual([GUARD("jubarteai"), other]);
+  });
+
+  it("refuses to merge into a preToolUse that is not a list", async () => {
+    put(hooksFile(), JSON.stringify({ version: 1, hooks: { preToolUse: { type: "command" } } }));
+    const result = await copilotHooksStep(ctx()).apply();
+    expect(result.status).toBe("skipped");
+    expect(result.detail).toContain("hooks.preToolUse");
+  });
+
+  it("the printed entry (a file with comments) carries the guard too", async () => {
+    put(hooksFile(), '{ // mine\n "version": 1 }\n');
+    const plan = copilotHooksPlan(ctx(), "vscode");
+    expect(isManual(plan) && plan.lines.join("\n")).toContain("hook pre-tool-use --harness vscode || true");
+  });
+
+  it.skipIf(process.platform === "win32")("its bash command exits 0 with no output when the program is gone, so a lost Node never blocks every tool call", () => {
+    const bash = GUARD('"/nonexistent/node" "/nonexistent/jubarteai.js"')["bash"] as string;
+    const run = spawnSync("/bin/bash", ["-c", bash], { input: JSON.stringify({ toolName: "bash", toolArgs: '{"command":"jubarteai login"}' }), encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe("");
   });
 });
 

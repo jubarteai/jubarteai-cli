@@ -7,10 +7,12 @@
 // than a lone --help/-h/--version), so the command name is always the second word and a per-command rule can't be
 // slipped past with `jubarteai --yes init`.
 //
-// A harness whose rule syntax can only name the whole program (Cursor's `Shell(jubarteai)`), or whose matching is not
-// verified (Windsurf), gets no written rule: the person decides from printed lines that say what a whole-program rule
-// would also approve (PERSON_COMMAND_LIST). A printed rule, like a written one, names agent commands only
-// (AGENT_RULE_WORDS) or denies the person commands; a table test over every adapter holds them to that.
+// A harness whose rule syntax can only name the whole program (Cursor's `Shell(jubarteai)`), that matches programs other
+// than git and gh by name (Copilot CLI), or whose matching is not verified (Windsurf), gets no written rule: the person
+// decides from printed lines that say what a whole-program rule would also approve (PERSON_COMMAND_LIST). Copilot CLI
+// prints no rule at all; its guard is the deny-only preToolUse hook (hooks/tool-guard.ts). A printed rule, like a
+// written one, names agent commands only (AGENT_RULE_WORDS) or denies the person commands; a table test over every
+// adapter holds them to that.
 import { TOOL_SPECS } from "../mcp/tool-specs.js";
 
 /** The commands that change the saved account, the repo binding or harness files: never pre-approved. */
@@ -29,7 +31,7 @@ export const AGENT_COMMANDS: readonly string[] = Object.freeze([...TOOL_SPECS.ma
 export const INFO_FLAGS = ["--help", "-h", "--version", "-v"] as const;
 
 /**
- * The words a per-command allow entry (Gemini, OpenCode, Copilot CLI) names after the program: each agent command, then
+ * The words a per-command allow entry (Gemini, OpenCode) names after the program: each agent command, then
  * the long info flags. `jubarteai --help` is what the skill tells every agent to run first; the router answers a lone
  * info flag before any command runs, so approving it approves nothing else.
  */

@@ -1,12 +1,14 @@
 // `jubarteai hook <event> --harness <id>` (spec §6.3): the command `init` registers in each harness's
 // hook file. Reads the harness's JSON from stdin, never prompts, never prints a key, and always exits 0
-// (I7): whatever goes wrong, the harness carries on.
+// (I7): whatever goes wrong, the harness carries on. `pre-tool-use` is the deny-only guard of the shared Copilot hook
+// file (hooks/tool-guard.ts): no network, no session, and always one JSON object on stdout.
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { ARG_INPUT_MAX_BYTES, HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
 import { SESSION_END_NETWORK_TIMEOUT_MS, parseHookEvent, runHookEvent } from "../hooks/events.js";
 import type { HookRuntime } from "../hooks/events.js";
 import { harnessFromHint, parseHookInput } from "../hooks/input.js";
+import { PRE_TOOL_USE, toolGuardDecision } from "../hooks/tool-guard.js";
 import { callTool } from "../mcp/client.js";
 
 export type HookDeps = {
@@ -27,14 +29,19 @@ function defaultDeps(): HookDeps {
   };
 }
 
-/** All of stdin as text, or "" when it is a terminal, too large, unreadable, or `signal` aborts first. */
-function readAllStdin(stream: NodeJS.ReadableStream, signal: AbortSignal): Promise<string> {
-  if ((stream as { isTTY?: boolean }).isTTY === true || signal.aborted) return Promise.resolve("");
+type StdinRead = { text: string; overflow: boolean };
+
+/**
+ * All of stdin as text ("" when it is a terminal, unreadable, or `signal` aborts first). Past ARG_INPUT_MAX_BYTES it
+ * stops reading and returns what it has with `overflow` set: the session events drop it, the guard scans the prefix.
+ */
+function readAllStdin(stream: NodeJS.ReadableStream, signal: AbortSignal): Promise<StdinRead> {
+  if ((stream as { isTTY?: boolean }).isTTY === true || signal.aborted) return Promise.resolve({ text: "", overflow: false });
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let total = 0;
     let settled = false;
-    const finish = (text: string): void => {
+    const finish = (read: StdinRead): void => {
       if (settled) return;
       settled = true;
       stream.off("data", onData);
@@ -42,17 +49,21 @@ function readAllStdin(stream: NodeJS.ReadableStream, signal: AbortSignal): Promi
       stream.off("error", onError);
       signal.removeEventListener("abort", onAbort);
       stream.pause();
-      resolve(text);
+      resolve(read);
     };
+    const text = (): string => Buffer.concat(chunks).toString("utf8");
     const onData = (chunk: Buffer | string): void => {
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      const room = ARG_INPUT_MAX_BYTES - total;
       total += bytes.length;
-      if (total > ARG_INPUT_MAX_BYTES) finish("");
-      else chunks.push(bytes);
+      if (total > ARG_INPUT_MAX_BYTES) {
+        if (room > 0) chunks.push(bytes.subarray(0, room));
+        finish({ text: text(), overflow: true });
+      } else chunks.push(bytes);
     };
-    const onEnd = (): void => finish(Buffer.concat(chunks).toString("utf8"));
-    const onError = (): void => finish("");
-    const onAbort = (): void => finish("");
+    const onEnd = (): void => finish({ text: text(), overflow: false });
+    const onError = (): void => finish({ text: "", overflow: false });
+    const onAbort = (): void => finish({ text: "", overflow: false });
     stream.on("data", onData);
     stream.on("end", onEnd);
     stream.on("error", onError);
@@ -68,6 +79,10 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), deps.budgetMs);
   try {
+    if (args.positionals[0] === PRE_TOOL_USE) {
+      await runToolGuard(ctx, controller.signal);
+      return 0;
+    }
     const event = parseHookEvent(args.positionals[0]);
     if (event === null) return 0;
     const hint = harnessFromHint(args.flags["harness"]);
@@ -78,8 +93,8 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
       signal: controller.signal,
     };
     const work = (async (): Promise<string> => {
-      const raw = await readAllStdin(ctx.stdin, controller.signal);
-      return runHookEvent(parseHookInput(raw, hint, event, deps.env, ctx.cwd), runtime);
+      const read = await readAllStdin(ctx.stdin, controller.signal);
+      return runHookEvent(parseHookInput(read.overflow ? "" : read.text, hint, event, deps.env, ctx.cwd), runtime);
     })().catch(() => "");
     const expired = new Promise<string>((resolve) => {
       controller.signal.addEventListener("abort", () => resolve(""), { once: true });
@@ -94,11 +109,27 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
   return 0;
 }
 
+/**
+ * The guard: always exactly one JSON object on stdout, `{}` (no decision) unless the call runs a person command. A
+ * read that the budget cuts short is `{}` too: a timeout lets the call through the normal permission flow, as the
+ * harness itself does when a hook times out.
+ */
+async function runToolGuard(ctx: CommandContext, signal: AbortSignal): Promise<void> {
+  let out = "{}";
+  try {
+    const read = await readAllStdin(ctx.stdin, signal);
+    if (!signal.aborted) out = JSON.stringify(toolGuardDecision(read.text, read.overflow));
+  } catch {
+    // Never block a call the guard couldn't read.
+  }
+  ctx.stdout.write(`${out}\n`);
+}
+
 export const hookCommand: CommandDef = {
   name: "hook",
   summary: "Run a harness hook (internal; registered by init)",
   group: "internal",
-  usage: "hook <session-start|user-prompt-submit|session-end> [--harness <id>]",
+  usage: "hook <session-start|user-prompt-submit|session-end|pre-tool-use> [--harness <id>]",
   flags: [{ name: "harness", type: "string", description: "The harness that registered the hook (a hint; the detected one wins)" }],
   run: (ctx, args) => runHook(ctx, args),
 };

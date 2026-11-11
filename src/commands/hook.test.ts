@@ -213,7 +213,7 @@ describe("never fails the harness (exit 0)", () => {
   });
 
   it("an unknown or missing event", async () => {
-    expect(await hook("pre-tool-use", startPayload())).toEqual({ code: 0, out: "", err: "" });
+    expect(await hook("post-tool-use", startPayload())).toEqual({ code: 0, out: "", err: "" });
     expect(await hook(undefined, startPayload())).toEqual({ code: 0, out: "", err: "" });
   });
 
@@ -358,5 +358,49 @@ describe("detection and per-harness output", () => {
     const result = await hook("session-start", startPayload());
     expect(result.out).toContain("JubarteAI messages: ");
     expectNoSecrets(result.out + result.err, [FAKE_KEY]);
+  });
+});
+
+describe("pre-tool-use (the shared Copilot file's guard)", () => {
+  const call = (command: string, toolName = "bash"): Record<string, unknown> => ({ sessionId: "s", cwd: sandbox.repo, toolName, toolArgs: JSON.stringify({ command }) });
+
+  it("denies a shell call that runs a person command, with no binding, no login and no request", async () => {
+    const s = await server();
+    const result = await hook("pre-tool-use", call("jubarteai inbox && jubarteai \"login\" --with-token"), { harness: "vscode" });
+    expect(result.code).toBe(0);
+    expect(result.err).toBe("");
+    const out = JSON.parse(result.out) as Record<string, unknown>;
+    expect(out["permissionDecision"]).toBe("deny");
+    expect(out["permissionDecisionReason"]).toContain("jubarteai login");
+    expect(s.requests).toHaveLength(0);
+  });
+
+  it("prints {} (no decision) for an agent command, another tool, empty or broken stdin", async () => {
+    for (const stdin of [call("jubarteai inbox --agent x"), { toolName: "edit", toolArgs: { new_str: "jubarteai login" } }, "", "{", "[]"]) {
+      expect(await hook("pre-tool-use", stdin, { harness: "vscode" }), JSON.stringify(stdin)).toEqual({ code: 0, out: "{}\n", err: "" });
+    }
+  });
+
+  it("routes through the real router and prints exactly one JSON object", async () => {
+    const out = capture();
+    const err = capture();
+    const stdin = new PassThrough();
+    stdin.end(JSON.stringify(call("jubarteai init --yes")));
+    const code = await routeWith([hookCommand], ["hook", "pre-tool-use", "--harness", "vscode"], { stdout: out.stream, stderr: err.stream, stdin, cwd: sandbox.repo });
+    expect(code).toBe(0);
+    expect(err.text()).toBe("");
+    expect(out.text().trim().split("\n")).toHaveLength(1);
+    expect(JSON.parse(out.text())).toMatchObject({ permissionDecision: "deny" });
+  });
+
+  it("scans an oversized payload's prefix instead of dropping it", async () => {
+    const big = JSON.stringify(call(`jubarteai logout; echo ${"x".repeat(1024 * 1024 + 10)}`));
+    const result = await hook("pre-tool-use", big, { harness: "vscode" });
+    expect(JSON.parse(result.out)).toMatchObject({ permissionDecision: "deny" });
+  });
+
+  it("a stdin that never closes is cut at the budget with no decision, so the harness's normal flow decides", async () => {
+    const result = await hook("pre-tool-use", null, { harness: "vscode", deps: { budgetMs: 50 } });
+    expect(result).toEqual({ code: 0, out: "{}\n", err: "" });
   });
 });

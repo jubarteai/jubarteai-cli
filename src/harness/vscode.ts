@@ -9,15 +9,19 @@
 //     as Zed, Gemini and OpenCode remove theirs. VS Code sets no environment variable the CLI could detect, so the rule
 //     itself is the guard.
 //     VS Code's settings.json is often JSONC; a file with comments is never rewritten, the exact entries are printed instead.
-//   - hooks: session start and end only, in ~/.copilot/hooks/jubarteai.json. That one file serves VS Code and Copilot CLI,
-//     so the writer is exported (copilotHooksStep) for the Copilot CLI adapter, which runs it under the same step id.
+//   - hooks: session start and end, plus a deny-only `preToolUse` guard, in ~/.copilot/hooks/jubarteai.json. That one file
+//     serves VS Code and Copilot CLI, so the writer is exported (copilotHooksStep) for the Copilot CLI adapter, which runs
+//     it under the same step id. The guard (`hook pre-tool-use`, hooks/tool-guard.ts) answers a deny for a shell call that
+//     names login, logout, link, init or update, which GitHub documents as blocking the call whatever was approved
+//     (review R-S12). A `preToolUse` command hook that errors denies every call, so the guard's command ends in
+//     `|| true` (`try … catch …; exit 0` in PowerShell): a jubarteai lost from PATH after a Node switch fails open.
 //     There is no per-prompt hook that can add context (`userPromptSubmitted` output is dropped): promptInjection false.
 //   - MCP cleanup: the user-profile mcp.json of each VS Code build (and its profiles) and .vscode/mcp.json,
 //     `servers.jubarteai`, through mcp-cleanup.ts (C6a).
 // Every write goes through editJsonFile (I6), via the shared helpers in cursor.ts.
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
+import { CLI_NAME, HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import type { PlanStep } from "../safe-edit/plan.js";
 import type { HarnessId } from "../session/harness-env.js";
 import {
@@ -34,6 +38,7 @@ import {
   type EditOutcome,
   type Obj,
 } from "./cursor.js";
+import { PRE_TOOL_USE, SHELL_TOOL_MATCHER } from "../hooks/tool-guard.js";
 import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
@@ -65,6 +70,10 @@ const EVENTS: ReadonlyArray<{ copilot: string; event: "session-start" | "session
   { copilot: "sessionStart", event: "session-start", timeoutS: START_TIMEOUT_S },
   { copilot: "sessionEnd", event: "session-end", timeoutS: END_TIMEOUT_S },
 ];
+
+/** The guard's event key. A timeout lets the call through the normal permission flow (GitHub), so it gets the full start budget. */
+const GUARD_KEY = "preToolUse";
+const GUARD_TIMEOUT_S = HOOK_REGISTERED_TIMEOUT_S;
 
 // ---- paths -------------------------------------------------------------------------------------------------------
 
@@ -134,6 +143,68 @@ function wantedHook(program: string, event: "session-start" | "session-end", tim
   return { type: "command", command: hookCommand(program, event, COPILOT_HINT), timeoutSec: timeoutS };
 }
 
+/** The guard's command line, without the fail-open wrapper: `<program> hook pre-tool-use --harness vscode`. */
+function guardCall(program: string): string {
+  return `${program} hook ${PRE_TOOL_USE} --harness ${COPILOT_HINT}`;
+}
+
+/**
+ * The guard entry. `bash` and `powershell` each end so the hook exits 0 even when the program is gone (a non-zero
+ * `preToolUse` exit denies every tool call); `& ` lets PowerShell run a quoted program path as well as the bare name.
+ * On Windows the program is always the bare name (cliCommandInfo), and PowerShell would pick npm's `jubarteai.ps1`
+ * shim, which the default execution policy blocks; the guard names `jubarteai.cmd` there so it actually runs.
+ * `matcher` keeps every other tool call from starting a process in Copilot CLI; the guard checks the tool name itself
+ * too, for a harness that ignores the matcher.
+ */
+function wantedGuard(program: string): Obj {
+  const windowsProgram = program === CLI_NAME ? `${CLI_NAME}.cmd` : program;
+  return {
+    type: "command",
+    matcher: SHELL_TOOL_MATCHER,
+    bash: `${guardCall(program)} || true`,
+    powershell: `try { & ${guardCall(windowsProgram)} } catch { }; exit 0`,
+    timeoutSec: GUARD_TIMEOUT_S,
+  };
+}
+
+/** Whether a `preToolUse` entry is our guard: its `bash` field is `<program> hook pre-tool-use --harness vscode || true`, any program. */
+function isOurGuard(entry: unknown): entry is Obj {
+  if (!isObject(entry) || typeof entry["bash"] !== "string") return false;
+  const tail = new RegExp(`\\s+hook\\s+${PRE_TOOL_USE}\\s+--harness\\s+${COPILOT_HINT}\\s*\\|\\|\\s*true\\s*$`).exec(entry["bash"]);
+  return tail !== null && entry["bash"].slice(0, tail.index).trim() !== "";
+}
+
+/** Put the guard into the `preToolUse` list: appended when absent, else written over our first entry, further copies dropped. */
+function mergeGuard(entries: unknown[], wanted: Obj): boolean {
+  const ours = entries.filter(isOurGuard);
+  const first = ours[0];
+  if (first === undefined) {
+    entries.push(wanted);
+    return true;
+  }
+  let changed = false;
+  for (const [key, value] of Object.entries(wanted)) {
+    if (first[key] !== value) {
+      first[key] = value;
+      changed = true;
+    }
+  }
+  if (ours.length > 1) {
+    const dupes = new Set<unknown>(ours.slice(1));
+    entries.splice(0, entries.length, ...entries.filter((e) => !dupes.has(e)));
+    changed = true;
+  }
+  return changed;
+}
+
+function guardState(entries: unknown, wanted: Obj): "exact" | "stale" | "none" {
+  if (!Array.isArray(entries)) return "none";
+  const ours = entries.filter(isOurGuard);
+  const first = ours[0];
+  if (first === undefined) return "none";
+  return ours.length === 1 && Object.entries(wanted).every(([key, value]) => first[key] === value) ? "exact" : "stale";
+}
+
 /** The context the shared hook file is planned with; hooks use `hookCommand ?? cliCommand` (hookProgram). */
 type CopilotCtx = Pick<InitCtx, "home" | "env" | "cliCommand" | "hookCommand">;
 
@@ -141,7 +212,7 @@ function addCopilotHooks(doc: Obj, program: string): EditOutcome {
   const hooksValue = doc["hooks"];
   if (hooksValue !== undefined && !isObject(hooksValue)) return { blocked: "hooks in jubarteai.json is not an object; add the entries by hand" };
   const hooks: Obj = hooksValue ?? {};
-  for (const { copilot } of EVENTS) {
+  for (const copilot of [...EVENTS.map((e) => e.copilot), GUARD_KEY]) {
     if (hooks[copilot] !== undefined && !Array.isArray(hooks[copilot])) return { blocked: `hooks.${copilot} in jubarteai.json is not a list; add the entry by hand` };
   }
   let changed = false;
@@ -149,6 +220,11 @@ function addCopilotHooks(doc: Obj, program: string): EditOutcome {
     const entries: unknown[] = Array.isArray(hooks[copilot]) ? hooks[copilot] : [];
     if (!mergeFlatHook(entries, wantedHook(program, event, timeoutS), event, COPILOT_HINT)) continue;
     hooks[copilot] = entries;
+    changed = true;
+  }
+  const guards: unknown[] = Array.isArray(hooks[GUARD_KEY]) ? hooks[GUARD_KEY] : [];
+  if (mergeGuard(guards, wantedGuard(program))) {
+    hooks[GUARD_KEY] = guards;
     changed = true;
   }
   if (!changed) return "same";
@@ -160,20 +236,25 @@ function addCopilotHooks(doc: Obj, program: string): EditOutcome {
 function copilotHooksJson(program: string): string[] {
   const hooks: Obj = {};
   for (const { copilot, event, timeoutS } of EVENTS) hooks[copilot] = [wantedHook(program, event, timeoutS)];
+  hooks[GUARD_KEY] = [wantedGuard(program)];
   return JSON.stringify({ version: 1, hooks }, null, 2).split("\n");
 }
 
 /**
- * The one step that writes ~/.copilot/hooks/jubarteai.json (`$COPILOT_HOME/hooks/` when set), `sessionStart` and `sessionEnd`.
+ * The one step that writes ~/.copilot/hooks/jubarteai.json (`$COPILOT_HOME/hooks/` when set): `sessionStart`,
+ * `sessionEnd` and the `preToolUse` guard.
  * VS Code and Copilot CLI both return it with the same id (COPILOT_HOOKS_STEP_ID), so the caller runs it once.
  */
 export function copilotHooksStep(ctx: CopilotCtx): PlanStep {
   const program = hookProgram(ctx);
   return jsonEditStep({
     id: COPILOT_HOOKS_STEP_ID,
-    label: "GitHub Copilot (VS Code and Copilot CLI): session hooks",
+    label: "GitHub Copilot (VS Code and Copilot CLI): session hooks and the guard that denies an agent login, logout, link, init and update",
     file: copilotHooksFile(ctx),
-    preview: EVENTS.map((e) => `  hooks.${e.copilot}: ${hookCommand(program, e.event, COPILOT_HINT)}`).join("\n"),
+    preview: [
+      ...EVENTS.map((e) => `  hooks.${e.copilot}: ${hookCommand(program, e.event, COPILOT_HINT)}`),
+      `  hooks.${GUARD_KEY}: ${guardCall(program)}  (shell calls only; denies ${PERSON_COMMAND_LIST}, never approves anything)`,
+    ].join("\n"),
     createIfMissing: true,
     edit: (doc) => addCopilotHooks(doc, program),
   });
@@ -185,21 +266,45 @@ export function copilotHooksPlan(ctx: CopilotCtx, harness: HarnessId): PlanStep[
   if (readable(file).status === "unwritable") {
     return manual(
       harness,
-      "GitHub Copilot: session hooks",
-      [`Open ${file} and add:`, ...copilotHooksJson(hookProgram(ctx)), "(merge it into the existing hooks key)"],
+      "GitHub Copilot: session hooks and the agent-command guard",
+      [
+        `Open ${file} and add:`,
+        ...copilotHooksJson(hookProgram(ctx)),
+        `(merge it into the existing hooks key; the preToolUse entry denies an agent's ${PERSON_COMMAND_LIST} and approves nothing)`,
+      ],
       "jubarteai.json has comments or is not plain JSON, so it is not rewritten",
     );
   }
   return [copilotHooksStep(ctx)];
 }
 
-/** Whether the shared hook file holds exactly our two entries (read-only, for doctor). */
+/** Whether the shared hook file holds exactly our three entries (read-only, for doctor and update's refresh). */
 export function copilotHooksState(ctx: CopilotCtx): AdapterState["hooks"] {
   const file = readable(copilotHooksFile(ctx));
   if (file.status === "unwritable") return "manual";
   const section = file.status === "ok" ? file.doc["hooks"] : undefined;
+  const at = (key: string): unknown => (isObject(section) ? section[key] : undefined);
   const program = hookProgram(ctx);
-  return hooksStateOf(EVENTS.map(({ copilot, event, timeoutS }) => flatHookState(isObject(section) ? section[copilot] : undefined, wantedHook(program, event, timeoutS), event, COPILOT_HINT)));
+  return hooksStateOf([
+    ...EVENTS.map(({ copilot, event, timeoutS }) => flatHookState(at(copilot), wantedHook(program, event, timeoutS), event, COPILOT_HINT)),
+    guardState(at(GUARD_KEY), wantedGuard(program)),
+  ]);
+}
+
+/** Doctor's note (VS Code and Copilot CLI) when the shared hook file has no guard of ours. */
+export const GUARD_MISSING_NOTE = `the preToolUse guard that denies an agent's ${PERSON_COMMAND_LIST} is not in ~/.copilot/hooks/jubarteai.json; run \`jubarteai init\` to add it`;
+
+/**
+ * Whether the shared hook file holds our session hooks but not the guard (read-only, for doctor's note): a file
+ * written before the guard existed, or one the person edited. A missing or unreadable file is reported by the hooks state.
+ */
+export function copilotGuardMissing(ctx: CopilotCtx): boolean {
+  const file = readable(copilotHooksFile(ctx));
+  if (file.status !== "ok" || !isObject(file.doc["hooks"])) return false;
+  const section = file.doc["hooks"];
+  const program = hookProgram(ctx);
+  const hasSession = EVENTS.some(({ copilot, event, timeoutS }) => flatHookState(section[copilot], wantedHook(program, event, timeoutS), event, COPILOT_HINT) !== "none");
+  return hasSession && guardState(section[GUARD_KEY], wantedGuard(program)) === "none";
 }
 
 // ---- adapter -----------------------------------------------------------------------------------------------------
@@ -281,6 +386,7 @@ export const vscodeAdapter: HarnessAdapter = {
         }
       }
     }
+    if (copilotGuardMissing(ctx)) notes.push(GUARD_MISSING_NOTE);
     return { permission, hooks: copilotHooksState(ctx), mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };
   },
 

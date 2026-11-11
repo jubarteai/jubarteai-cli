@@ -1,7 +1,7 @@
 // `init` and `update` through the built binary, with recording stubs for npx, npm, claude and codex on PATH:
 // what gets written (binding, AGENTS.md section, Claude Code settings, Codex), what gets removed (MCP entries),
 // that a second run changes nothing, and that update reports a stale section with exit 2.
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -141,6 +141,30 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       expect(started.stdout).toMatch(/Your JubarteAI agent_id is [0-9a-f-]{36}/);
       expect(fake.agents).toHaveLength(1);
       expect(fake.agents[0]?.description).toBe("claude-code on acme-app");
+    });
+
+    test("with Copilot present, init registers the preToolUse guard, and its own command denies an agent's login but not inbox (review R-S12)", async () => {
+      mkdirSync(join(box.home, ".copilot"), { recursive: true });
+      await box.signInWithKey(fake);
+      const result = await box.run(["init", "--yes"]);
+      expect(result.code, result.stderr).toBe(0);
+      const doc = box.readJson(join(box.home, ".copilot", "hooks", "jubarteai.json")) as { hooks: Record<string, Array<Record<string, unknown>>> };
+      const guard = doc.hooks["preToolUse"]?.[0];
+      expect(guard).toMatchObject({ type: "command", matcher: "bash|powershell", timeoutSec: 8 });
+      const bash = guard?.["bash"] as string;
+      expect(bash).toMatch(/ hook pre-tool-use --harness vscode \|\| true$/);
+
+      const callsBefore = fake.toolCalls().length;
+      const payload = (command: string): string => JSON.stringify({ sessionId: "s", timestamp: 1, cwd: box.repo, toolName: "bash", toolArgs: JSON.stringify({ command }) });
+      const login = await box.runShell(bash, { stdin: payload("echo jba_x | jubarteai \"login\" --with-token") });
+      expect(login.code).toBe(0);
+      expect(login.stderr).toBe("");
+      expect(JSON.parse(login.stdout)).toMatchObject({ permissionDecision: "deny" });
+      const inbox = await box.runShell(bash, { stdin: payload("jubarteai inbox --agent 11111111-1111-4111-8111-111111111111") });
+      expect(inbox.code).toBe(0);
+      expect(JSON.parse(inbox.stdout)).toEqual({});
+      // The guard never calls the server.
+      expect(fake.toolCalls()).toHaveLength(callsBefore);
     });
 
     test("a second init changes nothing: every line says already configured and no file differs", async () => {
