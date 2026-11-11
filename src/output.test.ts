@@ -38,6 +38,32 @@ describe("writeJson", () => {
   });
 });
 
+describe("writeJson terminal-active characters", () => {
+  const envelope = {
+    messages: [{ content: "clip \u009d52;c;ZXZpbA==\u009c title \u009b2J" }],
+    result: { text: "rtl \u202eevil\u202c iso \u2066x\u2069 marks \u200e\u200f sep \u2028\u2029 del \u007f", nested: ["\u0085"] },
+  };
+  const RAW = /[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/;
+
+  it.each([false, true])("escapes them and still parses to the same value (pretty=%s)", (pretty) => {
+    const out = collect();
+    writeJson(out.stream, envelope, { pretty });
+    const text = out.text();
+    expect(text).not.toMatch(RAW);
+    expect(text).toContain("\\u009b");
+    expect(text).toContain("\\u202e");
+    expect(text).toContain("\\u2028");
+    expect(JSON.parse(text)).toEqual(envelope);
+    if (!pretty) expect(text.split("\n")).toHaveLength(2);
+  });
+
+  it("leaves ordinary non-ASCII text raw", () => {
+    const out = collect();
+    writeJson(out.stream, { text: "sök ñ 日本" }, { pretty: false });
+    expect(out.text()).toBe('{"text":"sök ñ 日本"}\n');
+  });
+});
+
 describe("transportErrorEnvelope", () => {
   it("has messages first, then error and code", () => {
     const envelope = transportErrorEnvelope("network_error", "Could not reach JubarteAI.");

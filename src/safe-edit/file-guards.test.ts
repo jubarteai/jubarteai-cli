@@ -244,6 +244,36 @@ describe.skipIf(isWindows)("assertSafeTarget withinHome (a user-managed config, 
     expect(assertSafeTarget(config, { allowMissing: false, withinHome: true })).toEqual({ ok: false, reason: "missing" });
   });
 
+  it("a HOME that is itself a symlink (macOS /var -> /private/var) works with directories not created yet; a link out of the real home is still refused", () => {
+    const realHome = path.join(root, "realhome");
+    fs.mkdirSync(realHome);
+    const linkedHome = path.join(root, "linkedhome");
+    fs.symlinkSync(realHome, linkedHome);
+    process.env.HOME = linkedHome;
+
+    // ~/.gemini does not exist, and HOME is not realpath'd.
+    const missing = path.join(linkedHome, ".gemini", "settings.json");
+    expect(assertSafeTarget(missing, { allowMissing: true, withinHome: true })).toEqual({ ok: true });
+    expect(realTarget(missing, defaultGuardEnv().fs)).toBe(path.join(realHome, ".gemini", "settings.json"));
+    // Deeper still, and with the directory there.
+    expect(assertSafeTarget(path.join(linkedHome, "a", "b", "c.json"), { allowMissing: true, withinHome: true })).toEqual({ ok: true });
+    fs.mkdirSync(path.join(realHome, ".gemini"));
+    expect(assertSafeTarget(missing, { allowMissing: true, withinHome: true })).toEqual({ ok: true });
+
+    // A link inside home that points outside the real home is still refused, existing or not below it.
+    const outside = path.join(root, "outside");
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, path.join(linkedHome, "escape"));
+    expect(assertSafeTarget(path.join(linkedHome, "escape", "x.json"), { allowMissing: true, withinHome: true })).toEqual({
+      ok: false,
+      reason: "outside-home",
+    });
+    expect(assertSafeTarget(path.join(linkedHome, "escape", "new", "x.json"), { allowMissing: true, withinHome: true })).toEqual({
+      ok: false,
+      reason: "outside-home",
+    });
+  });
+
   it("refuses a link that leaves the home directory, however it gets there", () => {
     const outside = write(path.join(root, "outside", "mcp.json"));
     const direct = path.join(home, "direct.json");

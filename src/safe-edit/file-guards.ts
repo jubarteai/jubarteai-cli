@@ -112,10 +112,19 @@ export function realTarget(start: string, fs: GuardFs): string {
     }
     p = path.resolve(dir, link);
   }
-  try {
-    return path.join(fs.realpathSync(path.dirname(p)), path.basename(p));
-  } catch {
-    return p;
+  // The nearest ancestor that exists is resolved, and what is missing below it
+  // is appended, so a path under a symlinked home (macOS /var -> /private/var)
+  // comes out in the same real form as realpath(home) even when its own
+  // directories are not created yet.
+  const rest: string[] = [path.basename(p)];
+  for (let dir = path.dirname(p); ; dir = path.dirname(dir)) {
+    try {
+      return path.join(fs.realpathSync(dir), ...rest);
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) return p;
+      rest.unshift(path.basename(dir));
+    }
   }
 }
 

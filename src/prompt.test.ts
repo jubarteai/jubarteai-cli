@@ -182,6 +182,51 @@ describe("promptHidden", () => {
     expect(await promptHidden("Key:")).toBeNull();
     expect(tty.rawCalls()).toEqual([true, false]);
   });
+
+  it("an aborted signal resolves null, removes its listeners, restores raw mode and closes the terminal", async () => {
+    const tty = fakeTty();
+    const controller = new AbortController();
+    const pending = promptHidden("Key:", { signal: controller.signal });
+    expect(tty.input.listenerCount("data")).toBe(1);
+    controller.abort();
+    expect(await pending).toBeNull();
+    expect(tty.input.listenerCount("data")).toBe(0);
+    expect(tty.input.listenerCount("end")).toBe(0);
+    expect(tty.rawCalls()).toEqual([true, false]);
+    expect(tty.closes()).toBe(1);
+    // Typing afterwards goes nowhere.
+    tty.input.write("late\r");
+  });
+
+  it("an already-aborted signal never opens the terminal", async () => {
+    const tty = fakeTty();
+    const controller = new AbortController();
+    controller.abort();
+    expect(await promptHidden("Key:", { signal: controller.signal })).toBeNull();
+    expect(await promptLine("Name?", { signal: controller.signal })).toBeNull();
+    expect(tty.shown()).toBe("");
+    expect(tty.rawCalls()).toEqual([]);
+  });
+
+  it("an answer typed before the abort still wins and leaves no abort listener behind", async () => {
+    const tty = fakeTty();
+    const controller = new AbortController();
+    tty.input.write("typed\r");
+    expect(await promptHidden("Key:", { signal: controller.signal })).toBe("typed");
+    controller.abort();
+    expect(tty.rawCalls()).toEqual([true, false]);
+  });
+});
+
+describe("promptLine signal", () => {
+  it("an aborted signal resolves null and removes the listeners", async () => {
+    const tty = fakeTty();
+    const controller = new AbortController();
+    const pending = promptLine("Name?", { signal: controller.signal });
+    controller.abort();
+    expect(await pending).toBeNull();
+    expect(tty.input.listenerCount("data")).toBe(0);
+  });
 });
 
 describe("choose", () => {

@@ -79,8 +79,12 @@ export function isInteractive(): boolean {
   return true;
 }
 
-/** Reads one line. Never echoes: the terminal does that in cooked mode, and `hidden` switches to raw mode. */
-function readLine(handle: TtyHandle, hidden: boolean): Promise<string | null> {
+/**
+ * Reads one line. Never echoes: the terminal does that in cooked mode, and `hidden` switches to raw mode.
+ * An aborted `signal` runs the same cleanup as an answer (listeners removed, raw mode restored, input
+ * paused) and resolves null.
+ */
+function readLine(handle: TtyHandle, hidden: boolean, signal?: AbortSignal): Promise<string | null> {
   const input = handle.input;
   return new Promise((resolve, reject) => {
     const raw = hidden && typeof input.setRawMode === "function";
@@ -89,6 +93,7 @@ function readLine(handle: TtyHandle, hidden: boolean): Promise<string | null> {
     let settled = false;
 
     const cleanup = (): void => {
+      signal?.removeEventListener("abort", onAbort);
       input.removeListener("data", onData);
       input.removeListener("end", onEnd);
       input.removeListener("close", onEnd);
@@ -103,6 +108,7 @@ function readLine(handle: TtyHandle, hidden: boolean): Promise<string | null> {
       finish();
     };
     const onEnd = (): void => settle(() => resolve(line.length > 0 ? line : null));
+    const onAbort = (): void => settle(() => resolve(null));
 
     function onData(chunk: string | Buffer): void {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
@@ -164,6 +170,13 @@ function readLine(handle: TtyHandle, hidden: boolean): Promise<string | null> {
     input.on("end", onEnd);
     input.on("close", onEnd);
     input.on("error", onEnd);
+    if (signal !== undefined) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
     if (raw) input.setRawMode?.(true);
     input.resume();
   });
@@ -198,22 +211,24 @@ export async function confirm(question: string, opts: { defaultYes: boolean }): 
 }
 
 /** One visible line. Empty answer → the default (or "" without one). Without a TTY → `default ?? null`. */
-export async function promptLine(question: string, opts: { default?: string } = {}): Promise<string | null> {
+export async function promptLine(question: string, opts: { default?: string; signal?: AbortSignal } = {}): Promise<string | null> {
+  if (opts.signal?.aborted === true) return null;
   return withTerminal<string | null>(opts.default ?? null, async (handle) => {
     const suffix = opts.default !== undefined ? ` (${opts.default})` : "";
     handle.output.write(`${question}${suffix} `);
-    const answer = await readLine(handle, false);
+    const answer = await readLine(handle, false, opts.signal);
     if (answer === null) return opts.default ?? null;
     const trimmed = answer.trim();
     return trimmed === "" ? (opts.default ?? "") : trimmed;
   });
 }
 
-/** One line without echo, for secrets (ends trimmed). Without a TTY → null. */
-export async function promptHidden(question: string): Promise<string | null> {
+/** One line without echo, for secrets (ends trimmed). Without a TTY, or once `signal` aborts → null. */
+export async function promptHidden(question: string, opts: { signal?: AbortSignal } = {}): Promise<string | null> {
+  if (opts.signal?.aborted === true) return null;
   return withTerminal<string | null>(null, async (handle) => {
     handle.output.write(`${question} `);
-    const answer = await readLine(handle, true);
+    const answer = await readLine(handle, true, opts.signal);
     return answer === null ? null : answer.trim();
   });
 }
