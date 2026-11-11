@@ -50,6 +50,12 @@ async function applyAll(c: InitCtx): Promise<StepResult[]> {
   return applyPlan(steps, { tty: false, yes: true, out: sink });
 }
 
+const ASK_BASH = [
+  ...["login", "logout", "link", "init", "update"].flatMap((sub) => [`Bash(jubarteai ${sub})`, `Bash(jubarteai ${sub} *)`]),
+  "Bash(jubarteai -*)",
+];
+const ASK_POWERSHELL = ASK_BASH.map((rule) => rule.replace(/^Bash/, "PowerShell"));
+
 const COMMANDS = {
   SessionStart: "jubarteai hook session-start --harness claude-code",
   UserPromptSubmit: "jubarteai hook user-prompt-submit --harness claude-code",
@@ -61,7 +67,7 @@ describe("permission and hooks", () => {
     const results = await applyAll(ctx());
     expect(results.map((r) => r.status)).toEqual(["configured", "configured"]);
     const doc = readSettings();
-    expect(doc["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"] });
+    expect(doc["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"], ask: ASK_BASH });
     const hooks = doc["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
     expect(Object.keys(hooks)).toEqual(["SessionStart", "UserPromptSubmit", "SessionEnd"]);
     expect(hooks["SessionStart"]).toEqual([{ hooks: [{ type: "command", command: COMMANDS.SessionStart, timeout: 8 }] }]);
@@ -79,7 +85,7 @@ describe("permission and hooks", () => {
     await applyAll(ctx());
     const doc = readSettings();
     expect(doc["theme"]).toBe("dark");
-    expect(doc["permissions"]).toEqual({ allow: ["Bash(git status)", "Bash(jubarteai *)"], deny: ["Read(.env)"] });
+    expect(doc["permissions"]).toEqual({ allow: ["Bash(git status)", "Bash(jubarteai *)"], deny: ["Read(.env)"], ask: ASK_BASH });
     const hooks = doc["hooks"] as Record<string, unknown[]>;
     expect(hooks["SessionStart"]).toEqual([theirs, { hooks: [{ type: "command", command: COMMANDS.SessionStart, timeout: 8 }] }]);
     expect(hooks["PreToolUse"]).toEqual([theirs]);
@@ -116,7 +122,7 @@ describe("permission and hooks", () => {
     const program = '"/usr/local/bin/node" "/opt/jubarteai/bin/jubarteai.js"';
     await applyAll(ctx({ hookCommand: program }));
     const doc = readSettings();
-    expect(doc["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"] });
+    expect(doc["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"], ask: ASK_BASH });
     const hooks = doc["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
     expect(hooks["SessionStart"]?.[0]?.hooks[0]?.["command"]).toBe(`${program} hook session-start --harness claude-code`);
     expect(JSON.stringify(doc["permissions"])).not.toContain("node");
@@ -187,17 +193,34 @@ describe("permission and hooks", () => {
     }
   });
 
-  it("the equivalent Bash(jubarteai:*) rule counts as configured", async () => {
-    writeSettings({ permissions: { allow: ["Bash(jubarteai:*)"] } });
+  it("the equivalent Bash(jubarteai:*) rules count as configured", async () => {
+    const askColon = ASK_BASH.map((rule) => rule.replace(/ \*\)$/, ":*)"));
+    writeSettings({ permissions: { allow: ["Bash(jubarteai:*)"], ask: askColon } });
     const perm = await claudeCodeAdapter.permission(ctx());
     expect(isStep(perm) && perm.sensitive).toBe(false);
     await applyAll(ctx());
-    expect((readSettings()["permissions"] as { allow: string[] }).allow).toEqual(["Bash(jubarteai:*)"]);
+    expect(readSettings()["permissions"]).toEqual({ allow: ["Bash(jubarteai:*)"], ask: askColon });
+  });
+
+  it("an older allow-only setup is not done: the ask rules are added, nothing else changes (R-M1)", async () => {
+    writeSettings({ permissions: { allow: ["Bash(jubarteai *)"], ask: ["Bash(rm *)"] } });
+    const perm = await claudeCodeAdapter.permission(ctx());
+    expect(isStep(perm) && perm.sensitive).toBe(true);
+    expect(await claudeCodeAdapter.inspect(ctx())).toMatchObject({ permission: "missing" });
+    await applyAll(ctx());
+    expect(readSettings()["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"], ask: ["Bash(rm *)", ...ASK_BASH] });
+    const again = await applyAll(ctx());
+    expect(again.find((r) => r.id === "claude-code:permission")?.status).toBe("already configured");
+  });
+
+  it("a permissions.ask that is not a list gives manual instructions", async () => {
+    writeSettings({ permissions: { ask: "Bash(*)" } });
+    expect(await claudeCodeAdapter.permission(ctx())).toMatchObject({ kind: "manual" });
   });
 
   it("on Windows the PowerShell rule is added too", async () => {
     await applyAll(ctx({ platform: "win32" }));
-    expect((readSettings()["permissions"] as { allow: string[] }).allow).toEqual(["Bash(jubarteai *)", "PowerShell(jubarteai *)"]);
+    expect(readSettings()["permissions"]).toEqual({ allow: ["Bash(jubarteai *)", "PowerShell(jubarteai *)"], ask: [...ASK_BASH, ...ASK_POWERSHELL] });
   });
 
   it("CLAUDE_CONFIG_DIR moves settings.json", async () => {
@@ -212,7 +235,7 @@ describe("permission and hooks", () => {
     const perm = (await claudeCodeAdapter.permission(ctx())) as PlanStep;
     const [hooks] = (await claudeCodeAdapter.hooks(ctx())) as PlanStep[];
     expect(perm.sensitive).toBe(true);
-    expect(JSON.parse(perm.preview ?? "")).toEqual({ permissions: { allow: ["Bash(jubarteai *)"] } });
+    expect(JSON.parse(perm.preview ?? "")).toEqual({ permissions: { allow: ["Bash(jubarteai *)"], ask: ASK_BASH } });
     expect(hooks?.sensitive).toBe(true);
     expect(JSON.parse(hooks?.preview ?? "").hooks.SessionEnd[0].hooks[0].timeout).toBe(5);
     expect(perm.files).toEqual([settings()]);

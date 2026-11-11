@@ -221,40 +221,74 @@ export function editResult(id: string, label: string, result: ReturnType<typeof 
 
 // ---- Claude Code --------------------------------------------------------------------------------------------
 
-function permissionRules(ctx: { cliCommand: string; platform: NodeJS.Platform }): string[] {
-  const rules = [`Bash(${ctx.cliCommand} *)`];
-  if (ctx.platform === "win32") rules.push(`PowerShell(${ctx.cliCommand} *)`);
-  return rules;
+/**
+ * The subcommands that change the saved account, the repo binding or harness files. The allow rule would pre-approve
+ * them too, letting an agent pass `--yes` or pipe a key on its own (spec I6, review R-M1), so each gets an ask rule:
+ * in Claude Code ask beats allow, and the person sees the command before it runs. The tool commands stay pre-approved.
+ */
+export const ASK_SUBCOMMANDS = ["login", "logout", "link", "init", "update"] as const;
+
+type PermissionRules = { allow: string[]; ask: string[] };
+
+function permissionRules(ctx: { cliCommand: string; platform: NodeJS.Platform }): PermissionRules {
+  const tools = ctx.platform === "win32" ? ["Bash", "PowerShell"] : ["Bash"];
+  const allow = tools.map((tool) => `${tool}(${ctx.cliCommand} *)`);
+  const ask = tools.flatMap((tool) => [
+    ...ASK_SUBCOMMANDS.flatMap((sub) => [`${tool}(${ctx.cliCommand} ${sub})`, `${tool}(${ctx.cliCommand} ${sub} *)`]),
+    // A global flag may come before the subcommand (`jubarteai --yes init`): nothing documented starts with one, so any
+    // command that does asks first rather than slipping past the rules above.
+    `${tool}(${ctx.cliCommand} -*)`,
+  ]);
+  return { allow, ask };
 }
 
 /** `Bash(jubarteai *)` and `Bash(jubarteai:*)` are the same rule to Claude Code. */
-function hasRule(allow: unknown[], rule: string): boolean {
+function hasRule(list: unknown[], rule: string): boolean {
   const colon = rule.replace(/ \*\)$/, ":*)");
-  return allow.some((r) => r === rule || r === colon);
+  return list.some((r) => r === rule || r === colon);
+}
+
+function ruleList(permissions: unknown, key: "allow" | "ask"): unknown[] | undefined {
+  if (!isObject(permissions)) return undefined;
+  const list = permissions[key];
+  return Array.isArray(list) ? (list as unknown[]) : undefined;
+}
+
+/** Every allow and every ask rule is in place. */
+function hasRules(permissions: unknown, rules: PermissionRules): boolean {
+  const allow = ruleList(permissions, "allow") ?? [];
+  const ask = ruleList(permissions, "ask") ?? [];
+  return rules.allow.every((r) => hasRule(allow, r)) && rules.ask.every((r) => hasRule(ask, r));
 }
 
 function permissionConflict(doc: Record<string, unknown>): string | null {
   const permissions = doc["permissions"];
   if (permissions === undefined) return null;
   if (!isObject(permissions)) return "permissions is not an object";
-  if (permissions["allow"] !== undefined && !Array.isArray(permissions["allow"])) return "permissions.allow is not a list";
+  for (const key of ["allow", "ask"] as const) {
+    if (permissions[key] !== undefined && !Array.isArray(permissions[key])) return `permissions.${key} is not a list`;
+  }
   return null;
 }
 
-function addRules(doc: Record<string, unknown>, rules: string[]): boolean {
+function addRules(doc: Record<string, unknown>, rules: PermissionRules): boolean {
   const permissions = isObject(doc["permissions"]) ? doc["permissions"] : {};
-  const allow = Array.isArray(permissions["allow"]) ? (permissions["allow"] as unknown[]) : [];
-  let changed = !isObject(doc["permissions"]) || !Array.isArray(permissions["allow"]);
-  for (const rule of rules) {
-    if (!hasRule(allow, rule)) {
-      allow.push(rule);
+  let changed = !isObject(doc["permissions"]);
+  for (const key of ["allow", "ask"] as const) {
+    const list = Array.isArray(permissions[key]) ? (permissions[key] as unknown[]) : [];
+    let listChanged = !Array.isArray(permissions[key]);
+    for (const rule of rules[key]) {
+      if (!hasRule(list, rule)) {
+        list.push(rule);
+        listChanged = true;
+      }
+    }
+    if (listChanged) {
+      permissions[key] = list;
       changed = true;
     }
   }
-  if (changed) {
-    permissions["allow"] = allow;
-    doc["permissions"] = permissions;
-  }
+  if (changed) doc["permissions"] = permissions;
   return changed;
 }
 
@@ -302,22 +336,18 @@ async function permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions |
   const rules = permissionRules(ctx);
   const settings = readSettings(file);
   const id = `${ID}:permission`;
-  const label = `Allow ${rules.join(" and ")} in ${shownPath(file, ctx.home)}`;
-  const entries = JSON.stringify({ permissions: { allow: rules } }, null, 2);
+  const label = `Allow ${rules.allow.join(" and ")} in ${shownPath(file, ctx.home)}, asking first for ${ASK_SUBCOMMANDS.join(", ")}`;
+  const entries = JSON.stringify({ permissions: { allow: rules.allow, ask: rules.ask } }, null, 2);
+  const addLine = `add ${rules.allow.map((r) => `"${r}"`).join(", ")} to permissions.allow and ${rules.ask.map((r) => `"${r}"`).join(", ")} to permissions.ask`;
   if (settings.status === "unreadable") return unreadableInstructions(ID, file, ctx.home, "Claude Code permission");
   if (settings.status === "bad") {
-    return manualSettings(ctx, file, "Claude Code permission", [`add ${rules.map((r) => `"${r}"`).join(", ")} to permissions.allow:`, ...entries.split("\n")], `${shownPath(file, ctx.home)}: ${settings.reason}`);
+    return manualSettings(ctx, file, "Claude Code permission", [`${addLine}:`, ...entries.split("\n")], `${shownPath(file, ctx.home)}: ${settings.reason}`);
   }
   if (settings.status === "ok") {
     const conflict = permissionConflict(settings.doc);
-    if (conflict !== null) return manualSettings(ctx, file, "Claude Code permission", [`add ${rules.map((r) => `"${r}"`).join(", ")} to permissions.allow`], `${shownPath(file, ctx.home)}: ${conflict}`);
+    if (conflict !== null) return manualSettings(ctx, file, "Claude Code permission", [addLine], `${shownPath(file, ctx.home)}: ${conflict}`);
   }
-  const done =
-    settings.status === "ok" &&
-    (() => {
-      const allow = isObject(settings.doc["permissions"]) ? settings.doc["permissions"]["allow"] : undefined;
-      return Array.isArray(allow) && rules.every((r) => hasRule(allow, r));
-    })();
+  const done = settings.status === "ok" && hasRules(settings.doc["permissions"], rules);
   return {
     id,
     label,
@@ -371,8 +401,7 @@ async function inspect(ctx: InitCtx): Promise<AdapterState> {
   }
   if (settings.status === "missing") return { permission: "missing", hooks: "missing", mcpEntries, notes };
   const permissions = settings.doc["permissions"];
-  const allow = isObject(permissions) && Array.isArray(permissions["allow"]) ? (permissions["allow"] as unknown[]) : [];
-  const configured = permissionRules(ctx).every((r) => hasRule(allow, r));
+  const configured = hasRules(permissions, permissionRules(ctx));
   if (isObject(permissions) && Array.isArray(permissions["deny"]) && permissions["deny"].some((r) => typeof r === "string" && /^Bash\(\s*jubarteai\b/.test(r))) {
     notes.push("a deny rule for jubarteai overrides the allow rule");
   }

@@ -1,9 +1,17 @@
+import { refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { loginFlow, loginWithToken } from "../auth/login-flow.js";
+import type { StoredSeat } from "../auth/credentials.js";
+import { digestsEqual, keyDigest } from "../auth/key-digest.js";
+import { MCP_PATH } from "../constants.js";
 import { UsageError } from "../errors.js";
-import { promptHidden } from "../prompt.js";
+import { codexUpdateStep, codexUserFile, readCodexEntry } from "../harness/codex-entry.js";
+import { CODEX_REVOKED_HINT } from "../install/init-copy.js";
+import { homeDir } from "../paths.js";
+import { promptHidden, isInteractive } from "../prompt.js";
 import { envOrigin } from "../process-env.js";
+import { applyPlan, summarize } from "../safe-edit/plan.js";
 
 // `jubarteai login` (spec section 5.5). The key of `--with-token` is read from stdin or a hidden
 // prompt, never from argv.
@@ -65,6 +73,29 @@ async function readKey(ctx: CommandContext): Promise<string> {
   return entered;
 }
 
+/**
+ * The login just revoked the key it replaced. When Codex's user-level MCP entry (init's D5 fallback) holds that very
+ * key, every Codex call would now fail with a revoked key, so offer the same update init does (its own prompt, default
+ * yes; `--yes` applies it outside an agent's shell). Whenever the entry is left as it is (no terminal and no --yes,
+ * declined, skipped, failed) a fixed hint says how to fix it. Keys are compared by digest and never printed.
+ */
+async function refreshCodexAfterLogin(ctx: CommandContext, seat: StoredSeat, replacedDigest: Buffer | null): Promise<void> {
+  if (replacedDigest === null) return;
+  const home = homeDir();
+  const entry = readCodexEntry(codexUserFile(home, process.env));
+  const url = `${seat.origin}${MCP_PATH}`;
+  if (entry === null || entry.url !== url || entry.bearer === null || !digestsEqual(keyDigest(entry.bearer), replacedDigest)) return;
+  const tty = isInteractive();
+  const yes = ctx.globals.yes;
+  if (!tty && !yes) {
+    ctx.stderr.write(`${CODEX_REVOKED_HINT}\n`);
+    return;
+  }
+  const results = await applyPlan([codexUpdateStep({ home, env: process.env }, seat, url)], { tty, yes, out: ctx.stderr });
+  for (const line of summarize(results)) ctx.stderr.write(`${line}\n`);
+  if (!results.every((result) => result.status === "configured" || result.status === "already configured")) ctx.stderr.write(`${CODEX_REVOKED_HINT}\n`);
+}
+
 async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (args.positionals.length > 0) {
     throw new UsageError("login takes no arguments. Never put a key on the command line: use --with-token and send it on standard input.");
@@ -77,12 +108,16 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (withToken) {
     if (paste || noBrowser) throw new UsageError("--with-token can't be combined with --paste or --no-browser.");
     if (workspace !== undefined) throw new UsageError("--with-token can't be combined with --workspace: the key decides the workspace.");
+    // A key piped in by an agent would switch the account every hook and command writes to (R-M1).
+    refuseInAgentSession("login --with-token");
     const token = await readKey(ctx);
     await loginWithToken(ctx, { origin: envOrigin(), token });
     return 0;
   }
 
-  await loginFlow(ctx, { origin: envOrigin(), ...(workspace === undefined ? {} : { workspace }), noBrowser, paste });
+  const signedIn = await loginFlow(ctx, { origin: envOrigin(), ...(workspace === undefined ? {} : { workspace }), noBrowser, paste });
+  // The browser path only: a pasted dashboard key revokes nothing.
+  await refreshCodexAfterLogin(ctx, signedIn.seat, signedIn.replacedDigest);
   return 0;
 }
 

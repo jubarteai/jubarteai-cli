@@ -51,6 +51,18 @@ describe("hook", () => {
     expect((await box.run(["list-agents"], { env: { CLAUDE_CODE_SESSION_ID: "sess-2" } })).code).toBe(2);
   });
 
+  test("under an environment key (harness env, no saved seat) the hook's agent is the one later commands use without --agent", async () => {
+    const envKey = { JUBARTEAI_TOKEN: FAKE_KEY, JUBARTEAI_URL: fake.origin };
+    const input = JSON.stringify({ session_id: "sess-env", cwd: box.repo, source: "startup" });
+    const started = await box.run(["hook", "session-start", "--harness", "claude-code"], { stdin: input, env: envKey });
+    const agentId = AGENT_LINE.exec(started.stdout)?.[1];
+    expect(agentId).toBeDefined();
+
+    const listed = await box.run(["list-agents"], { env: { ...envKey, CLAUDE_CODE_SESSION_ID: "sess-env" } });
+    expect(listed.code).toBe(0);
+    expect(fake.toolCalls().at(-1)?.arguments["agent_id"]).toBe(agentId);
+  });
+
   test("two sessions get two agents and share one key", async () => {
     const one = AGENT_LINE.exec((await hook("session-start", "sess-1", { source: "startup" })).stdout)?.[1];
     const two = AGENT_LINE.exec((await hook("session-start", "sess-2", { source: "startup" })).stdout)?.[1];

@@ -1,3 +1,4 @@
+import { refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentials, removeSeat } from "../auth/credentials.js";
@@ -48,6 +49,8 @@ function pickSeat(credentials: Credentials, workspace: string | undefined, email
 
 async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (args.positionals.length > 0) throw new UsageError("logout takes no arguments.");
+  // The binding and the saved logins decide where every hook and command writes: a person changes them, not an agent (R-M1).
+  refuseInAgentSession("logout");
   const email = typeof args.flags["email"] === "string" ? args.flags["email"] : undefined;
   const [seatId, seat] = pickSeat(readCredentials(), ctx.globals.workspace, email);
   const { removed } = removeSeat(seatId);

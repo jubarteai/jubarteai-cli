@@ -690,6 +690,34 @@ describe("init: MCP cleanup and Codex", () => {
     expect(result.err).toMatch(/Update the key in Codex's MCP config \(user level\): skipped \(needs confirmation; rerun with --yes\)/);
   });
 
+  it("an entry holding another saved workspace's key is left alone even with --yes, and the workspace Codex uses is named (R-S2)", async () => {
+    storeSeats();
+    mkdirSync(join(sb.home, ".codex"), { recursive: true });
+    // Codex follows Acme; this repo's login (the default seat) is Beta. Both keys are valid saved logins.
+    const original = `[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_ACMEKEYACMEKEYACMEKEY0001" }\n`;
+    writeFileSync(join(sb.home, ".codex", "config.toml"), original);
+    const result = await run(["init", "--yes", "--no-hooks", "--no-permissions", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(original);
+    expect(result.err).not.toContain(INIT_COPY.codexUpdateLabel);
+    expect(result.err).toContain(INIT_COPY.manualHeading);
+    expect(result.err).toContain(INIT_COPY.codexOtherWorkspaceTitle);
+    expect(result.err).toContain("workspace Acme Inc");
+    expect(result.err).not.toMatch(/jba_[A-Za-z0-9]/);
+  });
+
+  it("refreshes a table-form entry (http_headers as its own table) holding a revoked key, in place (R-N3)", async () => {
+    storeSeats();
+    mkdirSync(join(sb.home, ".codex"), { recursive: true });
+    const config = `[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\n\n[mcp_servers.jubarteai.http_headers]\nAuthorization = "Bearer jba_REVOKEDKEYREVOKEDKEY0001"\n`;
+    writeFileSync(join(sb.home, ".codex", "config.toml"), config);
+    const result = await run(["init", "--yes", "--no-hooks", "--no-permissions", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(config.replace("jba_REVOKEDKEYREVOKEDKEY0001", "jba_BETAKEYBETAKEYBETAKEY0002"));
+    expect(result.err).not.toContain(INIT_COPY.codexUnreadableTitle);
+    expect(result.err).not.toMatch(/jba_[A-Za-z0-9]/);
+  });
+
   it("an entry for another address is left byte-identical and reported by hand", async () => {
     withEnvKey();
     mkdirSync(join(sb.home, ".codex"), { recursive: true });

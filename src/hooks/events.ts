@@ -11,7 +11,7 @@ import { isOurHookCommand, settingsPath as claudeSettingsPath } from "../harness
 import { codexHome } from "../harness/mcp-cleanup.js";
 import type { Envelope } from "../mcp/client.js";
 import { callTool } from "../mcp/client.js";
-import { isAgentId, readSession, writeSession } from "../session/cache.js";
+import { entryBelongsToSeat, isAgentId, keyFingerprint, readSession, writeSession } from "../session/cache.js";
 import type { SessionEntry } from "../session/cache.js";
 import type { HarnessId } from "../session/harness-env.js";
 import { overflowSpill } from "./overflow.js";
@@ -110,6 +110,12 @@ export function ownHookRegistered(harness: HarnessId, event: HookEvent, home: st
   }
 }
 
+/** The events `init` registers a hook for in `harness`'s own hook file; empty for a harness it registers none in. */
+export function ownHookEvents(harness: HarnessId): HookEvent[] {
+  const keys = OWN_HOOKS[harness]?.keys ?? {};
+  return HOOK_EVENTS.filter((event) => keys[event] !== undefined);
+}
+
 export function parseHookEvent(value: string | undefined): HookEvent | null {
   return HOOK_EVENTS.find((event) => event === value) ?? null;
 }
@@ -169,11 +175,15 @@ function agentFromEnvelope(envelope: Envelope): { agentId: string; name?: string
   return typeof name === "string" && name.length > 0 && name.length <= MAX_AGENT_NAME_CHARS ? { agentId, name } : { agentId };
 }
 
-/** The cached agent for this session, only when it was written for the seat being used (as `resolveAgent` does). */
+/**
+ * The cached agent for this session, only when it was written for the seat being used: the same test the commands apply
+ * (`entryBelongsToSeat`, so an entry made under an environment key must carry that key's fingerprint), or a hook and a
+ * later `jubarteai` command would disagree about whose agent it is.
+ */
 function cachedAgent(harness: HarnessId, sessionId: string | null, seat: ResolvedSeat): SessionEntry | null {
   if (sessionId === null) return null;
   const entry = readSession(harness, sessionId);
-  return entry !== null && entry.origin === seat.origin && entry.seat_id === seat.seatId ? entry : null;
+  return entry !== null && entryBelongsToSeat(entry, seat) ? entry : null;
 }
 
 type Handled = { harness: HarnessId; input: HookInput; seat: ResolvedSeat; binding: Binding; runtime: HookRuntime };
@@ -199,7 +209,15 @@ async function sessionStart({ harness, input, seat, binding, runtime }: Handled)
       writeSession(
         harness,
         input.sessionId,
-        { harness, agent_id: agent.agentId, seat_id: seat.seatId, origin: seat.origin, ...(agent.name === undefined ? {} : { name: agent.name }) },
+        {
+          harness,
+          agent_id: agent.agentId,
+          seat_id: seat.seatId,
+          origin: seat.origin,
+          // An environment key has no seat id; the fingerprint (never the key) is what ties the entry to it.
+          ...(seat.seatId === null ? { key_fp: keyFingerprint(seat.token) } : {}),
+          ...(agent.name === undefined ? {} : { name: agent.name }),
+        },
         { overwrite: true },
       );
     } catch {

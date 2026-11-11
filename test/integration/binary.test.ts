@@ -1,7 +1,7 @@
 // The built binary against a fake JubarteAI server: sign-in (browser callback, pasted dashboard key), the
 // credentials file, every tool command and the exit codes they promise (spec section 5.2).
-import { statSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { TOOL_SPECS } from "../../src/mcp/tool-specs.js";
@@ -70,6 +70,59 @@ describe("login", () => {
     expect(fake.isRevoked(first as string)).toBe(true);
     expect(fake.isRevoked(second as string)).toBe(false);
     expect(Object.values(storedSeats())[0]?.["token"]).toBe(second);
+  });
+
+  describe("the key in Codex's MCP entry (R-M2)", () => {
+    const HINT = "Codex still uses the key that was just revoked; run `jubarteai init` to update it.";
+
+    async function loginOnce(args: string[] = []): Promise<{ code: number | null; stdout: string; stderr: string }> {
+      const running = box.start(["login", "--no-browser", ...args], { env: { JUBARTEAI_URL: fake.origin } });
+      const [, url] = await running.waitFor("stderr", AUTHORIZE_URL);
+      await fake.authorize(url as string);
+      return running.exit;
+    }
+
+    function codexConfig(key: string): string {
+      return `model = "o4"\n\n[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\nhttp_headers = { "Authorization" = "Bearer ${key}" }\n`;
+    }
+
+    /** First login, then a Codex entry holding the key it minted (what init's D5 fallback writes). */
+    async function firstLoginAndCodexEntry(): Promise<{ oldKey: string; file: string }> {
+      expect((await loginOnce()).code).toBe(0);
+      const [oldKey] = fake.mintedKeys() as [string];
+      const file = join(box.home, ".codex", "config.toml");
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, codexConfig(oldKey));
+      return { oldKey, file };
+    }
+
+    test("without a terminal or --yes, the hint is printed and the entry is untouched; no key is printed", async () => {
+      const { oldKey, file } = await firstLoginAndCodexEntry();
+      const result = await loginOnce();
+      expect(result.code).toBe(0);
+      const newKey = fake.mintedKeys()[1] as string;
+      expect(fake.isRevoked(oldKey)).toBe(true);
+      expect(result.stderr).toContain(HINT);
+      expect(readFileSync(file, "utf8")).toBe(codexConfig(oldKey));
+      for (const key of [oldKey, newKey]) {
+        expect(result.stdout).not.toContain(key);
+        expect(result.stderr).not.toContain(key);
+      }
+    });
+
+    test("with --yes outside an agent session, the entry is rewritten to the new key; no key is printed", async () => {
+      const { oldKey, file } = await firstLoginAndCodexEntry();
+      const result = await loginOnce(["--yes"]);
+      expect(result.code, result.stderr).toBe(0);
+      const newKey = fake.mintedKeys()[1] as string;
+      expect(readFileSync(file, "utf8")).toBe(codexConfig(newKey));
+      expect(result.stderr).not.toContain(HINT);
+      for (const key of [oldKey, newKey]) {
+        expect(result.stdout).not.toContain(key);
+        expect(result.stderr).not.toContain(key);
+      }
+      if (!IS_WINDOWS) expect(statSync(file).mode & 0o777).toBe(0o600);
+    });
   });
 
   test("a denied approval ends the login with a failure and saves nothing", async () => {

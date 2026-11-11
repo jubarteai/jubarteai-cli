@@ -29,6 +29,7 @@ import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routeWith } from "../cli/router.js";
+import { HOOK_EVENTS } from "../harness/claude-code.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import type { HarnessAdapter, ManualInstructions } from "../harness/types.js";
 import type { PlanStep } from "../safe-edit/plan.js";
@@ -168,6 +169,27 @@ function signIn(): void {
   });
 }
 
+/** The program part the running install writes into a hook (injected: the test process is not a real install). */
+const NEW_HOOK_COMMAND = '"/opt/node-24/bin/node" "/opt/node-24/lib/node_modules/jubarteai/bin/jubarteai.js"';
+const OLD_HOOK_COMMAND = '"/opt/node-22/bin/node" "/opt/node-22/lib/node_modules/jubarteai/bin/jubarteai.js"';
+
+const claudeSettingsFile = (): string => join(sb.home, ".claude", "settings.json");
+const OTHER_HOOK = { type: "command", command: "echo other-tool", timeout: 3 };
+
+/** ~/.claude/settings.json as `init` leaves it: our three hooks with `program`, plus another tool's hook and a permission rule. */
+function writeClaudeHooks(program: string, events: readonly string[] = HOOK_EVENTS.map((e) => e.name)): Record<string, unknown> {
+  const hooks: Record<string, unknown> = { Stop: [{ hooks: [OTHER_HOOK] }] };
+  for (const e of HOOK_EVENTS.filter((h) => events.includes(h.name))) {
+    hooks[e.name] = [{ hooks: [{ type: "command", command: `${program} hook ${e.arg} --harness claude-code`, timeout: e.timeout }] }];
+  }
+  const doc = { permissions: { allow: ["Bash(jubarteai *)"] }, hooks };
+  writeJsonFile(claudeSettingsFile(), doc);
+  return doc;
+}
+
+const readClaudeSettings = (): { hooks: Record<string, Array<{ hooks: Array<{ command: string; timeout: number }> }>> } =>
+  JSON.parse(readFileSync(claudeSettingsFile(), "utf8")) as never;
+
 const MCP_ENTRY = { type: "http", url: "https://jubarte.ai/api/mcp", headers: { Authorization: `Bearer ${FAKE_TOKEN}` } };
 const OTHER_SERVER = { type: "http", url: "https://example.com/mcp" };
 
@@ -214,6 +236,7 @@ async function update(argv: string[] = [], opts: RunOpts = {}): Promise<RunResul
     confirm,
     latestSkill: sb.latest,
     nodeVersion: "24.22.1",
+    cliCommand: () => ({ command: NEW_HOOK_COMMAND, npx: false }),
     locateInstall: () => ({ prefix: sb.prefix, entry: entryFile() }),
     ...opts.deps,
   };
@@ -713,5 +736,103 @@ describe.skipIf(!posix)("update: no key, ever (D2, D3, D21)", () => {
         expect(source, `${file} mentions ${forbidden}`).not.toContain(forbidden);
       }
     }
+  });
+});
+
+describe.skipIf(!posix)("update: hook commands after a Node upgrade (R-S4)", () => {
+  it("--check reports the stale hook commands and writes nothing", async () => {
+    writeClaudeHooks(OLD_HOOK_COMMAND);
+    const before = readFileSync(claudeSettingsFile(), "utf8");
+    const r = await update(["--check"]);
+
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("[todo] Refresh the hook command in Claude Code");
+    expect(r.out.match(/\[todo\] Refresh the hook command/g)).toHaveLength(1);
+    expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
+  });
+
+  it("--yes rewrites the program of our three entries in place: no new entry, other hooks and settings untouched", async () => {
+    writeClaudeHooks(OLD_HOOK_COMMAND);
+    const r = await update(["--yes"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Refresh the hook command in Claude Code");
+    const doc = readClaudeSettings();
+    for (const e of HOOK_EVENTS) {
+      expect(doc.hooks[e.name]).toEqual([{ hooks: [{ type: "command", command: `${NEW_HOOK_COMMAND} hook ${e.arg} --harness claude-code`, timeout: e.timeout }] }]);
+    }
+    expect(doc.hooks["Stop"]).toEqual([{ hooks: [OTHER_HOOK] }]);
+    expect(Object.keys(doc.hooks).sort()).toEqual(["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
+    expect(readClaudeSettings()).toMatchObject({ permissions: { allow: ["Bash(jubarteai *)"] } });
+
+    // A second run finds them current.
+    const again = await update(["--check"]);
+    expect(again.code).toBe(0);
+    expect(again.out).not.toContain("[todo]");
+  });
+
+  it("without a terminal and without --yes the sensitive step is not applied, and says which flag applies it", async () => {
+    writeClaudeHooks(OLD_HOOK_COMMAND);
+    const before = readFileSync(claudeSettingsFile(), "utf8");
+    const r = await update([]);
+
+    expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
+    expect(r.out).toContain("Refresh the hook command in Claude Code");
+    expect(r.out).toContain("--yes");
+  });
+
+  it("updates a hook that still names a bare jubarteai, and one with an older timeout", async () => {
+    const doc = writeClaudeHooks("jubarteai");
+    const start = (doc["hooks"] as Record<string, Array<{ hooks: Array<{ timeout: number }> }>>)["SessionStart"];
+    if (start?.[0]?.hooks[0] !== undefined) start[0].hooks[0].timeout = 1;
+    writeJsonFile(claudeSettingsFile(), doc);
+    await update(["--yes"]);
+    const after = readClaudeSettings();
+    expect(after.hooks["SessionStart"]?.[0]?.hooks[0]).toEqual({ type: "command", command: `${NEW_HOOK_COMMAND} hook session-start --harness claude-code`, timeout: HOOK_EVENTS[0].timeout });
+  });
+
+  it("adds nothing when only some events are registered: it points at init instead and leaves the file alone", async () => {
+    writeClaudeHooks(OLD_HOOK_COMMAND, ["SessionStart"]);
+    const before = readFileSync(claudeSettingsFile(), "utf8");
+    const r = await update(["--yes"]);
+
+    expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
+    expect(r.out).toContain("[info] Hooks: Claude Code: some of the session hooks are missing; run jubarteai init to add them");
+    expect(r.out).not.toContain("Refresh the hook command");
+  });
+
+  it("does nothing for a machine with no hooks of ours: it does not register any", async () => {
+    writeJsonFile(claudeSettingsFile(), { hooks: { Stop: [{ hooks: [OTHER_HOOK] }] } });
+    const before = readFileSync(claudeSettingsFile(), "utf8");
+    const r = await update(["--yes"]);
+
+    expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
+    expect(r.out).not.toContain("Refresh the hook command");
+    expect(r.code).toBe(0);
+  });
+
+  it("leaves hooks that already carry the running install's command alone", async () => {
+    writeClaudeHooks(NEW_HOOK_COMMAND);
+    const before = readFileSync(claudeSettingsFile(), "utf8");
+    const r = await update(["--check"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("[todo]");
+    expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
+  });
+
+  it("from a throwaway npx copy it keeps the hooks it finds (that copy's path would not outlive the cache)", async () => {
+    writeClaudeHooks(OLD_HOOK_COMMAND);
+    const before = readFileSync(claudeSettingsFile(), "utf8");
+    const r = await update(["--yes"], { deps: { cliCommand: () => ({ command: "jubarteai", npx: true }) } });
+
+    expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
+    expect(r.out).not.toContain("Refresh the hook command");
+  });
+
+  it("never reads the key to do it (the environment key and the credentials file stay out of the output)", async () => {
+    writeClaudeHooks(OLD_HOOK_COMMAND);
+    const r = await update(["--yes"]);
+    expect(r.out + r.err).not.toContain(FAKE_TOKEN);
   });
 });

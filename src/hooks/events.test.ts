@@ -6,7 +6,10 @@ import { AGENT_A, AGENT_B, SEAT_ID, createSandbox, deadOrigin, expectNoSecrets, 
 import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
 import { callTool } from "../mcp/client.js";
 import { homeDir, sessionsDir } from "../paths.js";
-import { readSession, sessionKey, writeSession } from "../session/cache.js";
+import { isResolveError, resolveSeat } from "../auth/resolve-seat.js";
+import { resetEnvTokenForTests } from "../process-env.js";
+import { resolveAgent } from "../session/agent.js";
+import { keyFingerprint, readSession, sessionKey, writeSession } from "../session/cache.js";
 import type { HarnessId } from "../session/harness-env.js";
 import { SESSION_END_NETWORK_TIMEOUT_MS, ownHookFile, ownHookRegistered, parseHookEvent, runHookEvent } from "./events.js";
 import type { HookEvent, HookRuntime } from "./events.js";
@@ -106,6 +109,62 @@ describe("session-start", () => {
     const s = await connectingServer();
     sandbox.signIn(s.origin);
     expect(await runHookEvent(input("session-start"), runtime())).toBe(`${identityLine(AGENT_A, "Swift Otter")}\n`);
+  });
+
+  describe("under an environment key (no seat id)", () => {
+    const ENV_KEY = "jba_ENVKEYONEENVKEYONEENVKEYONE01";
+    const OTHER_ENV_KEY = "jba_ENVKEYTWOENVKEYTWOENVKEYTWO02";
+
+    async function startUnderEnvKey(key: string): Promise<FakeServer> {
+      bind(sandbox.repo);
+      const s = await connectingServer(MESSAGES);
+      process.env["JUBARTEAI_URL"] = s.origin;
+      process.env["JUBARTEAI_TOKEN"] = key;
+      resetEnvTokenForTests();
+      return s;
+    }
+
+    it("stores the key fingerprint (never the key), so a later command without --agent accepts the entry", async () => {
+      const s = await startUnderEnvKey(ENV_KEY);
+      await runHookEvent(input("session-start"), runtime());
+      const entry = readSession("claude-code", "sess-1");
+      expect(entry).toMatchObject({ agent_id: AGENT_A, seat_id: null, key_fp: keyFingerprint(ENV_KEY) });
+      expect(JSON.stringify(entry)).not.toContain("ENVKEYONE");
+      expect(s.toolCalls()).toHaveLength(1);
+
+      // The command side: the same environment key, the same session, no --agent.
+      process.env["CLAUDE_CODE_SESSION_ID"] = "sess-1";
+      const seat = resolveSeat({ cwd: sandbox.repo });
+      if (isResolveError(seat)) throw new Error("the environment key should resolve");
+      expect(resolveAgent({ seat })).toEqual({ agentId: AGENT_A });
+    });
+
+    it("the hooks and the commands agree: a user-prompt-submit and a session-end use the entry for the same key only", async () => {
+      const s = await startUnderEnvKey(ENV_KEY);
+      await runHookEvent(input("session-start"), runtime());
+      await runHookEvent(input("user-prompt-submit"), runtime());
+      await runHookEvent(input("session-end"), runtime());
+      expect(s.toolCalls().map((c) => c.name)).toEqual(["connect", "check_inbox", "disconnect"]);
+
+      // An entry written for another environment key (or with no fingerprint) is not this key's agent.
+      writeSession("claude-code", "sess-2", { harness: "claude-code", agent_id: AGENT_B, seat_id: null, origin: s.origin, key_fp: keyFingerprint(OTHER_ENV_KEY) }, { overwrite: true });
+      writeSession("claude-code", "sess-3", { harness: "claude-code", agent_id: AGENT_B, seat_id: null, origin: s.origin }, { overwrite: true });
+      const before = s.toolCalls().length;
+      expect(await runHookEvent(input("user-prompt-submit", { sessionId: "sess-2" }), runtime())).toBe("");
+      expect(await runHookEvent(input("session-end", { sessionId: "sess-3" }), runtime())).toBe("");
+      expect(s.toolCalls()).toHaveLength(before);
+    });
+
+    it("a resume reuses the entry written for this key, and connects anew for another key's", async () => {
+      const s = await startUnderEnvKey(ENV_KEY);
+      writeSession("claude-code", "sess-1", { harness: "claude-code", agent_id: AGENT_B, seat_id: null, origin: s.origin, key_fp: keyFingerprint(ENV_KEY), name: "Old" }, { overwrite: true });
+      expect(await runHookEvent(input("session-start", { source: "resume" }), runtime())).toBe(`${identityLine(AGENT_B, "Old")}\n`);
+      expect(s.requests).toHaveLength(0);
+
+      writeSession("claude-code", "sess-1", { harness: "claude-code", agent_id: AGENT_B, seat_id: null, origin: s.origin, key_fp: keyFingerprint(OTHER_ENV_KEY) }, { overwrite: true });
+      expect(await runHookEvent(input("session-start", { source: "resume" }), runtime())).toContain(AGENT_A);
+      expect(s.toolCalls()).toHaveLength(1);
+    });
   });
 
   it.each(["resume", "compact"])("%s with a cache hit: identity line only and no network call", async (source) => {

@@ -55,6 +55,8 @@ export const INIT_COPY = {
   codexUpdateLabel: "Update the key in Codex's MCP config (user level)",
   codexForeignTitle: "Codex MCP entry for another JubarteAI address",
   codexForeignReason: "its url is not this account's, so the key was left alone",
+  codexOtherWorkspaceTitle: "Codex MCP entry uses another workspace",
+  codexOtherWorkspaceReason: "its key belongs to another saved login, so it was left alone",
   codexUnreadableTitle: "Codex MCP entry key",
   codexUnreadableReason: "its key is not in a form init can rewrite",
   npxNote: "You ran jubarteai through npx: install it globally (npm i -g jubarteai) so the hooks keep working.",
@@ -125,6 +127,14 @@ export function codexActsAs(email: string, workspace: string): string {
 export function codexForeignLines(shown: string, url: string): string[] {
   return [`${shown} has a jubarteai entry for ${url}, which is not this account's address.`, "It was left as it is. To use this account in Codex, edit its url and key there by hand."];
 }
+
+/** Lines for a Codex entry whose key is another saved login's (init leaves it: switching it moves every Codex session). */
+export function codexOtherWorkspaceLines(shown: string, workspace: string): string[] {
+  return [`${shown} makes Codex use your saved login for workspace ${workspace}, not this repo's.`, "It was left as it is. To use this repo's workspace in Codex, replace the key there by hand."];
+}
+
+/** What `login` prints when it revoked the key Codex's MCP entry holds and the entry was not refreshed. */
+export const CODEX_REVOKED_HINT = "Codex still uses the key that was just revoked; run `jubarteai init` to update it.";
 
 /** Lines for a Codex entry whose key init can't rewrite safely. */
 export function codexUnreadableLines(shown: string): string[] {

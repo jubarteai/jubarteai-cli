@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CliError, ExitCode } from "../errors.js";
 import { setTtyOpenerForTests, type confirm } from "../prompt.js";
 import { SafeEditError } from "./atomic-write.js";
-import { applyPlan, summarize, type PlanStep, type StepResult } from "./plan.js";
+import { NEEDS_PERSON, applyPlan, summarize, type PlanStep, type StepResult } from "./plan.js";
 
 type Confirm = typeof confirm;
 
@@ -249,6 +249,55 @@ describe("applyPlan: --yes", () => {
       expect(res.map((r) => r.status)).toEqual(["configured", "configured", "configured"]);
     });
   }
+});
+
+describe("applyPlan: inside an agent's shell (R-M1)", () => {
+  it("--yes without a TTY runs the non-sensitive steps and skips the sensitive ones with no flag to retry", async () => {
+    const a = step("a");
+    const s = step("s", { sensitive: true });
+    const res = await applyPlan([a, s], { tty: false, yes: true, out: collector().out, confirmFn: neverAsked, agentSession: "CLAUDECODE" });
+    expect(a.ran()).toBe(1);
+    expect(s.ran()).toBe(0);
+    expect(res[1]).toEqual({ id: "s", label: "Step s", status: "skipped", detail: NEEDS_PERSON });
+    expect(summarize(res)[1]).not.toContain("rerun with");
+  });
+
+  it("without --yes the sensitive step is skipped the same way (no --yes hint for the agent to follow)", async () => {
+    const res = await applyPlan([step("s", { sensitive: true })], { tty: false, yes: false, out: collector().out, confirmFn: neverAsked, agentSession: "CODEX_THREAD_ID" });
+    expect(res[0]).toEqual({ id: "s", label: "Step s", status: "skipped", detail: NEEDS_PERSON });
+  });
+
+  it("--yes with a terminal still asks before each sensitive step, but not for the whole plan", async () => {
+    const s = step("s", { sensitive: true, preview: "entry" });
+    const { fn, asked } = answers(false);
+    const res = await applyPlan([step("a"), s], { tty: true, yes: true, out: collector().out, confirmFn: fn, agentSession: "CLAUDECODE" });
+    expect(asked.map((q) => q.question)).toEqual(['Apply "Step s"?']);
+    expect(s.ran()).toBe(0);
+    expect(res[1]?.status).toBe("skipped");
+  });
+
+  it("detects the session from the environment when the caller doesn't say", async () => {
+    const s = step("s", { sensitive: true });
+    vi.stubEnv("CLAUDE_CODE_SESSION_ID", "abc");
+    try {
+      const res = await applyPlan([s], { tty: false, yes: true, out: collector().out, confirmFn: neverAsked });
+      expect(s.ran()).toBe(0);
+      expect(res[0]?.detail).toBe(NEEDS_PERSON);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("agentSession: null keeps --yes as it was", async () => {
+    const s = step("s", { sensitive: true });
+    vi.stubEnv("CLAUDECODE", "1");
+    try {
+      await applyPlan([s], { tty: false, yes: true, out: collector().out, confirmFn: neverAsked, agentSession: null });
+      expect(s.ran()).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("applyPlan: steps that fail", () => {

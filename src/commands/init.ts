@@ -1,5 +1,6 @@
 import { join, resolve as resolvePath } from "node:path";
 
+import { refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentials } from "../auth/credentials.js";
@@ -12,6 +13,7 @@ import type { Binding } from "../binding/binding.js";
 import { CLI_NAME, MCP_PATH } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
 import { CODEX_CODES } from "../harness/codex.js";
+import { CODEX_MCP_TABLE, bearerIs, codexUpdateStep, codexUserFile, readCodexEntry, seatForBearer, workspaceLabel } from "../harness/codex-entry.js";
 import { defaultDetectEnv, detectHarnesses } from "../harness/detect.js";
 import { codexHome, findMcpEntries, isUnderHome, shownPath } from "../harness/mcp-cleanup.js";
 import { ADAPTERS } from "../harness/registry.js";
@@ -21,8 +23,8 @@ import {
   INIT_COPY,
   accountChoiceLabel,
   bindingStepLabel,
-  codexActsAs,
   codexForeignLines,
+  codexOtherWorkspaceLines,
   codexUnreadableLines,
   flagSkipDetail,
   noLoginForWorkspace,
@@ -36,8 +38,7 @@ import { planSkillSteps } from "../install/skill.js";
 import { safeForDisplay } from "../output.js";
 import { envOrigin, takeEnvToken } from "../process-env.js";
 import { choose, confirm, isInteractive } from "../prompt.js";
-import { readConfigText } from "../safe-edit/json-edit.js";
-import { TomlConflictError, editTomlFile, getTomlTable, readTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
+import { TomlConflictError, editTomlFile, getTomlTable, setTomlKey } from "../safe-edit/toml-edit.js";
 import { applyPlan, summarize } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 
@@ -52,7 +53,6 @@ const BINDING_STEP_ID = "binding";
 const CODEX_ID = "codex";
 const CODEX_OPT_IN_STEP_ID = "codex:network-optin";
 const CODEX_REGISTER_STEP_ID = "codex:mcp-register";
-const CODEX_MCP_TABLE = "mcp_servers.jubarteai";
 const CODEX_CONFIG_MODE = 0o600;
 
 type LoginDeps = NonNullable<Parameters<typeof loginFlow>[2]>;
@@ -167,6 +167,8 @@ async function signIn(ctx: CommandContext, workspace: string | undefined, opts: 
 async function chooseAccount(ctx: CommandContext, root: string | null, opts: AccountOptions, tty: boolean, deps: InitDeps): Promise<StoredSeat> {
   const envToken = takeEnvToken();
   if (envToken !== null) {
+    // Saving a key from the environment switches the account every hook and command uses: never on an agent's word (R-M1).
+    refuseInAgentSession("init with JUBARTEAI_TOKEN");
     if (opts.workspace !== undefined) throw new UsageError(INIT_COPY.workspaceFlagWithKey);
     if (opts.paste || opts.noBrowser) throw new UsageError(INIT_COPY.loginFlagsWithKey);
     return (await loginWithToken(ctx, { origin: envOrigin(), token: envToken })).seat;
@@ -338,85 +340,13 @@ function codexRegisterStep(ctx: InitCtx, seat: StoredSeat, optInInEffect: () => 
   };
 }
 
-const CODEX_UPDATE_STEP_ID = "codex:mcp-update";
-const BEARER_VALUE = /("Authorization"[ \t]*=[ \t]*)"Bearer ([^"\\\r\n]*)"/;
-
-/** The user-level Codex config file. */
-function codexUserFile(home: string, env: NodeJS.ProcessEnv): string {
-  return join(codexHome(home, env), "config.toml");
-}
-
-type CodexEntry = { url: string | null; bearer: string | null };
-
-/** The jubarteai entry of the user-level Codex config, or null when there is none (or no readable file). */
-function readCodexEntry(file: string): CodexEntry | null {
-  let text: string;
+/** The saved logins by seat id; none when the store can't be read (the Codex key is then treated as unknown). */
+function storedSeats(): Record<string, StoredSeat> {
   try {
-    const read = readConfigText(file);
-    if (read.status !== "ok") return null;
-    text = read.text;
+    return readCredentials().seats;
   } catch {
-    return null;
+    return {};
   }
-  try {
-    const table = getTomlTable(text, CODEX_MCP_TABLE);
-    if (table === null) return null;
-    const url = readTomlKey(text, CODEX_MCP_TABLE, "url");
-    const match = BEARER_VALUE.exec(table.body);
-    return { url: typeof url === "string" ? url : null, bearer: match === null ? null : (match[2] ?? null) };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * A Codex entry whose key is no longer this account's (a re-login revoked the old CLI key): the step that writes the new
- * one, behind its own prompt. The same user-level file and rules as codexRegisterStep.
- */
-function codexUpdateStep(ctx: InitCtx, seat: StoredSeat, url: string): PlanStep {
-  const file = codexUserFile(ctx.home, ctx.env);
-  const shown = shownPath(file, ctx.home);
-  const token = seat.token;
-  const withinHome = isUnderHome(file, ctx.home);
-  const label = INIT_COPY.codexUpdateLabel;
-  const id = CODEX_UPDATE_STEP_ID;
-  return {
-    id,
-    label,
-    files: [file],
-    sensitive: true,
-    preview: `${shown}:\n[${CODEX_MCP_TABLE}]\nhttp_headers = { "Authorization" = "Bearer <your key>" }\n${codexActsAs(safeForDisplay(seat.user.email, DISPLAY_MAX), workspaceName(seat))}`,
-    flag: "--yes",
-    async apply(): Promise<StepResult> {
-      if (!API_KEY_RE.test(token)) return { id, label, status: "failed", detail: INIT_COPY.codexKeyShape };
-      let unreadable = false;
-      try {
-        const result = editTomlFile(
-          file,
-          (text) => {
-            const table = getTomlTable(text, CODEX_MCP_TABLE);
-            // Re-checked at apply time: only this account's own entry is ever rewritten.
-            if (table === null || readTomlKey(text, CODEX_MCP_TABLE, "url") !== url) return { text, changed: false };
-            const bodyStart = table.end - table.body.length;
-            const body = table.body;
-            if (!BEARER_VALUE.test(body)) {
-              unreadable = true;
-              return { text, changed: false };
-            }
-            const next = body.replace(BEARER_VALUE, (_all, head: string) => `${head}${JSON.stringify(`Bearer ${token}`)}`);
-            return { text: text.slice(0, bodyStart) + next + text.slice(table.end), changed: next !== body };
-          },
-          { createIfMissing: false, mode: CODEX_CONFIG_MODE, withinHome },
-        );
-        if (unreadable) return { id, label, status: "skipped", detail: INIT_COPY.codexUnreadableReason };
-        if (result.status === "refused") return { id, label, status: "failed", detail: `could not write (${result.reason ?? "refused"})` };
-        return { id, label, status: result.status === "changed" ? "configured" : "already configured" };
-      } catch (error) {
-        if (error instanceof TomlConflictError) return { id, label, status: "skipped", detail: INIT_COPY.codexTableInline };
-        throw error;
-      }
-    },
-  };
 }
 
 async function hasUserLevelCodexEntry(scope: CleanupScope): Promise<boolean> {
@@ -520,8 +450,16 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
       } else if (entry !== null && entry.url === url) {
         if (entry.bearer === null) {
           plan.manual({ kind: "manual", harness: CODEX_ID, title: INIT_COPY.codexUnreadableTitle, lines: codexUnreadableLines(shown), reason: INIT_COPY.codexUnreadableReason });
-        } else if (entry.bearer !== seat.token) {
-          plan.step(codexUpdateStep(ctx, seat, url));
+        } else if (!bearerIs(entry.bearer, seat.token)) {
+          // Whose key is it? Another saved login at this address (a different, still valid workspace) is only reported:
+          // switching it would move every Codex session on the machine. A key none of the saved logins holds (the one a
+          // re-login just revoked, or an unknown one) is refreshed.
+          const owner = seatForBearer(storedSeats(), seat.origin, entry.bearer);
+          if (owner !== undefined) {
+            plan.manual({ kind: "manual", harness: CODEX_ID, title: INIT_COPY.codexOtherWorkspaceTitle, lines: codexOtherWorkspaceLines(shown, workspaceLabel(owner.seat)), reason: INIT_COPY.codexOtherWorkspaceReason });
+          } else {
+            plan.step(codexUpdateStep(ctx, seat, url));
+          }
         }
       }
     }

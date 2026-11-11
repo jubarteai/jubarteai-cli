@@ -1,3 +1,4 @@
+import { refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentials } from "../auth/credentials.js";
@@ -56,6 +57,8 @@ async function pickSeat(ctx: CommandContext, root: string, tty: boolean): Promis
 
 async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (args.positionals.length > 0) throw new UsageError("link takes no arguments. Choose a workspace with --workspace <slug>.");
+  // The binding and the saved logins decide where every hook and command writes: a person changes them, not an agent (R-M1).
+  refuseInAgentSession("link");
   const wantsShared = args.flags["share-binding"] === true;
   const wantsPrivate = args.flags["private-binding"] === true;
   if (wantsShared && wantsPrivate) throw new UsageError(INIT_COPY.bindingConflict);

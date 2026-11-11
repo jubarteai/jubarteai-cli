@@ -8,6 +8,10 @@
 //      sensitive steps (`--keep-mcp` keeps them). Codex keeps its entry unless its network opt-in is already in
 //      place (D5); a machine with no jubarteai login keeps every entry, since its agents still depend on them.
 //
+//   3. Hooks: the hook entries `init` wrote that are already ours get the running install's command (the absolute Node and
+//      bin paths, which a Node upgrade invalidates) in place, as sensitive steps with a preview. Update adds no entry; an
+//      adapter with only some events registered, or one that prints instructions, gets the `init` hint (hook-refresh.ts).
+//
 // The rest is update.sh's: the skill through each channel it was installed with (plugin, npx copies, hand copies;
 // D8–D11, D18–D22), the AGENTS.md / CLAUDE.md section refresh of a known-old section (D13, D24, D25), global scope
 // only when run from ~ or / (D26), nothing installed → point at init (D30), exit 0 / 1 / 2 (D29).
@@ -25,6 +29,8 @@ import { CODEX_CODES } from "../harness/codex.js";
 import { defaultDetectEnv, detectHarnesses } from "../harness/detect.js";
 import type { CleanupScope, HarnessAdapter, InitCtx, ManualInstructions } from "../harness/types.js";
 import { inspectInstructions, notProjectReason, planInstructionSteps } from "../install/agents-md.js";
+import { cliCommandInfo, type CliCommandInfo } from "../install/cli-command.js";
+import { HOOK_REFRESH_COPY, planHookRefresh, type HookRefreshPlan } from "../install/hook-refresh.js";
 import { runCommand, which } from "../install/run.js";
 import {
   fetchLatestVersion,
@@ -72,7 +78,7 @@ function isFinding(step: PlanStep): boolean {
 
 /** Codex's network opt-in step (codex.ts); non-sensitive means it is already in place. */
 const CODEX_OPT_IN_ID = "codex:network-optin";
-/** Instructions about hooks `init` writes; update writes no hooks, so these don't apply to it. */
+/** Instructions about hooks `init` writes; update only refreshes the program of hooks already trusted, hook-refresh.ts says when it matters. */
 const NOT_FOR_UPDATE: readonly string[] = [CODEX_CODES.trustHooks];
 
 const CODEX_KEPT_MANUAL: Omit<ManualInstructions, "harness"> = {
@@ -97,6 +103,8 @@ export type UpdateDeps = {
   installCli(version: string, prefix: string): Promise<CliInstallOutcome>;
   /** Run `node <entry> <args>` (the bin script npm just replaced; it inherits the terminal) and give back its exit code. */
   reexec(entry: string, args: string[]): Promise<ReexecOutcome>;
+  /** What a hook's command line starts with for the running install (cliCommandInfo; tests inject). */
+  cliCommand(): CliCommandInfo;
   isTty(): boolean;
   confirm: typeof confirm;
   detect(): Promise<HarnessAdapter[]>;
@@ -112,6 +120,7 @@ const defaultDeps: UpdateDeps = {
   locateInstall: () => globalInstallOf(process.argv[1]),
   installCli: installCliVersion,
   reexec: reexecCli,
+  cliCommand: () => cliCommandInfo(),
   isTty: isInteractive,
   confirm,
   detect: () => detectHarnesses(),
@@ -306,8 +315,14 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
   const ictx: InitCtx = { ...defaultDetectEnv(), projectRoot: root, cliCommand: CLI_NAME };
   const scope: CleanupScope = { home, projectRoot: root, platform: process.platform, startDir: ctx.cwd, env: process.env };
   const mcp = await planMcp(adapters, ictx, scope);
+  // A throwaway npx copy would write its own cache path (or the bare name) over a good command: leave the hooks alone.
+  const cli = deps.cliCommand();
+  const hookRefresh: HookRefreshPlan = cli.npx
+    ? { steps: [], manuals: [], incomplete: [] }
+    : await planHookRefresh(adapters, { ...ictx, hookCommand: cli.command });
 
-  if (skillSteps.length === 0 && !mcp.found) {
+  const hooksFound = hookRefresh.steps.length > 0 || hookRefresh.manuals.length > 0 || hookRefresh.incomplete.length > 0;
+  if (skillSteps.length === 0 && !mcp.found && !hooksFound) {
     for (const line of nothingInstalledLines()) p.line(line);
     return updateExitCode({ check: opts.check, pending, failed: 0 });
   }
@@ -334,10 +349,11 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
 
   for (const finding of skillFindings) p.row(infoRow(await finding.apply()));
   for (const report of instructionReports) p.row({ level: "warn", name: "Instructions", text: report });
+  for (const adapter of hookRefresh.incomplete) p.row({ level: "info", name: "Hooks", text: `${adapter.label}: ${HOOK_REFRESH_COPY.incomplete}` });
 
-  const changes = [...skillChanges, ...instructionSteps, ...mcpSteps];
+  const changes = [...skillChanges, ...instructionSteps, ...hookRefresh.steps, ...mcpSteps];
   // Two adapters can report the same file or the same instruction (VS Code and Copilot CLI share configs): print it once.
-  const manuals = [...cleanupManuals, ...mcp.otherManuals].filter(
+  const manuals = [...cleanupManuals, ...mcp.otherManuals, ...hookRefresh.manuals].filter(
     (m, i, all) => all.findIndex((o) => o.title === m.title && o.lines.join("\n") === m.lines.join("\n")) === i,
   );
 
@@ -372,7 +388,7 @@ export function createUpdateCommand(overrides: Partial<UpdateDeps> = {}): Comman
   const deps: UpdateDeps = { ...defaultDeps, ...overrides };
   return {
     name: "update",
-    summary: "Update the CLI, the skill, the AGENTS.md section, and remove leftover MCP entries (never reads a key)",
+    summary: "Update the CLI, the skill, the AGENTS.md section and the hook commands, and remove leftover MCP entries (never reads a key)",
     group: "setup",
     usage: "update [--check] [--yes] [--no-self-update] [--keep-mcp]",
     flags: [

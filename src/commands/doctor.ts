@@ -1,6 +1,5 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { Writable } from "node:stream";
 
 import type { ParsedArgs } from "../cli/args.js";
@@ -10,8 +9,9 @@ import type { StoredSeat } from "../auth/credentials.js";
 import { whoami } from "../auth/whoami.js";
 import { CLI_NAME, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { codexUserFile, readCodexEntry, seatForBearer } from "../harness/codex-entry.js";
 import { defaultDetectEnv, detectHarnesses } from "../harness/detect.js";
-import { codexHome, shownPath } from "../harness/mcp-cleanup.js";
+import { shownPath } from "../harness/mcp-cleanup.js";
 import type { HarnessAdapter, InitCtx } from "../harness/types.js";
 import { ownHookFile } from "../hooks/events.js";
 import { inspectInstructions, notProjectReason } from "../install/agents-md.js";
@@ -23,8 +23,7 @@ import type { SkillChannel } from "../install/skill.js";
 import { meetsNodeFloor } from "../node-floor.js";
 import { safeForDisplay, writeJson } from "../output.js";
 import { envOrigin, takeEnvToken } from "../process-env.js";
-import { readConfigText, readJsonObject } from "../safe-edit/json-edit.js";
-import { getTomlTable, readTomlKey } from "../safe-edit/toml-edit.js";
+import { readJsonObject } from "../safe-edit/json-edit.js";
 import { statusCommand } from "./status.js";
 
 // `jubarteai doctor` (spec section 5.5): `status`, then live checks. Output is plain text for people (stdout), or
@@ -292,79 +291,27 @@ function hookCommandCheck(adapter: HarnessAdapter, ctx: InitCtx): Check | null {
 
 // ---- the key in Codex's user-level MCP entry (init's D5 fallback) -------------------------------------------
 
-const CODEX_MCP_TABLE = "mcp_servers.jubarteai";
-/** `"Authorization" = "Bearer <key>"`, in an inline `http_headers = { … }` (how init and install.sh write it). */
-const INLINE_BEARER = /^[ \t]*http_headers[ \t]*=[ \t]*\{[^\n]*?(?:"authorization"|'authorization'|\bauthorization)[ \t]*=[ \t]*(?:"Bearer[ \t]+([^"\\\s]+)"|'Bearer[ \t]+([^'\s]+)')/im;
-
-function sha256(value: string): Buffer {
-  return createHash("sha256").update(value, "utf8").digest();
-}
-
-/** The bearer key in the entry's headers, inline or as a `[mcp_servers.jubarteai.http_headers]` table; null when there is none. */
-function codexBearer(text: string, body: string): string | null {
-  const inline = INLINE_BEARER.exec(body);
-  const value = inline?.[1] ?? inline?.[2];
-  if (value !== undefined) return value;
-  for (const key of ["Authorization", "authorization"]) {
-    const header = readTomlKey(text, `${CODEX_MCP_TABLE}.http_headers`, key);
-    const m = typeof header === "string" ? /^Bearer\s+(\S+)$/.exec(header) : null;
-    if (m?.[1] !== undefined) return m[1];
-  }
-  return null;
-}
-
-function originOf(url: string): string | null {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Whether the key in Codex's user-level jubarteai MCP entry is one of the saved logins for the entry's origin. Only
  * SHA-256 digests are compared; neither the key nor a digest is ever printed. Null when there is no such entry or the
  * file can't be read (the harness check already says so).
  */
 function codexEntryCheck(home: string, env: NodeJS.ProcessEnv): Check | null {
-  let text: string;
-  let body: string;
-  try {
-    const read = readConfigText(join(codexHome(home, env), "config.toml"));
-    if (read.status !== "ok") return null;
-    text = read.text;
-    const table = getTomlTable(text, CODEX_MCP_TABLE);
-    if (table === null) return null;
-    body = table.body;
-  } catch {
-    return null;
-  }
+  const entry = readCodexEntry(codexUserFile(home, env));
+  if (entry === null) return null;
   const id = "codex_mcp_entry";
   const label = "Codex MCP entry";
-  let bearer: string | null = null;
-  let origin: string | null = null;
+  let seats: Record<string, StoredSeat> = {};
   try {
-    bearer = codexBearer(text, body);
-    const url = readTomlKey(text, CODEX_MCP_TABLE, "url");
-    origin = typeof url === "string" ? originOf(url) : null;
-  } catch {
-    // A table TOML can't spell the way we read it: treated like a key we can't match.
-  }
-  let seats: StoredSeat[] = [];
-  try {
-    seats = Object.values(readCredentialsReport().credentials.seats);
+    seats = readCredentialsReport().credentials.seats;
   } catch {
     // Saved logins that can't be read are their own failed check; here nothing matches.
   }
-  const digest = bearer === null ? null : sha256(bearer);
-  const match =
-    digest === null || origin === null
-      ? undefined
-      : seats.find((seat) => originOf(seat.origin) === origin && timingSafeEqual(sha256(seat.token), digest));
+  const match = entry.bearer === null || entry.url === null ? undefined : seatForBearer(seats, entry.url, entry.bearer);
   if (match === undefined) {
     return { id, level: "warn", label, detail: "holds a key that isn't a saved login; run jubarteai init to refresh it", data: { matched: false } };
   }
-  const workspace = safeForDisplay(match.company.slug, DETAIL_LIMIT);
+  const workspace = safeForDisplay(match.seat.company.slug, DETAIL_LIMIT);
   return { id, level: "ok", label, detail: `uses your saved login for ${workspace}`, data: { matched: true, workspace } };
 }
 

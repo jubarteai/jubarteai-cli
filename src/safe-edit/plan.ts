@@ -2,6 +2,7 @@
 // command that changes a config, hook, skill or instruction file builds a list of
 // steps and hands it to applyPlan, which shows what will happen, asks once, asks
 // again before each sensitive step, and runs the rest. Nothing else writes those files.
+import { agentSessionVar } from "../agent-session.js";
 import { confirm } from "../prompt.js";
 import { redactSecrets, safeForDisplay } from "../output.js";
 import { SafeEditError } from "./atomic-write.js";
@@ -41,6 +42,8 @@ const LABEL_LIMIT = 200;
 const PATH_LIMIT = 400;
 const NEEDS_CONFIRMATION = "needs confirmation";
 const DECLINED = "declined";
+/** Why a sensitive step was not applied on `--yes` inside an agent's shell: no flag can fix that, only the person can. */
+export const NEEDS_PERSON = "needs your approval: an agent's --yes doesn't count; run the command yourself in a terminal";
 
 /** A fixed, secret-free description of why a step threw: the guard's reason, a Node error code, or a generic line. */
 function failureDetail(error: unknown): string {
@@ -86,18 +89,23 @@ async function runStep(step: PlanStep): Promise<StepResult> {
  * Show the plan, then run it. On a TTY (without `yes`) one "Proceed? [Y/n]" covers the whole plan and each sensitive
  * step asks again with its exact entry. Without a TTY the non-sensitive steps run and the sensitive ones are skipped
  * (they need confirmation; their flag says how to apply them) unless `yes`. `yes` runs everything without a prompt.
+ * Inside a coding agent's shell (`agentSession`, detected by default) `yes` covers only the non-sensitive steps: a
+ * sensitive one still asks on a TTY and is skipped without one, because the agent can pass the flag itself (I6, R-M1).
  * Steps sharing an id are one step (the first wins). A step that throws is "failed" with a fixed detail and the others still run. A cancelled prompt (Ctrl-C) rejects.
  */
 export async function applyPlan(
   steps: PlanStep[],
-  opts: { tty: boolean; yes: boolean; out: NodeJS.WritableStream; confirmFn?: typeof confirm },
+  opts: { tty: boolean; yes: boolean; out: NodeJS.WritableStream; confirmFn?: typeof confirm; agentSession?: string | null },
 ): Promise<StepResult[]> {
   // Two adapters may return the same shared step (one hooks file for VS Code and Copilot CLI): the first occurrence wins.
   const seen = new Set<string>();
   steps = steps.filter((step) => !seen.has(step.id) && seen.add(step.id) !== undefined);
   if (steps.length === 0) return [];
   const ask = opts.confirmFn ?? confirm;
+  const agent = opts.agentSession === undefined ? agentSessionVar() : opts.agentSession;
   const prompting = opts.tty && !opts.yes;
+  /** Whether `yes` approves the sensitive steps: never from inside an agent's shell. */
+  const sensitiveYes = opts.yes && agent === null;
   printPlan(steps, opts.out);
 
   if (prompting && !(await ask("Proceed?", { defaultYes: true }))) {
@@ -106,9 +114,10 @@ export async function applyPlan(
 
   const results: StepResult[] = [];
   for (const step of steps) {
-    if (step.sensitive && !opts.yes) {
+    if (step.sensitive && !sensitiveYes) {
       if (!opts.tty) {
-        results.push(skipped(step, NEEDS_CONFIRMATION, step.flag ?? DEFAULT_FLAG));
+        // From an agent's shell no flag applies it, so none is offered (an agent would just add it and try again).
+        results.push(agent !== null ? skipped(step, NEEDS_PERSON) : skipped(step, NEEDS_CONFIRMATION, step.flag ?? DEFAULT_FLAG));
         continue;
       }
       opts.out.write(`${safeForDisplay(step.label, LABEL_LIMIT)}\n`);
