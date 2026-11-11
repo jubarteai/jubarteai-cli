@@ -164,13 +164,13 @@ function manualUnknownVersion(dir: string): ManualInstructions {
   };
 }
 
-function permissionStep(file: string, major: Major): PlanStep {
+function permissionStep(file: string, major: Major, done: boolean): PlanStep {
   const id = `${HARNESS}:permission`;
   return {
     id,
     label: LABEL,
     files: [file],
-    sensitive: true,
+    sensitive: !done,
     preview: `${file}\n${(major === 2 ? v2Lines() : v1Lines()).map((l) => `  ${l}`).join("\n")}`,
     flag: "--yes",
     async apply(): Promise<StepResult> {
@@ -181,10 +181,20 @@ function permissionStep(file: string, major: Major): PlanStep {
   };
 }
 
-/** Whether a parsed config already allows the command, in either version's syntax. */
-function allowsCommand(doc: Obj): boolean {
+/** A read that never throws: no permission to read the file (a root-owned config left by sudo) is "unreadable", not "missing". */
+function readConfig(file: string): ReturnType<typeof readJsonObject> | { status: "unreadable" } {
+  try {
+    return readJsonObject(file);
+  } catch {
+    return { status: "unreadable" };
+  }
+}
+
+/** Whether a parsed config already allows the command, in `major`'s syntax (any version's when null). */
+function allowsCommand(doc: Obj, major: Major | null = null): boolean {
   const permissions = doc["permissions"];
-  if (Array.isArray(permissions) && permissions.some((r) => sameTarget(r) && r["effect"] === "allow")) return true;
+  if (major !== 1 && Array.isArray(permissions) && permissions.some((r) => sameTarget(r) && r["effect"] === "allow")) return true;
+  if (major === 2) return false;
   const permission = doc["permission"];
   if (permission === "allow") return true;
   if (!isObject(permission)) return false;
@@ -209,13 +219,17 @@ export const opencodeAdapter: HarnessAdapter = {
     const major = await installedMajor(ctx);
     if (major === null) return manualUnknownVersion(dir);
     const file = configFile(dir, major === 2 ? V2_FILES : V1_FILES);
-    const read = readJsonObject(file);
+    const read = readConfig(file);
+    if (read.status === "unreadable") {
+      return { kind: "manual", harness: HARNESS, title: LABEL, lines: [`Couldn't read ${file}: fix its permissions, then run init again.`], reason: "the config file is not readable by this user" };
+    }
     if (read.status !== "ok" && read.status !== "missing") {
       return manualPermission(file, major, "the config has comments or is not plain JSON, so it is not rewritten");
     }
-    return permissionStep(file, major);
+    return permissionStep(file, major, read.status === "ok" && allowsCommand(read.doc, major));
   },
 
+  // Prose only, so it names ctx.cliCommand (what agents type), never ctx.hookCommand.
   async hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | null> {
     return {
       kind: "manual",
@@ -234,12 +248,12 @@ export const opencodeAdapter: HarnessAdapter = {
     let unreadable = false;
     let allowed = false;
     for (const name of V2_FILES) {
-      const read = readJsonObject(join(dir, name));
+      const read = readConfig(join(dir, name));
       if (read.status === "ok") allowed = allowed || allowsCommand(read.doc);
       else if (read.status !== "missing") unreadable = true;
     }
     const permission = allowed ? "configured" : unreadable ? "manual" : "missing";
-    const notes = unreadable && !allowed ? ["an OpenCode config has comments or is not plain JSON; check it by hand"] : [];
+    const notes = unreadable && !allowed ? ["an OpenCode config has comments, is not plain JSON or is not readable; check it by hand"] : [];
     return { permission, hooks: "manual", mcpEntries: [], notes };
   },
 

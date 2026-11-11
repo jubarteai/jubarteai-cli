@@ -4,9 +4,10 @@
 // so there is nothing to clean. Every write goes through editJsonFile (I6); the reads here are read-only.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { HOOK_TOTAL_BUDGET_MS } from "../constants.js";
+import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { hookCommand as commandFor, hooksPreview, inspectCommandHooks, mergeCommandHooks, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "gemini-cli" as const;
@@ -14,16 +15,16 @@ const SETTINGS_FILE = "settings.json";
 const SHELL_TOOL_ENTRY = "run_shell_command(jubarteai)";
 const HOOK_NAME = "jubarteai";
 /** Gemini's `timeout` is in milliseconds. session-end is not awaited by Gemini, so it only needs to be quick. */
+const REGISTERED_TIMEOUT_MS = HOOK_REGISTERED_TIMEOUT_S * 1000;
 const SESSION_END_TIMEOUT_MS = 1_000;
 
-/** Gemini's own event names, and the CLI hook event each one runs. */
-const EVENTS: ReadonlyArray<{ gemini: string; event: HookEvent; timeoutMs: number }> = [
-  { gemini: "SessionStart", event: "session-start", timeoutMs: HOOK_TOTAL_BUDGET_MS },
-  { gemini: "BeforeAgent", event: "user-prompt-submit", timeoutMs: HOOK_TOTAL_BUDGET_MS },
-  { gemini: "SessionEnd", event: "session-end", timeoutMs: SESSION_END_TIMEOUT_MS },
+/** Gemini's own event names (`name`), the CLI hook event each one runs (`arg`), and its timeout in milliseconds. */
+const EVENTS: readonly HookEventSpec[] = [
+  { name: "SessionStart", arg: "session-start", timeout: REGISTERED_TIMEOUT_MS },
+  { name: "BeforeAgent", arg: "user-prompt-submit", timeout: REGISTERED_TIMEOUT_MS },
+  { name: "SessionEnd", arg: "session-end", timeout: SESSION_END_TIMEOUT_MS },
 ];
 
-type HookEvent = "session-start" | "user-prompt-submit" | "session-end";
 type Obj = Record<string, unknown>;
 
 function isObject(value: unknown): value is Obj {
@@ -38,12 +39,13 @@ function settingsPath(home: string): string {
   return join(geminiDir(home), SETTINGS_FILE);
 }
 
-function hookCommand(cliCommand: string, event: HookEvent): string {
-  return `${cliCommand} hook ${event} --harness ${HARNESS}`;
-}
-
-function hookEntry(cliCommand: string, event: HookEvent, timeoutMs: number): Obj {
-  return { name: HOOK_NAME, type: "command", command: hookCommand(cliCommand, event), timeout: timeoutMs };
+/**
+ * The hook set for `program` (InitCtx.hookCommand ?? cliCommand): each entry named "jubarteai", each new event group
+ * with an empty matcher. An entry of ours is found by its `hook <event> --harness gemini-cli` suffix, so another
+ * program path updates it in place (mergeCommandHooks).
+ */
+function hooksSpec(ctx: Pick<InitCtx, "cliCommand" | "hookCommand">): HooksEditSpec {
+  return { events: EVENTS, cliCommand: ctx.hookCommand ?? ctx.cliCommand, harness: HARNESS, extra: { name: HOOK_NAME }, group: { matcher: "" } };
 }
 
 /** What a failed edit says, in fixed words. */
@@ -55,11 +57,20 @@ function resultOf(id: string, label: string, edit: JsonEditResult, blocked: stri
 }
 
 /** The settings file as read-only facts: absent, plain JSON, or something the CLI will not rewrite. */
-function readSettings(file: string): { status: "missing" } | { status: "ok"; doc: Obj } | { status: "unwritable" } {
-  const read = readJsonObject(file);
-  if (read.status === "missing") return { status: "missing" };
-  if (read.status === "ok") return { status: "ok", doc: read.doc };
-  return { status: "unwritable" };
+function readSettings(file: string): { status: "missing" } | { status: "ok"; doc: Obj } | { status: "unwritable" } | { status: "unreadable" } {
+  try {
+    const read = readJsonObject(file);
+    if (read.status === "missing") return { status: "missing" };
+    if (read.status === "ok") return { status: "ok", doc: read.doc };
+    return { status: "unwritable" };
+  } catch {
+    // No permission to read it (a root-owned file left by sudo): never mistaken for a missing file.
+    return { status: "unreadable" };
+  }
+}
+
+function manualUnreadable(file: string, title: string): ManualInstructions {
+  return { kind: "manual", harness: HARNESS, title, lines: [`Couldn't read ${file}: fix its permissions, then run init again.`], reason: "the settings file is not readable by this user" };
 }
 
 function manualSettings(file: string, title: string, entryLines: string[], why: string): ManualInstructions {
@@ -101,57 +112,28 @@ function addPermission(doc: Obj, blocked: { reason: string | null }): boolean {
   return true;
 }
 
-/** True when this event's groups already hold exactly our command. */
-function hasHook(groups: unknown, command: string): boolean {
-  if (!Array.isArray(groups)) return false;
-  return groups.some((group) => {
-    if (!isObject(group) || !Array.isArray(group["hooks"])) return false;
-    return group["hooks"].some((h) => isObject(h) && h["command"] === command);
-  });
-}
-
-/** Add our three hooks, leaving every other key and every other hook alone. */
-function addHooks(doc: Obj, cliCommand: string, blocked: { reason: string | null }): boolean {
-  const hooksValue = doc["hooks"];
-  if (hooksValue !== undefined && !isObject(hooksValue)) {
-    blocked.reason = "hooks in settings.json is not an object; add the entries by hand";
+/** Add or update our three hooks, leaving every other key and every other hook alone. */
+function addHooks(doc: Obj, spec: HooksEditSpec, blocked: { reason: string | null }): boolean {
+  const merged = mergeCommandHooks(doc, spec);
+  if (merged.conflict !== undefined) {
+    blocked.reason = `${merged.conflict} in settings.json; add the entries by hand`;
     return false;
   }
-  const hooks: Obj = hooksValue ?? {};
-  for (const { gemini } of EVENTS) {
-    const groups = hooks[gemini];
-    if (groups !== undefined && !Array.isArray(groups)) {
-      blocked.reason = `hooks.${gemini} in settings.json is not a list; add the entries by hand`;
-      return false;
-    }
-  }
-  let changed = false;
-  for (const { gemini, event, timeoutMs } of EVENTS) {
-    const existing = hooks[gemini];
-    const groups: unknown[] = Array.isArray(existing) ? existing : [];
-    if (hasHook(groups, hookCommand(cliCommand, event))) continue;
-    groups.push({ matcher: "", hooks: [hookEntry(cliCommand, event, timeoutMs)] });
-    hooks[gemini] = groups;
-    changed = true;
-  }
-  if (changed) doc["hooks"] = hooks;
-  return changed;
+  return merged.changed;
 }
 
-function hooksJson(cliCommand: string): string[] {
-  const hooks: Obj = {};
-  for (const { gemini, event, timeoutMs } of EVENTS) hooks[gemini] = [{ matcher: "", hooks: [hookEntry(cliCommand, event, timeoutMs)] }];
-  return JSON.stringify({ hooks }, null, 2).split("\n");
+function hooksJson(spec: HooksEditSpec): string[] {
+  return hooksPreview(spec).split("\n");
 }
 
-function permissionStep(file: string): PlanStep {
+function permissionStep(file: string, done: boolean): PlanStep {
   const id = `${HARNESS}:permission`;
   const label = "Gemini CLI: allow the jubarteai command";
   return {
     id,
     label,
     files: [file],
-    sensitive: true,
+    sensitive: !done,
     preview: `${file}\n  tools.allowed += "${SHELL_TOOL_ENTRY}"`,
     flag: "--yes",
     async apply(): Promise<StepResult> {
@@ -162,19 +144,19 @@ function permissionStep(file: string): PlanStep {
   };
 }
 
-function hooksStep(file: string, cliCommand: string): PlanStep {
+function hooksStep(file: string, spec: HooksEditSpec, done: boolean): PlanStep {
   const id = `${HARNESS}:hooks`;
   const label = "Gemini CLI: session hooks";
   return {
     id,
     label,
     files: [file],
-    sensitive: true,
-    preview: `${file}\n${EVENTS.map((e) => `  hooks.${e.gemini}: ${hookCommand(cliCommand, e.event)}`).join("\n")}`,
+    sensitive: !done,
+    preview: `${file}\n${EVENTS.map((e) => `  hooks.${e.name}: ${commandFor(spec.cliCommand, e.arg, HARNESS)}`).join("\n")}`,
     flag: "--yes",
     async apply(): Promise<StepResult> {
       const blocked: { reason: string | null } = { reason: null };
-      const edit = editJsonFile(file, (doc) => addHooks(doc, cliCommand, blocked), { createIfMissing: true, withinHome: true });
+      const edit = editJsonFile(file, (doc) => addHooks(doc, spec, blocked), { createIfMissing: true, withinHome: true });
       return resultOf(id, label, edit, blocked.reason);
     },
   };
@@ -194,34 +176,41 @@ export const geminiCliAdapter: HarnessAdapter = {
 
   async permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions | null> {
     const file = settingsPath(ctx.home);
-    if (readSettings(file).status === "unwritable") {
+    const settings = readSettings(file);
+    if (settings.status === "unreadable") return manualUnreadable(file, "Gemini CLI: allow the jubarteai command");
+    if (settings.status === "unwritable") {
       return manualSettings(file, "Gemini CLI: allow the jubarteai command", ['  "tools": { "allowed": ["' + SHELL_TOOL_ENTRY + '"] }', "(merge it into the existing tools.allowed list)"], UNWRITABLE);
     }
-    return permissionStep(file);
+    const list = settings.status === "ok" ? allowedList(settings.doc) : "absent";
+    return permissionStep(file, Array.isArray(list) && list.includes(SHELL_TOOL_ENTRY));
   },
 
   async hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | null> {
     const file = settingsPath(ctx.home);
+    const spec = hooksSpec(ctx);
     if (ctx.platform === "win32") {
-      return manualSettings(file, "Gemini CLI: session hooks", [...hooksJson(ctx.cliCommand), "(merge it into the existing hooks key)"], "the shell Gemini CLI runs hooks with on Windows is not verified (D25)");
+      return manualSettings(file, "Gemini CLI: session hooks", [...hooksJson(spec), "(merge it into the existing hooks key)"], "the shell Gemini CLI runs hooks with on Windows is not verified (D25)");
     }
-    if (readSettings(file).status === "unwritable") {
-      return manualSettings(file, "Gemini CLI: session hooks", [...hooksJson(ctx.cliCommand), "(merge it into the existing hooks key)"], UNWRITABLE);
+    const settings = readSettings(file);
+    if (settings.status === "unreadable") return manualUnreadable(file, "Gemini CLI: session hooks");
+    if (settings.status === "unwritable") {
+      return manualSettings(file, "Gemini CLI: session hooks", [...hooksJson(spec), "(merge it into the existing hooks key)"], UNWRITABLE);
     }
-    return [hooksStep(file, ctx.cliCommand)];
+    return [hooksStep(file, spec, settings.status === "ok" && inspectCommandHooks(settings.doc, spec) === "configured")];
   },
 
   async inspect(ctx: InitCtx): Promise<AdapterState> {
     const read = readSettings(settingsPath(ctx.home));
+    if (read.status === "unreadable") {
+      return { permission: "manual", hooks: "manual", mcpEntries: [], notes: [`couldn't read ${settingsPath(ctx.home)}: fix its permissions`] };
+    }
     if (read.status === "unwritable") {
       return { permission: "manual", hooks: "manual", mcpEntries: [], notes: ["settings.json has comments or is not plain JSON; check it by hand"] };
     }
     const doc: Obj = read.status === "ok" ? read.doc : {};
     const list = allowedList(doc);
     const permission = Array.isArray(list) && list.includes(SHELL_TOOL_ENTRY) ? "configured" : "missing";
-    const hooksValue = doc["hooks"];
-    const present = EVENTS.filter(({ gemini, event }) => isObject(hooksValue) && hasHook(hooksValue[gemini], hookCommand(ctx.cliCommand, event))).length;
-    const hooks = present === EVENTS.length ? "configured" : present === 0 ? "missing" : "partial";
+    const hooks = inspectCommandHooks(doc, hooksSpec(ctx));
     const notes: string[] = [];
     const config = doc["hooksConfig"];
     if (isObject(config) && config["enabled"] === false) notes.push("hooksConfig.enabled is false in settings.json, so Gemini CLI skips every hook");

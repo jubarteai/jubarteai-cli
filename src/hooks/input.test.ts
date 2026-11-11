@@ -14,6 +14,7 @@ describe("parseHookInput", () => {
   it("reads a Claude Code SessionStart payload", () => {
     expect(parse({ session_id: "s-1", cwd: CWD, source: "resume", hook_event_name: "SessionStart" })).toEqual({
       harness: "claude-code",
+      hint: "claude-code",
       event: "session-start",
       sessionId: "s-1",
       source: "resume",
@@ -58,7 +59,7 @@ describe("parseHookInput", () => {
 
   it("returns nulls, never throws, for malformed or non-object stdin", () => {
     for (const raw of ["", "not json", "[1,2]", "null", "\"s\"", "{"]) {
-      expect(parse(raw)).toEqual({ harness: "claude-code", event: "session-start", sessionId: null, source: null, cwd: FALLBACK });
+      expect(parse(raw)).toEqual({ harness: "claude-code", hint: "claude-code", event: "session-start", sessionId: null, source: null, cwd: FALLBACK });
     }
   });
 });
@@ -70,7 +71,9 @@ describe("harness detection (spec §6.3)", () => {
   });
 
   it("lets Cursor's stdin shape win over a Claude Code hint", () => {
-    expect(parse({ cursor_version: "1.7", conversation_id: "c-1", session_id: "s" }, "claude-code").harness).toBe("cursor");
+    const input = parse({ cursor_version: "1.7", conversation_id: "c-1", session_id: "s" }, "claude-code");
+    expect(input.harness).toBe("cursor");
+    expect(input.hint).toBe("claude-code");
   });
 
   it("needs both Cursor fields", () => {

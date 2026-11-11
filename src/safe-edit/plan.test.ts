@@ -93,6 +93,40 @@ describe("applyPlan: printing the plan", () => {
   });
 });
 
+describe("applyPlan: duplicate steps", () => {
+  it("steps sharing an id are printed, prompted and run once, first occurrence wins, order kept", async () => {
+    const c = collector();
+    const first = step("copilot:hooks", { sensitive: true, label: "First", preview: "entry" });
+    const second = step("copilot:hooks", { sensitive: true, label: "Second" });
+    const other = step("b");
+    const { fn, asked } = answers(true, true);
+    const res = await applyPlan([first, other, second], { tty: true, yes: false, out: c.out, confirmFn: fn });
+    expect(first.ran()).toBe(1);
+    expect(second.ran()).toBe(0);
+    expect(asked.map((a) => a.question)).toEqual(["Proceed?", 'Apply "First"?']);
+    expect(c.text().split("First").length - 1).toBe(2); // once in the plan, once above its own prompt
+    expect(c.text()).not.toContain("Second");
+    expect(res.map((r) => r.id)).toEqual(["copilot:hooks", "b"]);
+    expect(summarize(res)).toHaveLength(2);
+  });
+});
+
+describe("applyPlan: step kind", () => {
+  it("an info step is printed, run and summarized exactly like a change step (the kind is for callers only)", async () => {
+    const run = async (kind: PlanStep["kind"]): Promise<{ text: string; lines: string[]; ran: number }> => {
+      const c = collector();
+      const s = step("a", kind === undefined ? {} : { kind }, "already configured");
+      const res = await applyPlan([s], { tty: false, yes: false, out: c.out, confirmFn: neverAsked });
+      return { text: c.text(), lines: summarize(res), ran: s.ran() };
+    };
+    const info = await run("info");
+    expect(info.ran).toBe(1);
+    expect(info.lines).toEqual(["Step a: already configured"]);
+    expect(await run("change")).toEqual(info);
+    expect(await run(undefined)).toEqual(info);
+  });
+});
+
 describe("applyPlan: on a TTY", () => {
   it("asks Proceed? once with default yes, then runs every non-sensitive step in order", async () => {
     const order: string[] = [];

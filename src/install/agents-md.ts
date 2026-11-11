@@ -102,12 +102,18 @@ function classify(text: string, texts: Texts): Classified {
     const b = text.indexOf(begin);
     const e = text.indexOf(end);
     if (nb !== 1 || ne !== 1 || e < b) return { state: "custom" };
-    const start = b + begin.length + 1;
-    const finish = e - 1;
+    // The marker lines may end in \r\n (a CRLF file): the section's own text is compared with line endings normalized.
+    const afterBegin = b + begin.length;
+    const start = afterBegin + (text.startsWith("\r\n", afterBegin) ? 2 : 1);
+    const finish = e - (text.startsWith("\n", e - 1) && text.charAt(e - 2) === "\r" ? 2 : 1);
     if (text.charAt(start - 1) !== "\n" || text.charAt(e - 1) !== "\n" || finish < start) return { state: "custom" };
-    const inner = text.slice(start, finish);
+    const crlf = text.startsWith("\r\n", afterBegin);
+    const inner = crlf ? text.slice(start, finish).replace(/\r\n/g, "\n") : text.slice(start, finish);
     if (inner === texts.current) return { state: "current" };
-    if (texts.old.includes(inner)) return { state: "known-old", next: text.slice(0, start) + texts.current + text.slice(finish) };
+    if (texts.old.includes(inner)) {
+      const fresh = crlf ? texts.current.replace(/\n/g, "\r\n") : texts.current;
+      return { state: "known-old", next: text.slice(0, start) + fresh + text.slice(finish) };
+    }
     return { state: "custom" };
   }
   if (text.includes(texts.current)) return { state: "current" };
@@ -372,9 +378,12 @@ function fileMode(file: string): number {
   }
 }
 
-/** Writes through writeFileAtomic: a symlinked file is written through to what it names (a link into the home folder only). */
-function writeText(file: string, content: string): void {
-  writeFileAtomic(file, content, { mode: fileMode(file), withinHome: isSymlink(file) });
+/**
+ * Writes through writeFileAtomic: a symlinked file (CLAUDE.md -> AGENTS.md) is written through to what it names, but only
+ * while that stays inside the project: a repo's own link to ~/.zshrc must never be followed.
+ */
+function writeText(root: string, file: string, content: string): void {
+  writeFileAtomic(file, content, { mode: fileMode(file), withinRoot: root });
 }
 
 async function trackedByGit(file: string): Promise<boolean> {
@@ -388,9 +397,9 @@ async function trackedByGit(file: string): Promise<boolean> {
 type Outcome = { status: StepResult["status"]; detail?: string };
 
 /** Runs one write and turns every way it can end into a fixed, secret-free result. */
-async function attempt(file: string, name: string, content: string, verb: string): Promise<Outcome> {
+async function attempt(root: string, file: string, name: string, content: string, verb: string): Promise<Outcome> {
   try {
-    writeText(file, content);
+    writeText(root, file, content);
   } catch (error) {
     // A refusal is the safe outcome, so it is a skip, not a failure (update-sh D13).
     if (error instanceof SafeEditError) return { status: "skipped", detail: `${name} ${REFUSED[error.reason]} it was left unchanged` };
@@ -417,10 +426,10 @@ async function applyAgentsSection(root: string, slug: string | undefined): Promi
   switch (a.state) {
     case "missing":
       return result(id, label, a.exists
-        ? await attempt(a.file, a.name, `${a.text}\n\n${p.texts.section}\n`, "appended")
-        : await attempt(a.file, a.name, `${p.texts.section}\n`, "created"));
+        ? await attempt(root, a.file, a.name, `${a.text}\n\n${p.texts.section}\n`, "appended")
+        : await attempt(root, a.file, a.name, `${p.texts.section}\n`, "created"));
     case "known-old":
-      return result(id, label, await attempt(a.file, a.name, a.next ?? a.text, "refreshed"));
+      return result(id, label, await attempt(root, a.file, a.name, a.next ?? a.text, "refreshed"));
     case "current":
       return { id, label, status: "already configured" };
     case "covered":
@@ -437,7 +446,7 @@ async function applyClaudeSection(root: string, slug: string | undefined): Promi
   const { id, label } = CLAUDE_SECTION_STEP;
   const c = loadProject(root, textsFor(root, slug)).claude;
   if (c.state !== "known-old") return { id, label, status: "already configured" };
-  return result(id, label, await attempt(c.file, c.name, c.next ?? c.text, "refreshed"));
+  return result(id, label, await attempt(root, c.file, c.name, c.next ?? c.text, "refreshed"));
 }
 
 type ImportAction = "append" | "create" | "covered" | "none";
@@ -467,10 +476,10 @@ async function applyClaudeImport(root: string, opts: InstructionOptions, fresh: 
   switch (importAction(p, claudeFamily(root), opts, fresh)) {
     case "append": {
       if (p.claude.state === "unreadable") return { id, label, status: "skipped", detail: "could not read CLAUDE.md, left as it is" };
-      return result(id, label, await attempt(p.claude.file, p.claude.name, `${p.claude.text}\n@AGENTS.md\n`, "appended"));
+      return result(id, label, await attempt(root, p.claude.file, p.claude.name, `${p.claude.text}\n@AGENTS.md\n`, "appended"));
     }
     case "create":
-      return result(id, label, await attempt(p.claude.file, p.claude.name, "@AGENTS.md\n", "created"));
+      return result(id, label, await attempt(root, p.claude.file, p.claude.name, "@AGENTS.md\n", "created"));
     default:
       return { id, label, status: "already configured" };
   }

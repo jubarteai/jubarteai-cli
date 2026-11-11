@@ -9,8 +9,16 @@ export const SESSION_CACHE_VERSION = 1;
 export const SESSION_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export const MCP_TIMEOUT_MS = 60_000;
-export const HOOK_TOTAL_BUDGET_MS = 8_000;
-export const HOOK_NETWORK_TIMEOUT_MS = 5_000;
+/**
+ * The timeout `init` registers with each harness for the session-start and user-prompt-submit hooks, in seconds
+ * (Gemini CLI takes it in milliseconds: × 1000). It is the harness's limit for the whole process, Node start-up
+ * included; the hook's own budget (HOOK_TOTAL_BUDGET_MS) starts only once Node is up, so it stays below this.
+ * Session-end hooks register their own, shorter values (each harness allows it less time).
+ */
+export const HOOK_REGISTERED_TIMEOUT_S = 8;
+/** The hook's internal budget, from when Node is up: below HOOK_REGISTERED_TIMEOUT_S, leaving headroom for start-up. */
+export const HOOK_TOTAL_BUDGET_MS = 6_500;
+export const HOOK_NETWORK_TIMEOUT_MS = 4_000;
 export const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Path of the MCP endpoint on the origin a key was minted for. */

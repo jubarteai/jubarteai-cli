@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { PassThrough } from "node:stream";
+import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { COPILOT_HOOKS_STEP_ID, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -148,6 +149,25 @@ describe("vscode hooks (the shared Copilot file)", () => {
     expect(copilotHooksState(ctx())).toBe("configured");
   });
 
+  it("runs ctx.hookCommand while the auto-approve rule keeps the bare name, and a re-run with another program path updates in place", async () => {
+    mkdirSync(userDir(), { recursive: true });
+    const program = (node: string): string => `"${node}" "/opt/jubarteai/bin/jubarteai.js"`;
+    const permission = await vscodeAdapter.permission(ctx({ hookCommand: program("/old/node") }));
+    if (!isStep(permission)) throw new Error("expected a step");
+    await permission.apply();
+    expect(readJson(settings())["chat.tools.terminal.autoApprove"]).toEqual({ jubarteai: true });
+    await copilotHooksStep(ctx({ hookCommand: program("/old/node") })).apply();
+    expect(copilotHooksState(ctx({ hookCommand: program("/old/node") }))).toBe("configured");
+    expect(copilotHooksState(ctx({ hookCommand: program("/new/node") }))).toBe("partial");
+    const step = copilotHooksStep(ctx({ hookCommand: program("/new/node") }));
+    expect(step.sensitive).toBe(true);
+    expect((await step.apply()).status).toBe("configured");
+    const hooks = readJson(hooksFile())["hooks"] as Record<string, unknown>;
+    expect(hooks["sessionStart"]).toEqual([{ type: "command", command: `${program("/new/node")} hook session-start --harness vscode`, timeoutSec: 8 }]);
+    expect(hooks["sessionEnd"]).toEqual([{ type: "command", command: `${program("/new/node")} hook session-end --harness vscode`, timeoutSec: 3 }]);
+    expect(copilotHooksState(ctx({ hookCommand: program("/new/node") }))).toBe("configured");
+  });
+
   it("follows COPILOT_HOME when it is absolute", async () => {
     const custom = path("elsewhere");
     const step = copilotHooksStep(ctx({ env: { COPILOT_HOME: custom } }));
@@ -222,5 +242,19 @@ describe("vscode MCP cleanup", () => {
     expect(steps).toHaveLength(1);
     expect(isManual(steps[0])).toBe(true);
     expect(read(join(sub, ".vscode", "mcp.json"))).toBe(text);
+  });
+});
+
+describe("vscode re-run (spec 6.1: re-running init is safe)", () => {
+  it("re-plans the permission and the shared hooks as non-sensitive steps that report already configured without a TTY", async () => {
+    mkdirSync(userDir(), { recursive: true });
+    const plan = async (): Promise<PlanStep[]> => [(await vscodeAdapter.permission(ctx())) as PlanStep, ...((await vscodeAdapter.hooks(ctx())) as PlanStep[])];
+    const first = await plan();
+    expect(first.map((s) => s.sensitive)).toEqual([true, true]);
+    await applyPlan(first, { tty: false, yes: true, out: new PassThrough() });
+    const again = await plan();
+    expect(again.map((s) => s.sensitive)).toEqual([false, false]);
+    const results = await applyPlan(again, { tty: false, yes: false, out: new PassThrough() });
+    expect(results.map((r) => r.status)).toEqual(["already configured", "already configured"]);
   });
 });

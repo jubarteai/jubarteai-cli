@@ -40,8 +40,11 @@ function supported(version) {
 }
 
 var current = process.versions.node;
+// A hook never fails the harness (spec section 8, I7): under an unsupported Node it exits 0 and says nothing.
+var isHook = process.argv[2] === "hook";
 
 if (!supported(current)) {
+  if (isHook) process.exit(0);
   var major = parse(current)[0];
   process.stderr.write(
     "jubarteai needs Node " +
@@ -57,11 +60,18 @@ if (!supported(current)) {
 
 import("../dist/main.js").then(
   function (entry) {
-    return entry.main(process.argv.slice(2)).then(function (code) {
-      process.exitCode = code;
-    });
+    return entry.main(process.argv.slice(2)).then(
+      function (code) {
+        process.exitCode = code;
+      },
+      function (error) {
+        if (!isHook) throw error;
+        process.exitCode = 0;
+      },
+    );
   },
   function (error) {
+    if (isHook) process.exit(0);
     process.stderr.write("jubarteai failed to start: " + (error && error.message ? error.message : String(error)) + "\n");
     process.exit(1);
   },

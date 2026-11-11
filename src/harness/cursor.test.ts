@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { PassThrough } from "node:stream";
+import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { cursorAdapter } from "./cursor.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -127,8 +128,52 @@ describe("cursor hooks (session start and end only)", () => {
     expect(doc["version"]).toBe(1);
     const hooks = doc["hooks"] as Record<string, Array<Record<string, unknown>>>;
     expect(Object.keys(hooks).sort()).toEqual(["sessionEnd", "sessionStart"]);
-    expect(hooks["sessionStart"]?.[0]?.["command"]).toBe("jubarteai hook session-start --harness cursor");
-    expect(hooks["sessionEnd"]?.[0]?.["command"]).toBe("jubarteai hook session-end --harness cursor");
+    expect(hooks["sessionStart"]).toEqual([{ command: "jubarteai hook session-start --harness cursor", timeout: 8 }]);
+    expect(hooks["sessionEnd"]).toEqual([{ command: "jubarteai hook session-end --harness cursor", timeout: 3 }]);
+  });
+
+  it("runs ctx.hookCommand, while the permission entry keeps the bare name", async () => {
+    const program = '"/usr/local/bin/node" "/opt/jubarteai/bin/jubarteai.js"';
+    const c = ctx({ ...withCli(), hookCommand: program });
+    const permission = await cursorAdapter.permission(c);
+    const steps = await cursorAdapter.hooks(c);
+    if (!isStep(permission) || steps === null || isManual(steps)) throw new Error("expected steps");
+    await permission.apply();
+    await steps[0]!.apply();
+    expect((readJson(path(".cursor", "cli-config.json"))["permissions"] as Record<string, unknown>)["allow"]).toEqual(["Shell(jubarteai)"]);
+    const hooks = readJson(path(".cursor", "hooks.json"))["hooks"] as Record<string, Array<Record<string, unknown>>>;
+    expect(hooks["sessionStart"]?.[0]?.["command"]).toBe(`${program} hook session-start --harness cursor`);
+    expect((await cursorAdapter.inspect(c)).hooks).toBe("configured");
+  });
+
+  it("a re-run with another program path or timeout updates our entry in place, never a second one", async () => {
+    const file = path(".cursor", "hooks.json");
+    put(
+      file,
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [{ command: "./mine.sh" }, { command: '"/old/node" "/old/jubarteai.js" hook session-start --harness cursor', timeout: 6.5 }],
+          sessionEnd: [
+            { command: "jubarteai hook session-end --harness cursor", timeout: 3 },
+            { command: '"/old/node" "/old/jubarteai.js" hook session-end --harness cursor', timeout: 3 },
+          ],
+        },
+      }),
+    );
+    const c = ctx({ hookCommand: '"/new/node" "/new/jubarteai.js"' });
+    expect((await cursorAdapter.inspect(c)).hooks).toBe("partial");
+    const steps = await cursorAdapter.hooks(c);
+    if (steps === null || isManual(steps)) throw new Error("expected steps");
+    expect(steps[0]?.sensitive).toBe(true);
+    expect((await steps[0]!.apply()).status).toBe("configured");
+    const hooks = readJson(file)["hooks"] as Record<string, Array<Record<string, unknown>>>;
+    expect(hooks["sessionStart"]).toEqual([{ command: "./mine.sh" }, { command: '"/new/node" "/new/jubarteai.js" hook session-start --harness cursor', timeout: 8 }]);
+    expect(hooks["sessionEnd"]).toEqual([{ command: '"/new/node" "/new/jubarteai.js" hook session-end --harness cursor', timeout: 3 }]);
+    expect((await cursorAdapter.inspect(c)).hooks).toBe("configured");
+    const again = await cursorAdapter.hooks(c);
+    if (again === null || isManual(again)) throw new Error("expected steps");
+    expect(again[0]?.sensitive).toBe(false);
   });
 
   it("is idempotent and keeps other hooks and keys", async () => {
@@ -176,7 +221,7 @@ describe("cursor inspect", () => {
   });
 
   it("reports one hook as partial and an unwritable file as manual, and lists files that still hold an MCP entry", async () => {
-    put(path(".cursor", "hooks.json"), JSON.stringify({ version: 1, hooks: { sessionStart: [{ command: "jubarteai hook session-start --harness cursor" }] } }));
+    put(path(".cursor", "hooks.json"), JSON.stringify({ version: 1, hooks: { sessionStart: [{ command: "jubarteai hook session-start --harness cursor", timeout: 8 }] } }));
     put(path(".cursor", "cli-config.json"), "{ // c\n}");
     put(path(".cursor", "mcp.json"), JSON.stringify({ mcpServers: { jubarteai: { url: "https://x" } } }));
     const state = await cursorAdapter.inspect(ctx(withCli()));
@@ -232,5 +277,17 @@ describe("harness adapters never write files themselves (I6)", () => {
       expect(imports.join(",")).not.toMatch(writes);
       expect(source).not.toMatch(/import\s+\*\s+as\s+\w+\s+from\s+"node:fs/);
     }
+  });
+});
+
+describe("cursor re-run (spec 6.1: re-running init is safe)", () => {
+  it("re-plans the permission and hooks as non-sensitive steps that report already configured without a TTY", async () => {
+    const first = [await cursorAdapter.permission(ctx(withCli())), ...((await cursorAdapter.hooks(ctx(withCli()))) as PlanStep[])];
+    expect(first.every((s) => isStep(s) && s.sensitive)).toBe(true);
+    await applyPlan(first as PlanStep[], { tty: false, yes: true, out: new PassThrough() });
+    const again = [await cursorAdapter.permission(ctx(withCli())), ...((await cursorAdapter.hooks(ctx(withCli()))) as PlanStep[])] as PlanStep[];
+    expect(again.map((s) => s.sensitive)).toEqual([false, false]);
+    const results = await applyPlan(again, { tty: false, yes: false, out: new PassThrough() });
+    expect(results.map((r) => r.status)).toEqual(["already configured", "already configured"]);
   });
 });

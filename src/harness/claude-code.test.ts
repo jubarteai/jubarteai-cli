@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
-import { claudeCodeAdapter, HOOK_EVENTS, inspectCommandHooks, mergeCommandHooks, settingsPath } from "./claude-code.js";
+import { claudeCodeAdapter, HOOK_EVENTS, inspectCommandHooks, isOurHookCommand, mergeCommandHooks, settingsPath } from "./claude-code.js";
 import type { DetectEnv, InitCtx, ManualInstructions } from "./types.js";
 
 const isWindows = process.platform === "win32";
@@ -110,6 +110,81 @@ describe("permission and hooks", () => {
     expect(hooks["SessionStart"]?.[0]?.hooks).toEqual([{ type: "command", command: COMMANDS.SessionStart, timeout: 8, statusMessage: "keep me" }]);
     expect(hooks["SessionEnd"]).toHaveLength(1);
     expect(hooks["SessionEnd"]?.[0]?.hooks).toEqual([{ type: "command", command: COMMANDS.SessionEnd, timeout: 5 }]);
+  });
+
+  it("the permission rule keeps the bare name while the hooks run ctx.hookCommand", async () => {
+    const program = '"/usr/local/bin/node" "/opt/jubarteai/bin/jubarteai.js"';
+    await applyAll(ctx({ hookCommand: program }));
+    const doc = readSettings();
+    expect(doc["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"] });
+    const hooks = doc["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
+    expect(hooks["SessionStart"]?.[0]?.hooks[0]?.["command"]).toBe(`${program} hook session-start --harness claude-code`);
+    expect(JSON.stringify(doc["permissions"])).not.toContain("node");
+  });
+
+  it("a re-run with another program path (a Node upgrade) updates our hooks in place, and inspect recognizes them", async () => {
+    const program = (node: string): string => `"${node}" "/opt/jubarteai/bin/jubarteai.js"`;
+    await applyAll(ctx({ hookCommand: program("/nvm/v24.1.0/bin/node") }));
+    const [step] = (await claudeCodeAdapter.hooks(ctx({ hookCommand: program("/nvm/v24.9.0/bin/node") }))) as PlanStep[];
+    expect(step?.sensitive).toBe(true);
+    expect((await claudeCodeAdapter.inspect(ctx({ hookCommand: program("/nvm/v24.9.0/bin/node") }))).hooks).toBe("partial");
+    await applyAll(ctx({ hookCommand: program("/nvm/v24.9.0/bin/node") }));
+    const hooks = readSettings()["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
+    for (const event of ["SessionStart", "UserPromptSubmit", "SessionEnd"]) {
+      expect(hooks[event]).toHaveLength(1);
+      expect(hooks[event]?.[0]?.hooks).toHaveLength(1);
+      expect(hooks[event]?.[0]?.hooks[0]?.["command"]).toMatch(/^"\/nvm\/v24\.9\.0\/bin\/node" /);
+    }
+    expect((await claudeCodeAdapter.inspect(ctx({ hookCommand: program("/nvm/v24.9.0/bin/node") }))).hooks).toBe("configured");
+  });
+
+  // Review M3: duplicates were spliced by shifted indexes and took another tool's hook with them.
+  it("duplicates of ours in one group go, and another tool's hook in the same group stays", async () => {
+    const theirs = { type: "command", command: "other-tool log" };
+    writeSettings({
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              { type: "command", command: COMMANDS.SessionStart, timeout: 8 },
+              { type: "command", command: "/usr/local/bin/jubarteai hook session-start --harness claude-code" },
+              { type: "command", command: "/opt/x/jubarteai hook session-start" },
+              theirs,
+            ],
+          },
+          { hooks: [{ type: "command", command: "/old/jubarteai hook session-start" }] },
+        ],
+      },
+    });
+    await applyAll(ctx());
+    const groups = (readSettings()["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>)["SessionStart"] ?? [];
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.hooks).toEqual([{ type: "command", command: COMMANDS.SessionStart, timeout: 8 }, theirs]);
+  });
+
+  it("when the first of ours is not the first entry, the duplicates still go and everything else stays", async () => {
+    const a = { type: "command", command: "tool-a" };
+    const b = { type: "command", command: "tool-b" };
+    writeSettings({
+      hooks: { SessionEnd: [{ hooks: [a, { type: "command", command: "jubarteai hook session-end", timeout: 1 }, b, { type: "command", command: "/x/jubarteai hook session-end" }, { type: "command", command: "/y/jubarteai hook session-end" }] }] },
+    });
+    await applyAll(ctx());
+    const groups = (readSettings()["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>)["SessionEnd"] ?? [];
+    expect(groups[0]?.hooks).toEqual([a, { type: "command", command: COMMANDS.SessionEnd, timeout: 5 }, b]);
+  });
+
+  it.skipIf(isWindows || (process.getuid?.() ?? 1) === 0)("an unreadable settings.json is manual instructions, not a rejection", async () => {
+    writeSettings({});
+    fs.chmodSync(settings(), 0o000);
+    try {
+      for (const result of [await claudeCodeAdapter.permission(ctx()), await claudeCodeAdapter.hooks(ctx())]) {
+        expect(result).toMatchObject({ kind: "manual", harness: "claude-code" });
+        expect((result as ManualInstructions).lines).toEqual(["couldn't read ~/.claude/settings.json: fix its permissions, then run jubarteai init again"]);
+      }
+      expect(await claudeCodeAdapter.inspect(ctx())).toMatchObject({ permission: "manual", hooks: "manual" });
+    } finally {
+      fs.chmodSync(settings(), 0o600);
+    }
   });
 
   it("the equivalent Bash(jubarteai:*) rule counts as configured", async () => {
@@ -218,6 +293,23 @@ describe("mergeCommandHooks / inspectCommandHooks", () => {
     expect(inspectCommandHooks(doc, spec)).toBe("partial");
     (doc["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>)["SessionStart"]![0]!.hooks[0]!["timeout"] = 600;
     expect(inspectCommandHooks(doc, spec)).toBe("partial");
+  });
+
+  it("recognizes ours by the `hook <event> --harness <id>` suffix, whatever program precedes it", () => {
+    expect(isOurHookCommand('"/usr/bin/node" "/x/jubarteai.js" hook session-start --harness claude-code', "session-start", "claude-code")).toBe(true);
+    expect(isOurHookCommand('"C:\\Program Files\\nodejs\\node.exe" "C:\\x\\bin\\jubarteai.js" hook session-end --harness codex ', "session-end", "codex")).toBe(true);
+    expect(isOurHookCommand("anything hook session-start --harness claude-code", "session-start", "claude-code")).toBe(true);
+    expect(isOurHookCommand("hook session-start --harness claude-code", "session-start", "claude-code")).toBe(false);
+    expect(isOurHookCommand("x hook session-start --harness claude-code-extra", "session-start", "claude-code")).toBe(false);
+    expect(isOurHookCommand("x hook session-start --harness codex", "session-start", "claude-code")).toBe(false);
+    expect(isOurHookCommand("x hook session-end --harness claude-code", "session-start", "claude-code")).toBe(false);
+    expect(isOurHookCommand("x hook session-start --harness claude-code && rm -rf ~", "session-start", "claude-code")).toBe(false);
+
+    const doc: Record<string, unknown> = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: '"/old/node" "/old/jubarteai.js" hook session-start --harness claude-code', timeout: 8 }] }] } };
+    expect(mergeCommandHooks(doc, spec).changed).toBe(true);
+    const groups = (doc["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>)["SessionStart"];
+    expect(groups).toHaveLength(1);
+    expect(groups?.[0]?.hooks).toEqual([{ type: "command", command: COMMANDS.SessionStart, timeout: 8 }]);
   });
 
   it("does not mistake a similarly named command for ours", () => {

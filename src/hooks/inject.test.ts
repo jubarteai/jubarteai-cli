@@ -11,6 +11,7 @@ import {
   identityLine,
   injectionSupported,
 } from "./inject.js";
+import type { Spill } from "./inject.js";
 
 const AGENT = "aaaaaaaa-0000-4000-8000-00000000000a";
 
@@ -113,43 +114,89 @@ describe("composeInjection", () => {
     expect(composeInjection("cursor", "user-prompt-submit", identity, [message(1)])).toBe("");
   });
 
-  it.each<[HarnessId, number]>([
-    ["claude-code", 10_000],
-    ["codex", 6_000],
-    ["gemini-cli", 10_000],
-  ])("%s: drops whole trailing messages to stay under %i characters and says how many", (harness, limit) => {
-    const messages = Array.from({ length: 40 }, (_, i) => message(i, 600));
-    const out = composeInjection(harness, "session-start", identity, messages);
-    expect(out.length).toBeLessThanOrEqual(limit);
-    const text =
-      harness === "gemini-cli"
-        ? (JSON.parse(out) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext
-        : out;
-    const payload = JSON.parse(text.split("\n")[1]?.slice("JubarteAI messages: ".length) ?? "") as {
-      messages: Array<Record<string, unknown>>;
-      truncated: number;
+  const bigMessages = (): Array<Record<string, unknown>> => Array.from({ length: 40 }, (_, i) => message(i, 600));
+
+  function spillRecorder(ok = true): { spill: Spill; saved: unknown[][] } {
+    const saved: unknown[][] = [];
+    return {
+      saved,
+      spill: {
+        path: "/tmp/jubarteai-501/sessions/abc.overflow-1.json",
+        save: (dropped) => {
+          saved.push([...dropped]);
+          return ok;
+        },
+      },
     };
-    expect(payload.messages.length).toBeGreaterThan(0);
-    expect(payload.messages.length).toBeLessThan(40);
-    expect(payload.truncated).toBe(40 - payload.messages.length);
-    // Whole messages only: each survivor is intact and in order.
-    payload.messages.forEach((m, i) => expect(m).toEqual(messages[i]));
+  }
+
+  function bodyOf(harness: HarnessId, out: string): string {
+    return harness === "gemini-cli"
+      ? (JSON.parse(out) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext
+      : out;
+  }
+
+  it.each<HarnessId>(["claude-code", "gemini-cli"])(
+    "%s: whole trailing messages that don't fit under 10,000 characters are handed to the spill, not lost, and the output says where",
+    (harness) => {
+      const messages = bigMessages();
+      const { spill, saved } = spillRecorder();
+      const out = composeInjection(harness, "session-start", identity, messages, spill);
+      expect(out.length).toBeLessThanOrEqual(10_000);
+      const lines = bodyOf(harness, out).trimEnd().split("\n");
+      const payload = JSON.parse(lines[1]?.slice("JubarteAI messages: ".length) ?? "") as { messages: unknown[] };
+      expect(payload.messages.length).toBeGreaterThan(0);
+      expect(payload.messages.length).toBeLessThan(40);
+      payload.messages.forEach((m, i) => expect(m).toEqual(messages[i]));
+      const dropped = 40 - payload.messages.length;
+      expect(lines[2]).toBe(`JubarteAI: ${dropped} more messages didn't fit; read them from ${spill.path}`);
+      // Nothing is lost: kept plus saved is every message, in order.
+      expect(saved).toHaveLength(1);
+      expect([...payload.messages, ...(saved[0] ?? [])]).toEqual(messages);
+      expect(out).not.toContain("truncated");
+    },
+  );
+
+  it("Codex never drops: every message is injected, the spill is untouched", () => {
+    const messages = bigMessages();
+    const { spill, saved } = spillRecorder();
+    const out = composeInjection("codex", "session-start", identity, messages, spill);
+    expect(out.length).toBeGreaterThan(10_000);
+    const payload = JSON.parse(out.split("\n")[1]?.slice("JubarteAI messages: ".length) ?? "") as { messages: unknown[] };
+    expect(payload.messages).toEqual(messages);
+    expect(saved).toEqual([]);
+    expect(out).not.toContain("didn't fit");
   });
 
-  it("keeps all messages and no truncated key when they fit", () => {
-    const out = composeInjection("claude-code", "session-start", identity, [message(1), message(2)]);
-    expect(out).not.toContain("truncated");
+  it("says so when the overflow could not be saved, and when there is no spill at all", () => {
+    const failed = composeInjection("claude-code", "session-start", identity, bigMessages(), spillRecorder(false).spill);
+    expect(failed).toMatch(/JubarteAI: \d+ more messages didn't fit and could not be saved\.\n$/);
+    expect(failed).not.toContain("read them from");
+    expect(failed.length).toBeLessThanOrEqual(10_000);
+    const none = composeInjection("claude-code", "session-start", identity, bigMessages());
+    expect(none).toMatch(/didn't fit and could not be saved\.\n$/);
   });
 
-  it("drops every message but still says so when even one is too long", () => {
-    const out = composeInjection("claude-code", "session-start", identity, [message(1, 20_000)]);
+  it("uses the singular for one message, and spills it all when even one is too long", () => {
+    const { spill, saved } = spillRecorder();
+    const out = composeInjection("claude-code", "session-start", identity, [message(1, 20_000)], spill);
     expect(out.length).toBeLessThanOrEqual(10_000);
-    expect(JSON.parse(out.split("\n")[1]?.slice("JubarteAI messages: ".length) ?? "")).toEqual({ messages: [], truncated: 1 });
+    const lines = out.trimEnd().split("\n");
+    expect(JSON.parse(lines[1]?.slice("JubarteAI messages: ".length) ?? "")).toEqual({ messages: [] });
+    expect(lines[2]).toBe(`JubarteAI: 1 more message didn't fit; read them from ${spill.path}`);
+    expect(saved[0]).toHaveLength(1);
+  });
+
+  it("keeps all messages, with no note and no spill call, when they fit", () => {
+    const { spill, saved } = spillRecorder();
+    const out = composeInjection("claude-code", "session-start", identity, [message(1), message(2)], spill);
+    expect(out).not.toContain("didn't fit");
+    expect(saved).toEqual([]);
   });
 
   it("never cuts inside a JSON string, even with escapes and multi-byte text", () => {
     const messages = Array.from({ length: 30 }, (_, i) => ({ id: i, content: `"quoted" \\ \n ✓ 😀 ${"é".repeat(500)}` }));
-    const out = composeInjection("claude-code", "session-start", identity, messages);
+    const out = composeInjection("claude-code", "session-start", identity, messages, spillRecorder().spill);
     expect(() => JSON.parse(out.split("\n")[1]?.slice("JubarteAI messages: ".length) ?? "")).not.toThrow();
   });
 

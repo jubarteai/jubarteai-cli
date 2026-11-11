@@ -2,7 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { PassThrough } from "node:stream";
+import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { zedAdapter } from "./zed.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -168,5 +169,17 @@ describe("zed MCP cleanup", () => {
     expect(steps).toHaveLength(1);
     expect(isManual(steps[0])).toBe(true);
     expect(read(file)).toBe(text);
+  });
+});
+
+describe("zed re-run (spec 6.1: re-running init is safe)", () => {
+  it("re-plans the permission as a non-sensitive step that reports already configured without a TTY", async () => {
+    const first = (await zedAdapter.permission(ctx())) as PlanStep;
+    expect(first.sensitive).toBe(true);
+    await applyPlan([first], { tty: false, yes: true, out: new PassThrough() });
+    const again = (await zedAdapter.permission(ctx())) as PlanStep;
+    expect(again.sensitive).toBe(false);
+    const results = await applyPlan([again], { tty: false, yes: false, out: new PassThrough() });
+    expect(results.map((r) => r.status)).toEqual(["already configured"]);
   });
 });

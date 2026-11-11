@@ -11,6 +11,11 @@ export type ManualInstructions = {
   lines: string[];
   /** Why this is manual, e.g. "not verified (D25)". */
   reason: string;
+  /**
+   * A stable machine-readable id for instructions a command acts on (e.g. "codex-trust-hooks"), so callers never
+   * match on the printed text. Absent for instructions that are only printed.
+   */
+  code?: string;
 };
 
 export type DetectEnv = {
@@ -23,8 +28,18 @@ export type DetectEnv = {
 export type InitCtx = DetectEnv & {
   /** Null when run from ~ or /. */
   projectRoot: string | null;
-  /** "jubarteai" */
+  /** The bare command agents type ("jubarteai"): permission rules and every printed line use it. */
   cliCommand: string;
+  /**
+   * What a registered hook's command line starts with, when it differs from cliCommand: init passes the absolute
+   * `"<node>" "<bin>"` (resolveCliCommand) so a hook works without the CLI on the editor's PATH. Hook entries use
+   * `hookCommand ?? cliCommand`; it never goes into a permission rule or a message.
+   */
+  hookCommand?: string;
+  /** `--yes`: no prompt of any kind, so a choice that would be asked takes its private default. Default false. */
+  yes?: boolean;
+  /** Whether a person can answer a prompt (stdin or the controlling terminal is a TTY). Default false: nothing is asked. */
+  tty?: boolean;
 };
 
 export type CleanupScope = {
@@ -57,7 +72,11 @@ export interface HarnessAdapter {
   detect(env: DetectEnv): Promise<boolean>;
   /** PlanStep.sensitive = true; the "--no-permissions" flag is honoured by the caller. */
   permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions | null>;
-  /** Sensitive; hook command: `${ctx.cliCommand} hook <session-start|user-prompt-submit|session-end> --harness <id>`. */
+  /**
+   * Sensitive; hook command: `${ctx.hookCommand ?? ctx.cliCommand} hook <session-start|user-prompt-submit|session-end> --harness <id>`.
+   * An entry of ours is recognized by its `hook <event> --harness <id>` suffix whatever program precedes it, so a
+   * re-run with another program path updates it in place.
+   */
   hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | null>;
   /** Read-only, for doctor. */
   inspect(ctx: InitCtx): Promise<AdapterState>;

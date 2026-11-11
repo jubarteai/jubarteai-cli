@@ -16,6 +16,7 @@ import {
   startFakeServer,
 } from "../../test/helpers/fake-mcp-server.js";
 import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
+import { HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
 import { routeWith } from "../cli/router.js";
 import { SESSION_END_NETWORK_TIMEOUT_MS } from "../hooks/events.js";
 import { callTool } from "../mcp/client.js";
@@ -61,7 +62,7 @@ async function server(messages: unknown[] = []): Promise<FakeServer> {
 }
 
 function deps(over: Partial<HookDeps> = {}): HookDeps {
-  return { call: callTool, budgetMs: 8000, networkTimeoutMs: 5000, endTimeoutMs: SESSION_END_NETWORK_TIMEOUT_MS, env: {}, ...over };
+  return { call: callTool, budgetMs: HOOK_TOTAL_BUDGET_MS, networkTimeoutMs: HOOK_NETWORK_TIMEOUT_MS, endTimeoutMs: SESSION_END_NETWORK_TIMEOUT_MS, env: {}, ...over };
 }
 
 type Result = { code: number; out: string; err: string };
@@ -85,7 +86,7 @@ const startPayload = (over: Record<string, unknown> = {}): Record<string, unknow
 const MESSAGES = [{ id: "m1", from_name: "Peer", content: "<untrusted_content>hi</untrusted_content>", priority: "urgent" }];
 
 describe("hook command", () => {
-  it("is registered as an internal command with a --harness flag", () => {
+  it("defines an internal command named hook with a --harness flag (registration is CW2's)", () => {
     expect(hookCommand.name).toBe("hook");
     expect(hookCommand.group).toBe("internal");
     expect(hookCommand.flags.map((f) => f.name)).toEqual(["harness"]);
@@ -229,7 +230,7 @@ describe("never fails the harness (exit 0)", () => {
     expect(result).toEqual({ code: 0, out: "", err: "" });
   });
 
-  it("a server that stalls past the 8 s budget (fake timers): exit 0 and no output", async () => {
+  it("a server that stalls past the 6.5 s budget (fake timers): exit 0 and no output", async () => {
     bind(sandbox.repo);
     const s = await server();
     sandbox.signIn(s.origin);
@@ -243,7 +244,7 @@ describe("never fails the harness (exit 0)", () => {
         },
       },
     });
-    await vi.advanceTimersByTimeAsync(7999);
+    await vi.advanceTimersByTimeAsync(HOOK_TOTAL_BUDGET_MS - 1);
     let settled = false;
     void pending.then(() => {
       settled = true;
@@ -259,7 +260,7 @@ describe("never fails the harness (exit 0)", () => {
     bind(sandbox.repo);
     vi.useFakeTimers();
     const pending = hook("session-start", null);
-    await vi.advanceTimersByTimeAsync(8000);
+    await vi.advanceTimersByTimeAsync(HOOK_TOTAL_BUDGET_MS);
     expect(await pending).toEqual({ code: 0, out: "", err: "" });
   });
 
@@ -275,17 +276,37 @@ describe("never fails the harness (exit 0)", () => {
 });
 
 describe("detection and per-harness output", () => {
-  it("a Claude-registered hook that receives Cursor-shaped stdin uses Cursor's format and cache key", async () => {
+  const CURSOR_STDIN = (): Record<string, unknown> => ({
+    conversation_id: "conv-1",
+    session_id: "cur-1",
+    cursor_version: "1.7.0",
+    workspace_roots: [sandbox.repo],
+  });
+
+  it("a Claude-registered hook that receives Cursor-shaped stdin does nothing: Cursor's own hook connects (no second agent)", async () => {
     bind(sandbox.repo);
     const s = await server();
     sandbox.signIn(s.origin);
-    const result = await hook("session-start", { conversation_id: "conv-1", session_id: "cur-1", cursor_version: "1.7.0", workspace_roots: [sandbox.repo] }, { harness: "claude-code" });
+    expect(await hook("session-start", CURSOR_STDIN(), { harness: "claude-code" })).toEqual({ code: 0, out: "", err: "" });
+    expect(s.requests).toHaveLength(0);
+    expect(readSession("cursor", "cur-1")).toBeNull();
+    expect(readSession("claude-code", "cur-1")).toBeNull();
+    // Nor does its session-end disconnect what Cursor's own hook owns.
+    writeSession("cursor", "cur-1", { harness: "cursor", agent_id: AGENT_A, seat_id: SEAT_ID, origin: s.origin }, { overwrite: true });
+    expect(await hook("session-end", CURSOR_STDIN(), { harness: "claude-code" })).toEqual({ code: 0, out: "", err: "" });
+    expect(s.requests).toHaveLength(0);
+  });
+
+  it("the Cursor-registered hook on Cursor stdin connects once, in Cursor's format and under Cursor's cache key", async () => {
+    bind(sandbox.repo);
+    const s = await server();
+    sandbox.signIn(s.origin);
+    const result = await hook("session-start", CURSOR_STDIN(), { harness: "cursor" });
     const parsed = JSON.parse(result.out) as { additional_context: string };
     expect(parsed.additional_context).toContain(AGENT_A);
     expect(result.out.trimEnd().split("\n")).toHaveLength(1);
     expect(readSession("cursor", "cur-1")?.agent_id).toBe(AGENT_A);
-    expect(readSession("claude-code", "cur-1")).toBeNull();
-    expect(s.toolCalls()[0]?.arguments).toEqual({ description: `cursor on ${sandbox.repo.split("/").pop()?.toLowerCase()}` });
+    expect(s.toolCalls()).toEqual([{ name: "connect", arguments: { description: `cursor on ${sandbox.repo.split("/").pop()?.toLowerCase()}` } }]);
   });
 
   it("Devin's environment makes it the Windsurf product, which has no injection: nothing printed, no request", async () => {

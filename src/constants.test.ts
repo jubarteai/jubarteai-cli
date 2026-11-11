@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import {
   cliVersion,
   DEFAULT_ORIGIN,
+  HOOK_NETWORK_TIMEOUT_MS,
+  HOOK_REGISTERED_TIMEOUT_S,
+  HOOK_TOTAL_BUDGET_MS,
   INBOX_MIN_POLL_MS,
   INBOX_POLL_TIMEOUT_MS,
   INBOX_RETRY_AFTER_NETWORK_MS,
@@ -22,6 +25,15 @@ describe("constants", () => {
     const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
     expect(cliVersion()).toBe(manifest.version);
     expect(cliVersion()).toBe(cliVersion());
+  });
+
+  it("the hook budget leaves headroom under the 8 s harness timeouts, with the network call inside it", () => {
+    expect(HOOK_TOTAL_BUDGET_MS).toBe(6_500);
+    expect(HOOK_NETWORK_TIMEOUT_MS).toBe(4_000);
+    expect(HOOK_NETWORK_TIMEOUT_MS).toBeLessThan(HOOK_TOTAL_BUDGET_MS);
+    expect(HOOK_REGISTERED_TIMEOUT_S).toBe(8);
+    // At least a second and a half of the registered timeout is left for Node's start-up.
+    expect(HOOK_REGISTERED_TIMEOUT_S * 1000 - HOOK_TOTAL_BUDGET_MS).toBeGreaterThanOrEqual(1_500);
   });
 
   it("the default origin is https and the loopback list is exactly the three hosts", () => {

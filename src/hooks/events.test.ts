@@ -1,11 +1,12 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AGENT_A, AGENT_B, SEAT_ID, createSandbox, deadOrigin, expectNoSecrets, sendJson, startFakeServer } from "../../test/helpers/fake-mcp-server.js";
 import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
 import { callTool } from "../mcp/client.js";
-import { readSession, writeSession } from "../session/cache.js";
+import { sessionsDir } from "../paths.js";
+import { readSession, sessionKey, writeSession } from "../session/cache.js";
 import type { HarnessId } from "../session/harness-env.js";
 import { SESSION_END_NETWORK_TIMEOUT_MS, parseHookEvent, runHookEvent } from "./events.js";
 import type { HookEvent, HookRuntime } from "./events.js";
@@ -45,7 +46,8 @@ function runtime(over: Partial<HookRuntime> = {}): HookRuntime {
 }
 
 function input(event: HookEvent, over: Partial<HookInput> = {}): HookInput {
-  return { harness: "claude-code", event, sessionId: "sess-1", source: "startup", cwd: sandbox.repo, ...over };
+  const harness = over.harness === undefined ? "claude-code" : over.harness;
+  return { harness, hint: harness, event, sessionId: "sess-1", source: "startup", cwd: sandbox.repo, ...over };
 }
 
 const MESSAGES = [{ id: "m1", from_name: "Peer", content: "<untrusted_content>hello</untrusted_content>", priority: "normal" }];
@@ -322,6 +324,93 @@ describe("session-end", () => {
     writeSession("cursor", "sess-1", { harness: "cursor", agent_id: AGENT_A, seat_id: SEAT_ID, origin: s.origin }, { overwrite: true });
     expect(await runHookEvent(input("session-end", { harness: "cursor" }), runtime())).toBe("");
     expect(s.toolCalls()).toHaveLength(1);
+  });
+});
+
+describe("a hook another harness's own registered hook duplicates (M4)", () => {
+  it.each<[HarnessId, HookEvent]>([
+    ["cursor", "session-start"],
+    ["cursor", "session-end"],
+    ["vscode", "session-start"],
+    ["vscode", "session-end"],
+    ["copilot-cli", "session-start"],
+    ["copilot-cli", "session-end"],
+  ])("detected %s differs from the claude-code hint on %s: nothing, no request", async (harness, event) => {
+    bind(sandbox.repo);
+    const s = await connectingServer(MESSAGES);
+    sandbox.signIn(s.origin);
+    writeSession(harness, "sess-1", { harness, agent_id: AGENT_B, seat_id: SEAT_ID, origin: s.origin }, { overwrite: true });
+    expect(await runHookEvent(input(event, { harness, hint: "claude-code" }), runtime())).toBe("");
+    expect(s.requests).toHaveLength(0);
+  });
+
+  it("the same detected harness with its own hint, or with no hint, does the work", async () => {
+    bind(sandbox.repo);
+    const s = await connectingServer();
+    sandbox.signIn(s.origin);
+    expect(await runHookEvent(input("session-start", { harness: "cursor", hint: "cursor" }), runtime())).toContain(AGENT_A);
+    expect(await runHookEvent(input("session-start", { harness: "cursor", hint: null, sessionId: "sess-2" }), runtime())).toContain(AGENT_A);
+    expect(s.toolCalls()).toHaveLength(2);
+  });
+});
+
+describe("messages that don't fit are saved, not dropped", () => {
+  const many = Array.from({ length: 30 }, (_, i) => ({ id: `m${i}`, content: `<untrusted_content>${"y".repeat(800)}</untrusted_content>` }));
+
+  it("Claude Code: the rest goes to <sessions dir>/<session key>.overflow-<ts>.json (0600) and the output names it", async () => {
+    bind(sandbox.repo);
+    const s = await connectingServer(many);
+    sandbox.signIn(s.origin);
+    const out = await runHookEvent(input("session-start"), runtime());
+    expect(out.length).toBeLessThanOrEqual(10_000);
+    const note = /JubarteAI: (\d+) more messages didn't fit; read them from (\S+)\n$/.exec(out);
+    expect(note).not.toBeNull();
+    const [, count, path] = note as RegExpExecArray;
+    expect(path).toContain(`${sessionKey("claude-code", "sess-1")}.overflow-`);
+    expect(path?.startsWith(sessionsDir())).toBe(true);
+    const saved = JSON.parse(readFileSync(path as string, "utf8")) as { messages: Array<{ id: string }> };
+    expect(saved.messages).toHaveLength(Number(count));
+    const shown = JSON.parse(out.split("\n")[1]?.slice("JubarteAI messages: ".length) ?? "") as { messages: Array<{ id: string }> };
+    expect([...shown.messages, ...saved.messages].map((m) => m.id)).toEqual(many.map((m) => m.id));
+    if (process.platform !== "win32") expect(statSync(path as string).mode & 0o777).toBe(0o600);
+  });
+
+  it("Codex gets every message inline and no file is written", async () => {
+    bind(sandbox.repo);
+    const s = await connectingServer(many);
+    sandbox.signIn(s.origin);
+    const out = await runHookEvent(input("session-start", { harness: "codex", hint: "codex" }), runtime());
+    expect(out.length).toBeGreaterThan(10_000);
+    expect(out).not.toContain("didn't fit");
+    const shown = JSON.parse(out.split("\n")[1]?.slice("JubarteAI messages: ".length) ?? "") as { messages: unknown[] };
+    expect(shown.messages).toHaveLength(30);
+    expect(existsSync(sessionsDir()) ? readdirSync(sessionsDir()).filter((n) => n.includes("overflow")) : []).toEqual([]);
+  });
+
+  it("prunes overflow files older than 7 days, and keeps recent ones", async () => {
+    bind(sandbox.repo);
+    const s = await connectingServer(many);
+    sandbox.signIn(s.origin);
+    mkdirSync(sessionsDir(), { recursive: true });
+    const old = join(sessionsDir(), `${"a".repeat(32)}.overflow-1.json`);
+    const recent = join(sessionsDir(), `${"b".repeat(32)}.overflow-2.json`);
+    writeFileSync(old, "{}");
+    writeFileSync(recent, "{}");
+    const eightDays = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    utimesSync(old, eightDays, eightDays);
+    await runHookEvent(input("session-start"), runtime());
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(recent)).toBe(true);
+  });
+
+  it("says they could not be saved when the sessions folder is unwritable", async () => {
+    bind(sandbox.repo);
+    const s = await connectingServer(many);
+    sandbox.signIn(s.origin);
+    writeFileSync(join(sandbox.dir, "tmp"), "not a directory");
+    const out = await runHookEvent(input("session-start"), runtime());
+    expect(out).toMatch(/didn't fit and could not be saved\.\n$/);
+    expect(out.length).toBeLessThanOrEqual(10_000);
   });
 });
 

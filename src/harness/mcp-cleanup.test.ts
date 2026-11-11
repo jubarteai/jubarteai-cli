@@ -8,6 +8,9 @@
 // ported: in a linked worktree: the old key Claude Code files under the main checkout is removed through the CLI
 // ported: without the CLI: a legacy ~/.claude/.config.json is the file written, not ~/.claude.json
 // ported: without the CLI: writes CLAUDE_CONFIG_DIR/.claude.json and drops an old local-scope key there
+// ported: with a git older than 2.31 (no --path-format) the worktree's main checkout is still found
+// ported: a worktree of a bare repository: the key is the repository itself
+// ported: a submodule is its own project: its key is dropped, the superproject's is left alone
 // ported: an old key in this project's local scope (the panel's old command) is removed, reported as updated
 // ported: a JSON config another user owns is never written: the user file is skipped, an old key in a project file fails the step
 // ported: a hard-linked config is never split by a rewrite: the user file is skipped, a project file fails, every link unchanged
@@ -164,6 +167,79 @@ describe("local scope of Claude Code", () => {
     expect(projects[sub]?.mcpServers).toEqual({});
   });
 
+  const gitIn = (cwd: string, ...args: string[]): void => {
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "-c", "protocol.file.allow=always", ...args], { cwd, stdio: "ignore" });
+  };
+  function repoWithCommit(dir: string): void {
+    fs.mkdirSync(dir, { recursive: true });
+    gitIn(dir, "init", "-q");
+    write(path.join(dir, "a.txt"), "a");
+    gitIn(dir, "add", ".");
+    gitIn(dir, "commit", "-q", "-m", "init");
+  }
+  const localKeys = (file: string): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(readJson(file)["projects"] as Record<string, { mcpServers: Record<string, unknown> }>).map(([k, v]) => [k, v.mcpServers]));
+
+  posix("git older than 2.31 (no --path-format, relative answers): the worktree's main checkout is still found", async () => {
+    const main = path.join(root, "main");
+    repoWithCommit(main);
+    const tree = path.join(root, "tree");
+    gitIn(main, "worktree", "add", "-q", tree);
+    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin);
+    // Old git echoes an option it doesn't know and answers the rest; the common directory comes back relative to where it runs.
+    fs.writeFileSync(
+      path.join(bin, "git"),
+      `#!/bin/sh
+if [ "$1" = rev-parse ] && [ "$2" = --path-format=absolute ]; then
+  printf '%s\\n' "$2"
+  shift 2
+  set -- rev-parse "$@"
+fi
+if [ "$1" = rev-parse ] && [ "$2" = --git-common-dir ] && [ "$(pwd -P)" = ${JSON.stringify(tree)} ]; then
+  printf '%s\\n' ${JSON.stringify(path.relative(tree, path.join(main, ".git")))}
+  exit 0
+fi
+exec ${JSON.stringify(realGit)} "$@"
+`,
+      { mode: 0o755 },
+    );
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath ?? ""}`;
+    try {
+      const file = writeJson(path.join(home, ".claude.json"), { projects: { [main]: { mcpServers: { jubarteai: entry } } } });
+      await run(await cleanup("claude-code", scope({ projectRoot: tree, startDir: tree })));
+      expect(localKeys(file)).toEqual({ [main]: {} });
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  posix("a worktree of a bare repository: the key is the repository itself", async () => {
+    const source = path.join(root, "source");
+    repoWithCommit(source);
+    const bare = path.join(root, "repo.git");
+    gitIn(root, "clone", "-q", "--bare", source, bare);
+    const tree = path.join(root, "bare-wt");
+    gitIn(bare, "worktree", "add", "-q", tree);
+    const file = writeJson(path.join(home, ".claude.json"), { projects: { [bare]: { mcpServers: { jubarteai: entry, keep: other } }, [source]: { mcpServers: { jubarteai: entry } } } });
+    await run(await cleanup("claude-code", scope({ projectRoot: tree, startDir: tree })));
+    expect(localKeys(file)).toEqual({ [bare]: { keep: other }, [source]: { jubarteai: entry } });
+  });
+
+  posix("a submodule is its own project: its key is dropped, the superproject's is left alone", async () => {
+    const lib = path.join(root, "lib-src");
+    repoWithCommit(lib);
+    const superproject = path.join(root, "super");
+    repoWithCommit(superproject);
+    gitIn(superproject, "submodule", "add", "-q", lib, "lib");
+    const submodule = fs.realpathSync(path.join(superproject, "lib"));
+    const file = writeJson(path.join(home, ".claude.json"), { projects: { [submodule]: { mcpServers: { jubarteai: entry } }, [superproject]: { mcpServers: { jubarteai: entry } } } });
+    await run(await cleanup("claude-code", scope({ projectRoot: submodule, startDir: submodule })));
+    expect(localKeys(file)).toEqual({ [submodule]: {}, [superproject]: { jubarteai: entry } });
+  });
+
   it("run from ~ or /, the local scope is only reported", async () => {
     const file = writeJson(path.join(home, ".claude.json"), { projects: { [home]: { mcpServers: { jubarteai: entry } } } });
     const before = fs.readFileSync(file, "utf8");
@@ -289,6 +365,39 @@ describe("files that are reported, never edited", () => {
     fs.symlinkSync(real, link);
     await run(await cleanup("cursor", scope()));
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readJson(real)).toEqual({ mcpServers: { keep: other } });
+  });
+
+  // Review B1: a repo's own link must never steer an edit into a file outside the project.
+  posix("a project .mcp.json linked to a file outside the project is reported; that file is untouched", async () => {
+    const proj = path.join(home, "proj");
+    const user = writeJson(path.join(home, ".cursor", "mcp.json"), { mcpServers: { jubarteai: entry, keep: other } });
+    fs.mkdirSync(proj, { recursive: true });
+    fs.symlinkSync("../.cursor/mcp.json", path.join(proj, ".mcp.json"));
+    const items = await mcpCleanupFor("claude-code", scope({ projectRoot: proj, startDir: proj }));
+    expect(steps(items)).toEqual([]);
+    expect(manuals(items)[0]?.lines[0]).toBe("skipped: it is a symbolic link, or sits in a directory that is one, remove it by hand: ~/proj/.mcp.json");
+    expect(readJson(user)).toEqual({ mcpServers: { jubarteai: entry, keep: other } });
+  });
+
+  posix("a project .codex linked to a folder outside the project is reported; the file it leads to is untouched", async () => {
+    const proj = path.join(home, "proj");
+    const text = `[mcp_servers.jubarteai]\nurl = "x"\n`;
+    const real = write(path.join(home, "elsewhere", "config.toml"), text);
+    fs.mkdirSync(proj, { recursive: true });
+    fs.symlinkSync("../elsewhere", path.join(proj, ".codex"));
+    const items = await mcpCleanupFor("codex", scope({ projectRoot: proj, startDir: proj }));
+    expect(steps(items)).toEqual([]);
+    expect(manuals(items)[0]?.lines[0]).toBe("skipped: it is a symbolic link, or sits in a directory that is one, remove it by hand: ~/proj/.codex/config.toml");
+    expect(fs.readFileSync(real, "utf8")).toBe(text);
+  });
+
+  posix("a project config linked to another file inside the project is still written through", async () => {
+    const proj = path.join(home, "proj");
+    const real = writeJson(path.join(proj, "config", "mcp.json"), { mcpServers: { jubarteai: entry, keep: other } });
+    fs.symlinkSync("config/mcp.json", path.join(proj, ".mcp.json"));
+    await run(await mcpCleanupFor("claude-code", scope({ projectRoot: proj, startDir: proj })));
+    expect(fs.lstatSync(path.join(proj, ".mcp.json")).isSymbolicLink()).toBe(true);
     expect(readJson(real)).toEqual({ mcpServers: { keep: other } });
   });
 

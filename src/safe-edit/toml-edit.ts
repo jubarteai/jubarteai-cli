@@ -444,7 +444,7 @@ export function setTomlKey(text: string, table: string, key: string, value: stri
  * hard links) only when `edit` says it changed something. "refused" carries the guard's reason, or "invalid-json" for a
  * file that is not UTF-8 text or is too big to be a config; nothing is written then.
  */
-export function editTomlFile(file: string, edit: (text: string) => { text: string; changed: boolean }, opts: { createIfMissing: boolean; mode?: number; withinHome?: boolean }): JsonEditResult {
+export function editTomlFile(file: string, edit: (text: string) => { text: string; changed: boolean }, opts: { createIfMissing: boolean; mode?: number; withinHome?: boolean; withinRoot?: string }): JsonEditResult {
   const read = readConfigText(file);
   if (read.status === "unreadable") return { status: "refused", reason: "invalid-json" };
   if (read.status === "missing" && !opts.createIfMissing) return { status: "missing" };

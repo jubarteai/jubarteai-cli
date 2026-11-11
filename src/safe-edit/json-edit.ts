@@ -50,7 +50,9 @@ function isErrno(e: unknown, code: string): boolean {
   return typeof e === "object" && e !== null && "code" in e && e.code === code;
 }
 
-type WriteOpts = { createIfMissing: boolean; mode?: number; withinHome?: boolean };
+/** `withinRoot`: a file inside a project; a link is followed only while the file it names stays inside that directory (see file-guards.ts). */
+type WriteOpts = { createIfMissing: boolean; mode?: number; withinHome?: boolean; withinRoot?: string };
+const BOM = "\uFEFF";
 
 /**
  * Write `text` to `file` atomically (writeFileAtomic runs the guards), mode `opts.mode`, else the mode the file already has, else 0600.
@@ -59,7 +61,7 @@ type WriteOpts = { createIfMissing: boolean; mode?: number; withinHome?: boolean
 export function writeConfigText(file: string, text: string, existingMode: number | null, opts: WriteOpts): RefusalReason | null {
   const mode = opts.mode ?? existingMode ?? DEFAULT_MODE;
   try {
-    writeFileAtomic(file, text, { mode, withinHome: opts.withinHome });
+    writeFileAtomic(file, text, { mode, withinHome: opts.withinHome, withinRoot: opts.withinRoot });
   } catch (e) {
     if (e instanceof SafeEditError) return e.reason;
     throw e;
@@ -78,7 +80,7 @@ function parseObject(text: string): Parsed {
   if (text.trim().length === 0) return { status: "ok", doc: {} };
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(text.startsWith(BOM) ? text.slice(1) : text);
   } catch {
     return { status: looksLikeJsonc(text) ? "jsonc" : "invalid-json" };
   }
@@ -127,10 +129,13 @@ export function editJsonFile(file: string, edit: (doc: Record<string, unknown>) 
   const read = readConfigText(file);
   if (read.status === "unreadable") return { status: "refused", reason: "invalid-json" };
   if (read.status === "missing" && !opts.createIfMissing) return { status: "missing" };
-  const original = read.status === "ok" ? read.text : null;
+  const raw = read.status === "ok" ? read.text : null;
+  // A byte order mark is not part of the JSON: it is set aside for the parse and put back on write.
+  const bom = raw !== null && raw.startsWith(BOM) ? BOM : "";
+  const original = raw === null ? null : raw.slice(bom.length);
   const parsed: Parsed = original === null ? { status: "ok", doc: {} } : parseObject(original);
   if (parsed.status !== "ok") return { status: "refused", reason: parsed.status };
   if (!edit(parsed.doc)) return { status: "unchanged" };
-  const refusal = writeConfigText(file, render(parsed.doc, original), read.status === "ok" ? read.mode : null, opts);
+  const refusal = writeConfigText(file, bom + render(parsed.doc, original), read.status === "ok" ? read.mode : null, opts);
   return refusal === null ? { status: "changed" } : { status: "refused", reason: refusal };
 }

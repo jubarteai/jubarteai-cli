@@ -77,7 +77,7 @@ const dir = __dirname;
 const cfg = JSON.parse(fs.readFileSync(path.join(dir, me + ".json"), "utf8"));
 const argv = process.argv.slice(2);
 const sawToken = "JUBARTEAI_TOKEN" in process.env || Object.values(process.env).some((v) => String(v).includes("jba_FAKE"));
-fs.appendFileSync(path.join(dir, me + ".log"), JSON.stringify({ argv: argv, cwd: fs.realpathSync(process.cwd()), sawToken: sawToken }) + "\\n");
+fs.appendFileSync(path.join(dir, me + ".log"), JSON.stringify({ argv: argv, cwd: fs.realpathSync(process.cwd()), sawToken: sawToken, env: { registry: process.env.npm_config_registry === undefined ? null : process.env.npm_config_registry, nodeOptionsNpm: process.env.npm_config_node_options === undefined ? null : process.env.npm_config_node_options, nodeOptions: process.env.NODE_OPTIONS === undefined ? null : process.env.NODE_OPTIONS } }) + "\\n");
 `;
 
 const NPX_STUB = `${STUB_PRELUDE}
@@ -117,7 +117,7 @@ if (argv[0] === "--version") {
 }
 `;
 
-type Call = { argv: string[]; cwd: string; sawToken: boolean };
+type Call = { argv: string[]; cwd: string; sawToken: boolean; env: Record<string, string | null> };
 type NpxConfig = { exitCode?: number; copyTo?: { project?: string[]; global?: string[] }; writesLock?: boolean };
 type ClaudeConfig = {
   version?: string;
@@ -161,11 +161,30 @@ function stubNpx(config: NpxConfig = {}): void {
   writeStub("npx", NPX_STUB, { fixture: sb.fixture, ...config });
 }
 
+/** An npm whose `config get registry` answers from the registry= line of $HOME/.npmrc, like npm's user config. */
+const NPM_STUB = `${STUB_PRELUDE}
+if (argv.join(" ") === "config get registry") {
+  let registry = "https://registry.npmjs.org/";
+  try {
+    const m = /^registry=(.*)$/m.exec(fs.readFileSync(path.join(process.env.HOME, ".npmrc"), "utf8"));
+    if (m) registry = m[1].trim();
+  } catch (e) {}
+  if (cfg.answer !== undefined) registry = cfg.answer;
+  process.stdout.write(registry + "\\n");
+} else {
+  process.exit(64);
+}
+`;
+
+function stubNpm(config: { answer?: string } = {}): void {
+  writeStub("npm", NPM_STUB, config);
+}
+
 function stubClaude(config: ClaudeConfig = {}): void {
   writeStub("claude", CLAUDE_STUB, config);
 }
 
-function calls(tool: "npx" | "claude"): Call[] {
+function calls(tool: "npx" | "claude" | "npm"): Call[] {
   const file = join(sb.bin, `${tool}.log`);
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8")
@@ -259,7 +278,7 @@ beforeEach(() => {
 
 afterEach(() => {
   // A key in the caller's environment must never reach a child.
-  for (const tool of ["npx", "claude"] as const) {
+  for (const tool of ["npx", "claude", "npm"] as const) {
     for (const call of calls(tool)) {
       expect(call.sawToken).toBe(false);
       expect(call.argv.join(" ")).not.toContain("jba_");
@@ -787,6 +806,26 @@ describe.skipIf(!posix)("skill: planning changes nothing", () => {
     expect(existsSync(join(sb.bin, "claude.state"))).toBe(false);
   });
 
+  it("marks every finding kind info and every change kind change (unset), and running the findings changes nothing", async () => {
+    const dir = copyAt(projectCopy(".claude/skills"), STALE_FILES);
+    writeFileSync(join(sb.project, "skills-lock.json"), LOCK);
+    stubNpx({ copyTo: { project: [dir] } });
+    stubClaude({ pluginList: [userPlugin(OLD_VERSION)], pluginListAfterUpdate: [userPlugin(NEW_VERSION)] });
+    const before = skillTreeSha(dir);
+    const steps = await plan();
+
+    const changes = steps.filter((s) => s.kind !== "info");
+    const findings = steps.filter((s) => s.kind === "info");
+    expect(changes.map((s) => s.label).sort()).toEqual([`Update plugin ${PLUGIN_ID} (user)`, "Update skill (project, npx copy)"].sort());
+    expect(changes.every((s) => s.kind === undefined)).toBe(true);
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings.map((s) => s.label)).toContain("Plugin auto-update");
+    for (const finding of findings) await finding.apply();
+    expect(calls("npx")).toEqual([]);
+    expect(claudeMutations()).toEqual([]);
+    expect(skillTreeSha(dir)).toBe(before);
+  });
+
   it("with nothing installed the update plan is empty and nothing runs", async () => {
     stubNpx();
     expect(await plan()).toEqual([]);
@@ -800,6 +839,13 @@ describe.skipIf(!posix)("skill: init", () => {
     const { steps, results } = await run({ mode: "init", agents: ["claude-code", "cursor", "windsurf"] });
 
     expect(steps).toHaveLength(1);
+    // The plan lists every folder add writes (the shared dir once) and the project lock.
+    expect(steps[0]?.files).toEqual([
+      join(sb.project, ".claude/skills/jubarteai"),
+      join(sb.project, ".agents/skills/jubarteai"),
+      join(sb.project, ".windsurf/skills/jubarteai"),
+      join(sb.project, "skills-lock.json"),
+    ]);
     expect(calls("npx").map((c) => c.argv)).toEqual([addArgv("-a", "claude-code", "-a", "cursor", "-a", "windsurf")]);
     expect(calls("npx")[0]?.cwd).toBe(sb.project);
     expect(results[0]).toMatchObject({ status: "configured", detail: "installed for claude-code, cursor, windsurf" });
@@ -807,7 +853,8 @@ describe.skipIf(!posix)("skill: init", () => {
 
   it("from ~ installs at global scope (-g) from HOME", async () => {
     stubNpx();
-    await run({ mode: "init", root: null, cwd: sb.home, agents: ["claude-code"] });
+    const { steps } = await run({ mode: "init", root: null, cwd: sb.home, agents: ["claude-code"] });
+    expect(steps[0]?.files).toEqual([join(sb.home, ".claude/skills/jubarteai")]);
     expect(calls("npx").map((c) => c.argv)).toEqual([addArgv("-g", "-a", "claude-code")]);
     expect(calls("npx")[0]?.cwd).toBe(sb.home);
   });
@@ -816,10 +863,11 @@ describe.skipIf(!posix)("skill: init", () => {
     stubNpx();
     copyAt(projectCopy(".agents/skills"), LATEST_FILES);
     stubClaude({ pluginList: [userPlugin(NEW_VERSION)] });
-    const { results } = await run({ mode: "init", agents: ["claude-code", "cursor", "codex"] });
+    const { steps, results } = await run({ mode: "init", agents: ["claude-code", "cursor", "codex"] });
 
     expect(calls("npx")).toEqual([]);
     expect(results[0]).toMatchObject({ status: "already configured", detail: "skill already installed" });
+    expect(steps[0]?.kind).toBe("info");
   });
 
   it("adds only the harnesses that are missing", async () => {
@@ -857,6 +905,64 @@ describe.skipIf(!posix)("skill: init", () => {
     stubNpx({ writesLock: true });
     const { results } = await run({ mode: "init", agents: ["cursor"] });
     expect(results[0]?.detail).toContain("The skills CLI created skills-lock.json in the project root");
+  });
+});
+
+describe.skipIf(!posix)("skill: npm environment of the skills add child", () => {
+  const MIRROR = "https://npm.mirror.example.test/repository/npm/";
+  const npxEnv = (): Array<Call["env"]> => calls("npx").map((c) => c.env);
+
+  /** init, and an update of a stale copy: both start npx in the project folder. */
+  async function runInitAndUpdate(): Promise<void> {
+    stubNpx();
+    await run({ mode: "init", agents: ["cursor"] });
+    const dir = copyAt(projectCopy(".claude/skills"), STALE_FILES);
+    writeFileSync(join(sb.project, "skills-lock.json"), LOCK);
+    stubNpx({ copyTo: { project: [dir] } });
+    await run();
+  }
+
+  it("gives the child the user's registry from ~/.npmrc, never the repo's, with node options emptied", async () => {
+    writeFileSync(join(sb.home, ".npmrc"), `registry=${MIRROR}\n`);
+    writeFileSync(join(sb.project, ".npmrc"), "registry=https://evil.example.test/\nnode-options=--require=./x.js\n");
+    stubNpm();
+    await runInitAndUpdate();
+
+    expect(npxEnv()).toEqual([
+      { registry: MIRROR, nodeOptionsNpm: "", nodeOptions: "" },
+      { registry: MIRROR, nodeOptionsNpm: "", nodeOptions: "" },
+    ]);
+    // The lookup ran from the home folder (no project .npmrc) with the node options emptied.
+    const lookups = calls("npm");
+    expect(lookups.length).toBeGreaterThan(0);
+    for (const l of lookups) {
+      expect(l.argv).toEqual(["config", "get", "registry"]);
+      expect(l.cwd).toBe(sb.home);
+      expect(l.env.nodeOptions).toBe("");
+      expect(l.env.nodeOptionsNpm).toBe("");
+    }
+  });
+
+  it("falls back to the public registry when npm is missing or answers with something that is not a plain http(s) URL", async () => {
+    const pinned = { registry: "https://registry.npmjs.org/", nodeOptionsNpm: "", nodeOptions: "" };
+    process.env.NODE_OPTIONS = "--require=./x.js";
+    process.env.npm_config_node_options = "--require=./x.js";
+    try {
+      writeFileSync(join(sb.project, ".npmrc"), "registry=https://evil.example.test/\n");
+      // npm not on PATH
+      await runInitAndUpdate();
+      expect(npxEnv()).toEqual([pinned, pinned]);
+      for (const answer of ["file:///etc/passwd", "https://user:pw@mirror.example.test/", "not a url", ""]) {
+        rmSync(join(sb.bin, "npx.log"));
+        stubNpm({ answer });
+        stubNpx();
+        await run({ mode: "init", agents: ["cursor"] });
+        expect(npxEnv()).toEqual([pinned]);
+      }
+    } finally {
+      delete process.env.NODE_OPTIONS;
+      delete process.env.npm_config_node_options;
+    }
   });
 });
 

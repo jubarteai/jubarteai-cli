@@ -40,6 +40,8 @@ type Target = {
   format: "json" | "toml";
   /** True for a config that belongs to one project (a .mcp.json, .codex/config.toml, Claude Code's local scope). */
   project: boolean;
+  /** True when the file sits in the project's own tree (what a repo's contents can steer): a link out of the project is never followed. */
+  inProject: boolean;
   /** JSON only: the entries to remove from this file. */
   entries: Entry[];
 };
@@ -117,6 +119,12 @@ function manual(harness: CleanupHarness, file: string, home: string, reason: str
   };
 }
 
+/** A user-level entry that is deliberately left in place, and why. */
+function kept(harness: CleanupHarness, file: string, home: string, reason: string): ManualInstructions {
+  const shown = shownPath(file, home);
+  return { kind: "manual", harness, title: `jubarteai MCP entry in ${shown}`, lines: [`kept: ${reason}: ${shown}`], reason };
+}
+
 function absoluteEnvDir(env: NodeJS.ProcessEnv, name: string): string | null {
   const value = env[name];
   return value !== undefined && value !== "" && path.isAbsolute(value) ? value : null;
@@ -180,10 +188,15 @@ async function claudeProjectKeys(scope: CleanupScope, start: string): Promise<st
   if (root !== null) {
     let main = "";
     let mainRaw = "";
+    // git before 2.31 has no --path-format: it echoes the option back and answers relative to the directory it runs in.
+    // Then the plain answer is taken and resolved against the project root.
     const git = async (arg: string): Promise<string> => {
-      const result = await runCommand("git", ["rev-parse", "--path-format=absolute", arg], { cwd: root, timeoutMs: GIT_TIMEOUT_MS });
-      const line = result.code === 0 ? result.stdout.trim() : "";
-      return path.isAbsolute(line) ? line : "";
+      const modern = await runCommand("git", ["rev-parse", "--path-format=absolute", arg], { cwd: root, timeoutMs: GIT_TIMEOUT_MS });
+      const line = modern.code === 0 ? modern.stdout.trim() : "";
+      if (path.isAbsolute(line)) return line;
+      const plain = await runCommand("git", ["rev-parse", arg], { cwd: root, timeoutMs: GIT_TIMEOUT_MS });
+      const answer = plain.code === 0 ? plain.stdout.trim() : "";
+      return answer === "" || answer.includes("\n") ? "" : path.resolve(root, answer);
     };
     const gitDir = await git("--git-dir");
     const commonRaw = await git("--git-common-dir");
@@ -211,7 +224,13 @@ async function claudeProjectKeys(scope: CleanupScope, start: string): Promise<st
 }
 
 function jsonTarget(harness: CleanupHarness, file: string, project: boolean, entryPath: string[], what: string): Target {
-  return { harness, file, format: "json", project, entries: [{ path: entryPath, what }] };
+  return { harness, file, format: "json", project, inProject: project, entries: [{ path: entryPath, what }] };
+}
+
+/** How the safe-edit layer treats links for this file: inside the project's own tree only while they stay in the project, else within the home directory. */
+function linkRules(target: Target, scope: CleanupScope): { withinRoot: string } | { withinHome: boolean } {
+  if (target.inProject && scope.projectRoot !== null) return { withinRoot: scope.projectRoot };
+  return { withinHome: isUnderHome(target.file, scope.home) };
 }
 
 async function targetsFor(harness: CleanupHarness, scope: CleanupScope): Promise<Target[]> {
@@ -235,14 +254,15 @@ async function targetsFor(harness: CleanupHarness, scope: CleanupScope): Promise
         file,
         format: "json",
         project: true,
+        inProject: false,
         entries: keys.map((key) => ({ path: ["projects", key, "mcpServers", MCP_SERVER_NAME], what: `local scope of ${safeForDisplay(key, SHOWN_PATH_LIMIT)}` })),
       });
       jsonName([".mcp.json"], ["mcpServers", MCP_SERVER_NAME], "project config");
       break;
     }
     case "codex": {
-      out.push({ harness, file: path.join(codexHome(home, env), "config.toml"), format: "toml", project: false, entries: [] });
-      for (const dir of dirs) out.push({ harness, file: path.join(dir, ".codex", "config.toml"), format: "toml", project: true, entries: [] });
+      out.push({ harness, file: path.join(codexHome(home, env), "config.toml"), format: "toml", project: false, inProject: false, entries: [] });
+      for (const dir of dirs) out.push({ harness, file: path.join(dir, ".codex", "config.toml"), format: "toml", project: true, inProject: true, entries: [] });
       break;
     }
     case "cursor": {
@@ -315,8 +335,8 @@ function removePath(doc: Record<string, unknown>, entryPath: string[]): boolean 
 
 type Guarded = { ok: true } | { ok: false; reason: string };
 
-function guard(file: string, home: string): Guarded {
-  const result = assertSafeTarget(file, { allowMissing: false, withinHome: isUnderHome(file, home) });
+function guard(target: Target, scope: CleanupScope): Guarded {
+  const result = assertSafeTarget(target.file, { allowMissing: false, ...linkRules(target, scope) });
   if (result.ok) return { ok: true };
   return { ok: false, reason: result.reason === "missing" ? "the file went away" : REFUSAL_TEXT[result.reason] };
 }
@@ -386,7 +406,7 @@ function examine(target: Target, scope: CleanupScope): Finding {
   if (!holds) return none;
   if (blocked === null && target.project && scope.projectRoot === null) blocked = FROM_HOME;
   if (blocked === null) {
-    const g = guard(target.file, scope.home);
+    const g = guard(target, scope);
     if (!g.ok) blocked = g.reason;
   }
   return { target, holds, blocked, present };
@@ -422,7 +442,7 @@ function describe(entries: Entry[]): string {
 function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | undefined): PlanStep {
   const { target } = finding;
   const shown = shownPath(target.file, scope.home);
-  const withinHome = isUnderHome(target.file, scope.home);
+  const rules = linkRules(target, scope);
   const id = `mcp-cleanup:${target.harness}:${target.project ? "project" : "user"}:${target.file}`;
   const detailText = target.format === "toml" ? `[${CODEX_TABLE}]` : describe(finding.present);
   const label = `Remove the jubarteai MCP entry from ${shown} (${detailText})`;
@@ -443,7 +463,7 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
       let result: JsonEditResult;
       if (target.format === "toml") {
         try {
-          result = editTomlFile(target.file, (text) => removeTomlTable(text, CODEX_TABLE), { createIfMissing: false, withinHome });
+          result = editTomlFile(target.file, (text) => removeTomlTable(text, CODEX_TABLE), { createIfMissing: false, ...rules });
         } catch (e) {
           if (e instanceof TomlConflictError) return skippedResult({ id, label }, `it sets jubarteai inline or with dotted keys, remove it by hand: ${shown}`);
           throw e;
@@ -457,7 +477,7 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
             for (const p of paths) changed = removePath(doc, p) || changed;
             return changed;
           },
-          { createIfMissing: false, withinHome },
+          { createIfMissing: false, ...rules },
         );
       }
       switch (result.status) {
@@ -475,14 +495,20 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
 
 /**
  * Steps (and report-only instructions) that remove the jubarteai MCP entry from one harness' configs. A config that
- * holds no entry produces nothing, so a second run is empty. `gate` may keep the entry at apply time (Codex, D5).
+ * holds no entry produces nothing, so a second run is empty. `gate` may keep the entry at apply time (Codex, D5);
+ * `keepUser` reports every user-level entry as kept, with that reason, instead of removing it.
  */
-export async function mcpCleanupFor(harness: CleanupHarness, scope: CleanupScope, opts: { gate?: CleanupGate } = {}): Promise<Array<PlanStep | ManualInstructions>> {
+export async function mcpCleanupFor(
+  harness: CleanupHarness,
+  scope: CleanupScope,
+  opts: { gate?: CleanupGate; keepUser?: string } = {},
+): Promise<Array<PlanStep | ManualInstructions>> {
   const out: Array<PlanStep | ManualInstructions> = [];
   for (const target of await targetsFor(harness, scope)) {
     const finding = examine(target, scope);
     if (!finding.holds) continue;
-    if (finding.blocked !== null) out.push(manual(harness, target.file, scope.home, finding.blocked));
+    if (opts.keepUser !== undefined && !target.project) out.push(kept(harness, target.file, scope.home, opts.keepUser));
+    else if (finding.blocked !== null) out.push(manual(harness, target.file, scope.home, finding.blocked));
     else out.push(stepFor(finding, scope, opts.gate));
   }
   return out;

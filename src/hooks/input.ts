@@ -9,6 +9,8 @@ import type { HookEvent } from "./events.js";
 
 export type HookInput = {
   harness: HarnessId | null;
+  /** The `--harness` value the hook was registered with; `harness` differs from it when detection won. */
+  hint: HarnessId | null;
   event: HookEvent;
   sessionId: string | null;
   source: string | null;
@@ -98,5 +100,5 @@ export function parseHookInput(
     if (fromEnv !== null && (harness === null || fromEnv.harness === harness)) sessionId = fromEnv.sessionId;
   }
   const source = doc !== null && typeof doc["source"] === "string" && SOURCE_RE.test(doc["source"]) ? doc["source"] : null;
-  return { harness, event, sessionId, source, cwd: cwdFrom(doc) ?? fallbackCwd };
+  return { harness, hint, event, sessionId, source, cwd: cwdFrom(doc) ?? fallbackCwd };
 }

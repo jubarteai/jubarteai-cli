@@ -6,13 +6,14 @@
 //   - MCP cleanup: ~/.cursor/mcp.json and .cursor/mcp.json (`mcpServers.jubarteai`), install.sh's two paths, through
 //     mcp-cleanup.ts (C6a).
 // Every write goes through editJsonFile (I6). This file also holds the small JSON-config helpers the VS Code, Windsurf
-// and Zed adapters share (jsonEditStep, readable, manual, hookCommand), so the four stay one idiom.
+// and Zed adapters share (jsonEditStep, readable, manual, hookCommand, mergeFlatHook), so the four stay one idiom.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { HOOK_TOTAL_BUDGET_MS } from "../constants.js";
+import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import type { HarnessId } from "../session/harness-env.js";
+import { isOurHookCommand } from "./claude-code.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
@@ -38,7 +39,17 @@ export function readable(file: string): { status: "missing" } | { status: "ok"; 
   return { status: "unwritable" };
 }
 
-/** A step that edits one JSON file through editJsonFile. `edit` mutates the document and says what it did. */
+/** True when the file is plain JSON that `edit` would leave as it is (a dry run on a copy; nothing is written). */
+function alreadyInPlace(file: string, edit: (doc: Obj) => EditOutcome): boolean {
+  const current = readable(file);
+  return current.status === "ok" && edit(structuredClone(current.doc)) === "same";
+}
+
+/**
+ * A step that edits one JSON file through editJsonFile. `edit` mutates the document and says what it did.
+ * The step is sensitive (asks first) only while there is something to write: when the entry is already in place it is
+ * non-sensitive and reports "already configured", so re-running init never prompts (spec §6.1).
+ */
 export function jsonEditStep(o: {
   id: string;
   label: string;
@@ -51,7 +62,7 @@ export function jsonEditStep(o: {
     id: o.id,
     label: o.label,
     files: [o.file],
-    sensitive: true,
+    sensitive: !alreadyInPlace(o.file, o.edit),
     preview: `${o.file}\n${o.preview}`,
     flag: "--yes",
     async apply(): Promise<StepResult> {
@@ -86,6 +97,59 @@ export function hookCommand(cliCommand: string, event: HookEvent, harness: Harne
   return `${cliCommand} hook ${event} --harness ${harness}`;
 }
 
+/** The program part of a registered hook: the absolute command init resolved, else the bare name. Never for a permission rule or prose. */
+export function hookProgram(ctx: Pick<InitCtx, "cliCommand" | "hookCommand">): string {
+  return ctx.hookCommand ?? ctx.cliCommand;
+}
+
+/** The entries of a flat hook list (Cursor's, Copilot's: `[{ command, … }]`) that are ours for this event and harness. */
+function oursIn(entries: unknown[], event: HookEvent, harness: HarnessId): Obj[] {
+  return entries.filter((e): e is Obj => isObject(e) && typeof e["command"] === "string" && isOurHookCommand(e["command"], event, harness));
+}
+
+/**
+ * Put `wanted` into a flat hook list for one event: appended when none of ours is there, else written over our first
+ * entry (another program path after a Node upgrade, another timeout) with any further copies of ours dropped. Other
+ * tools' entries stay as they are. Returns whether the list changed.
+ */
+export function mergeFlatHook(entries: unknown[], wanted: Obj, event: HookEvent, harness: HarnessId): boolean {
+  const ours = oursIn(entries, event, harness);
+  const first = ours[0];
+  if (first === undefined) {
+    entries.push(wanted);
+    return true;
+  }
+  let changed = false;
+  for (const [key, value] of Object.entries(wanted)) {
+    if (first[key] !== value) {
+      first[key] = value;
+      changed = true;
+    }
+  }
+  const dupes = new Set<unknown>(ours.slice(1));
+  if (dupes.size > 0) {
+    const kept = entries.filter((e) => !dupes.has(e));
+    entries.splice(0, entries.length, ...kept);
+    changed = true;
+  }
+  return changed;
+}
+
+/** Whether a flat hook list holds exactly `wanted` as our one entry ("exact"), some other entry of ours ("stale"), or none. */
+export function flatHookState(entries: unknown, wanted: Obj, event: HookEvent, harness: HarnessId): "exact" | "stale" | "none" {
+  if (!Array.isArray(entries)) return "none";
+  const ours = oursIn(entries, event, harness);
+  const first = ours[0];
+  if (first === undefined) return "none";
+  return ours.length === 1 && Object.entries(wanted).every(([key, value]) => first[key] === value) ? "exact" : "stale";
+}
+
+/** "configured" when every event holds exactly our entry, "missing" when none holds one of ours, else "partial". */
+export function hooksStateOf(states: ReadonlyArray<"exact" | "stale" | "none">): "configured" | "partial" | "missing" {
+  if (states.every((s) => s === "exact")) return "configured";
+  return states.every((s) => s === "none") ? "missing" : "partial";
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Cursor
 // ---------------------------------------------------------------------------------------------------------------
@@ -94,7 +158,7 @@ const HARNESS = "cursor" as const;
 const LABEL = "Cursor";
 const SHELL_ENTRY = "Shell(jubarteai)";
 /** Cursor's hook timeout is in seconds. sessionEnd is fire-and-forget, so it only needs to be quick. */
-const START_TIMEOUT_S = HOOK_TOTAL_BUDGET_MS / 1000;
+const START_TIMEOUT_S = HOOK_REGISTERED_TIMEOUT_S;
 const END_TIMEOUT_S = 3;
 const EVENTS: ReadonlyArray<{ cursor: string; event: HookEvent; timeoutS: number }> = [
   { cursor: "sessionStart", event: "session-start", timeoutS: START_TIMEOUT_S },
@@ -145,11 +209,11 @@ function addPermission(doc: Obj): EditOutcome {
   return "changed";
 }
 
-function hasHook(entries: unknown, command: string): boolean {
-  return Array.isArray(entries) && entries.some((e) => isObject(e) && e["command"] === command);
+function wantedHook(program: string, event: HookEvent, timeoutS: number): Obj {
+  return { command: hookCommand(program, event, HARNESS), timeout: timeoutS };
 }
 
-function addHooks(doc: Obj, cliCommand: string): EditOutcome {
+function addHooks(doc: Obj, program: string): EditOutcome {
   const hooksValue = doc["hooks"];
   if (hooksValue !== undefined && !isObject(hooksValue)) return { blocked: "hooks in hooks.json is not an object; add the entries by hand" };
   const hooks: Obj = hooksValue ?? {};
@@ -158,10 +222,8 @@ function addHooks(doc: Obj, cliCommand: string): EditOutcome {
   }
   let changed = false;
   for (const { cursor, event, timeoutS } of EVENTS) {
-    const command = hookCommand(cliCommand, event, HARNESS);
     const entries: unknown[] = Array.isArray(hooks[cursor]) ? hooks[cursor] : [];
-    if (hasHook(entries, command)) continue;
-    entries.push({ command, timeout: timeoutS });
+    if (!mergeFlatHook(entries, wantedHook(program, event, timeoutS), event, HARNESS)) continue;
     hooks[cursor] = entries;
     changed = true;
   }
@@ -171,9 +233,9 @@ function addHooks(doc: Obj, cliCommand: string): EditOutcome {
   return "changed";
 }
 
-function hooksJson(cliCommand: string): string[] {
+function hooksJson(program: string): string[] {
   const hooks: Obj = {};
-  for (const { cursor, event, timeoutS } of EVENTS) hooks[cursor] = [{ command: hookCommand(cliCommand, event, HARNESS), timeout: timeoutS }];
+  for (const { cursor, event, timeoutS } of EVENTS) hooks[cursor] = [wantedHook(program, event, timeoutS)];
   return JSON.stringify({ version: 1, hooks }, null, 2).split("\n");
 }
 
@@ -213,11 +275,12 @@ export const cursorAdapter: HarnessAdapter = {
 
   async hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | null> {
     const file = hooksPath(ctx.home);
+    const program = hookProgram(ctx);
     if (readable(file).status === "unwritable") {
       return manual(
         HARNESS,
         "Cursor: session hooks",
-        [`Open ${file} and add:`, ...hooksJson(ctx.cliCommand), "(merge it into the existing hooks key)"],
+        [`Open ${file} and add:`, ...hooksJson(program), "(merge it into the existing hooks key)"],
         "hooks.json has comments or is not plain JSON, so it is not rewritten",
       );
     }
@@ -226,9 +289,9 @@ export const cursorAdapter: HarnessAdapter = {
         id: `${HARNESS}:hooks`,
         label: "Cursor: session hooks",
         file,
-        preview: EVENTS.map((e) => `  hooks.${e.cursor}: ${hookCommand(ctx.cliCommand, e.event, HARNESS)}`).join("\n"),
+        preview: EVENTS.map((e) => `  hooks.${e.cursor}: ${hookCommand(program, e.event, HARNESS)}`).join("\n"),
         createIfMissing: true,
-        edit: (doc) => addHooks(doc, ctx.cliCommand),
+        edit: (doc) => addHooks(doc, program),
       }),
     ];
   },
@@ -249,8 +312,8 @@ export const cursorAdapter: HarnessAdapter = {
     if (hooksFile.status === "unwritable") hooks = "manual";
     else {
       const section = hooksFile.status === "ok" ? hooksFile.doc["hooks"] : undefined;
-      const present = EVENTS.filter(({ cursor, event }) => isObject(section) && hasHook(section[cursor], hookCommand(ctx.cliCommand, event, HARNESS))).length;
-      hooks = present === EVENTS.length ? "configured" : present === 0 ? "missing" : "partial";
+      const program = hookProgram(ctx);
+      hooks = hooksStateOf(EVENTS.map(({ cursor, event, timeoutS }) => flatHookState(isObject(section) ? section[cursor] : undefined, wantedHook(program, event, timeoutS), event, HARNESS)));
     }
     notes.push("Cursor has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill");
     return { permission, hooks, mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };

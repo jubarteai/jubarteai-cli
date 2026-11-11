@@ -150,10 +150,20 @@ describe("editJsonFile: formatting is preserved", () => {
     expect(JSON.parse(text).a).toBe(1);
   });
 
-  it("a file with a byte order mark is refused untouched, never rewritten without it", () => {
+  it("a file with a byte order mark is edited and keeps its byte order mark", () => {
     fs.writeFileSync(file(), '\uFEFF{"a": 1}\n');
-    expect(editJsonFile(file(), addServer, noMode)).toEqual({ status: "refused", reason: "invalid-json" });
+    expect(editJsonFile(file(), addServer, noMode).status).toBe("changed");
+    const text = read(file());
+    expect(text.startsWith("\uFEFF{")).toBe(true);
+    expect(text.indexOf("\uFEFF", 1)).toBe(-1);
+    expect(JSON.parse(text.slice(1)).a).toBe(1);
+  });
+
+  it("a byte order mark on a file the edit leaves alone is never rewritten, and readJsonObject reads past it", () => {
+    fs.writeFileSync(file(), '\uFEFF{"a": 1}\n');
+    expect(editJsonFile(file(), () => false, noMode)).toEqual({ status: "unchanged" });
     expect(read(file())).toBe('\uFEFF{"a": 1}\n');
+    expect(readJsonObject(file())).toEqual({ status: "ok", doc: { a: 1 } });
   });
 
   it("a minified file gets 2-space indent", () => {

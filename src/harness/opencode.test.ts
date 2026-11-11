@@ -236,6 +236,44 @@ describe.skipIf(!POSIX)("permission, unknown version", () => {
   });
 });
 
+describe.skipIf(!POSIX)("already configured", () => {
+  it("is a non-sensitive step in V2 once the rule is there", async () => {
+    stubOpencode("2.1.3");
+    const first = await step();
+    expect(first.sensitive).toBe(true);
+    await first.apply();
+    const again = await step();
+    expect(again.sensitive).toBe(false);
+    expect((await again.apply()).status).toBe("already configured");
+  });
+
+  it("is a non-sensitive step in V1 once the key is there, and a V1 rule does not satisfy V2", async () => {
+    stubOpencode("1.19.5");
+    put(json(), JSON.stringify({ permission: { bash: { "jubarteai *": "allow" } } }));
+    expect((await step()).sensitive).toBe(false);
+    stubOpencode("2.1.3");
+    put(jsonc(), JSON.stringify({ permission: { bash: { "jubarteai *": "allow" } } }));
+    expect((await step()).sensitive).toBe(true);
+  });
+});
+
+describe.skipIf(!POSIX || process.getuid?.() === 0)("an unreadable config", () => {
+  it("is printed instructions, never a throw", async () => {
+    stubOpencode("2.1.3");
+    put(jsonc(), "{}");
+    chmodSync(jsonc(), 0o000);
+    try {
+      const out = await manual();
+      expect(out.lines.join("\n")).toContain(`Couldn't read ${jsonc()}: fix its permissions`);
+      const state = await opencodeAdapter.inspect(ctx());
+      expect(state.permission).toBe("manual");
+      expect(state.notes).toHaveLength(1);
+    } finally {
+      chmodSync(jsonc(), 0o600);
+    }
+  });
+});
+
 describe("hooks", () => {
   it("is printed instructions, never a step", async () => {
     const out = await opencodeAdapter.hooks(ctx());
@@ -244,6 +282,15 @@ describe("hooks", () => {
     expect(out.harness).toBe("opencode");
     expect(out.reason).toContain("D25");
     expect(out.lines.join("\n")).toContain("jubarteai inbox");
+  });
+
+  it("its prose names the bare command agents type, never the absolute hook command init resolves", async () => {
+    const out = await opencodeAdapter.hooks(ctx({ hookCommand: '"/usr/local/bin/node" "/opt/jubarteai/bin/jubarteai.js"' }));
+    if (!isManual(out)) throw new Error("expected instructions");
+    const text = out.lines.join("\n");
+    expect(text).toContain("`jubarteai connect`");
+    expect(text).not.toContain("node");
+    expect(text).not.toContain('"');
   });
 });
 

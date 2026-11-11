@@ -9,15 +9,19 @@
 // Every write goes through editJsonFile (I6), via the shared helpers in cursor.ts.
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { HOOK_TOTAL_BUDGET_MS } from "../constants.js";
+import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import type { PlanStep } from "../safe-edit/plan.js";
 import type { HarnessId } from "../session/harness-env.js";
 import {
+  flatHookState,
   hookCommand,
+  hookProgram,
+  hooksStateOf,
   isObject,
   jsonEditStep,
   cleanupScopeOf,
   manual,
+  mergeFlatHook,
   readable,
   type EditOutcome,
   type Obj,
@@ -30,7 +34,7 @@ const LABEL = "VS Code";
 const AUTO_APPROVE_KEY = "chat.tools.terminal.autoApprove";
 const COMMAND_RULE = "jubarteai";
 /** `timeoutSec` in the shared hook file; session end only needs to be quick. */
-const START_TIMEOUT_S = HOOK_TOTAL_BUDGET_MS / 1000;
+const START_TIMEOUT_S = HOOK_REGISTERED_TIMEOUT_S;
 const END_TIMEOUT_S = 3;
 
 /** Id of the shared hooks step. The caller (init) runs a step id once, so VS Code and Copilot CLI together write the file once. */
@@ -97,11 +101,14 @@ function autoApproveJson(): string[] {
 
 // ---- shared Copilot hooks (VS Code + Copilot CLI) ----------------------------------------------------------------
 
-function hasHook(entries: unknown, command: string): boolean {
-  return Array.isArray(entries) && entries.some((e) => isObject(e) && e["command"] === command);
+function wantedHook(program: string, event: "session-start" | "session-end", timeoutS: number): Obj {
+  return { type: "command", command: hookCommand(program, event, COPILOT_HINT), timeoutSec: timeoutS };
 }
 
-function addCopilotHooks(doc: Obj, cliCommand: string): EditOutcome {
+/** The context the shared hook file is planned with; hooks use `hookCommand ?? cliCommand` (hookProgram). */
+type CopilotCtx = Pick<InitCtx, "home" | "env" | "cliCommand" | "hookCommand">;
+
+function addCopilotHooks(doc: Obj, program: string): EditOutcome {
   const hooksValue = doc["hooks"];
   if (hooksValue !== undefined && !isObject(hooksValue)) return { blocked: "hooks in jubarteai.json is not an object; add the entries by hand" };
   const hooks: Obj = hooksValue ?? {};
@@ -110,10 +117,8 @@ function addCopilotHooks(doc: Obj, cliCommand: string): EditOutcome {
   }
   let changed = false;
   for (const { copilot, event, timeoutS } of EVENTS) {
-    const command = hookCommand(cliCommand, event, COPILOT_HINT);
     const entries: unknown[] = Array.isArray(hooks[copilot]) ? hooks[copilot] : [];
-    if (hasHook(entries, command)) continue;
-    entries.push({ type: "command", command, timeoutSec: timeoutS });
+    if (!mergeFlatHook(entries, wantedHook(program, event, timeoutS), event, COPILOT_HINT)) continue;
     hooks[copilot] = entries;
     changed = true;
   }
@@ -123,9 +128,9 @@ function addCopilotHooks(doc: Obj, cliCommand: string): EditOutcome {
   return "changed";
 }
 
-function copilotHooksJson(cliCommand: string): string[] {
+function copilotHooksJson(program: string): string[] {
   const hooks: Obj = {};
-  for (const { copilot, event, timeoutS } of EVENTS) hooks[copilot] = [{ type: "command", command: hookCommand(cliCommand, event, COPILOT_HINT), timeoutSec: timeoutS }];
+  for (const { copilot, event, timeoutS } of EVENTS) hooks[copilot] = [wantedHook(program, event, timeoutS)];
   return JSON.stringify({ version: 1, hooks }, null, 2).split("\n");
 }
 
@@ -133,38 +138,39 @@ function copilotHooksJson(cliCommand: string): string[] {
  * The one step that writes ~/.copilot/hooks/jubarteai.json (`$COPILOT_HOME/hooks/` when set), `sessionStart` and `sessionEnd`.
  * VS Code and Copilot CLI both return it with the same id (COPILOT_HOOKS_STEP_ID), so the caller runs it once.
  */
-export function copilotHooksStep(ctx: Pick<InitCtx, "home" | "env" | "cliCommand">): PlanStep {
+export function copilotHooksStep(ctx: CopilotCtx): PlanStep {
+  const program = hookProgram(ctx);
   return jsonEditStep({
     id: COPILOT_HOOKS_STEP_ID,
     label: "GitHub Copilot (VS Code and Copilot CLI): session hooks",
     file: copilotHooksFile(ctx),
-    preview: EVENTS.map((e) => `  hooks.${e.copilot}: ${hookCommand(ctx.cliCommand, e.event, COPILOT_HINT)}`).join("\n"),
+    preview: EVENTS.map((e) => `  hooks.${e.copilot}: ${hookCommand(program, e.event, COPILOT_HINT)}`).join("\n"),
     createIfMissing: true,
-    edit: (doc) => addCopilotHooks(doc, ctx.cliCommand),
+    edit: (doc) => addCopilotHooks(doc, program),
   });
 }
 
 /** copilotHooksStep, or the printed entry when the file holds comments or is not plain JSON. `harness` names the adapter asking. */
-export function copilotHooksPlan(ctx: Pick<InitCtx, "home" | "env" | "cliCommand">, harness: HarnessId): PlanStep[] | ManualInstructions {
+export function copilotHooksPlan(ctx: CopilotCtx, harness: HarnessId): PlanStep[] | ManualInstructions {
   const file = copilotHooksFile(ctx);
   if (readable(file).status === "unwritable") {
     return manual(
       harness,
       "GitHub Copilot: session hooks",
-      [`Open ${file} and add:`, ...copilotHooksJson(ctx.cliCommand), "(merge it into the existing hooks key)"],
+      [`Open ${file} and add:`, ...copilotHooksJson(hookProgram(ctx)), "(merge it into the existing hooks key)"],
       "jubarteai.json has comments or is not plain JSON, so it is not rewritten",
     );
   }
   return [copilotHooksStep(ctx)];
 }
 
-/** Whether the shared hook file holds both of our commands (read-only, for doctor). */
-export function copilotHooksState(ctx: Pick<InitCtx, "home" | "env" | "cliCommand">): AdapterState["hooks"] {
+/** Whether the shared hook file holds exactly our two entries (read-only, for doctor). */
+export function copilotHooksState(ctx: CopilotCtx): AdapterState["hooks"] {
   const file = readable(copilotHooksFile(ctx));
   if (file.status === "unwritable") return "manual";
   const section = file.status === "ok" ? file.doc["hooks"] : undefined;
-  const present = EVENTS.filter(({ copilot, event }) => isObject(section) && hasHook(section[copilot], hookCommand(ctx.cliCommand, event, COPILOT_HINT))).length;
-  return present === EVENTS.length ? "configured" : present === 0 ? "missing" : "partial";
+  const program = hookProgram(ctx);
+  return hooksStateOf(EVENTS.map(({ copilot, event, timeoutS }) => flatHookState(isObject(section) ? section[copilot] : undefined, wantedHook(program, event, timeoutS), event, COPILOT_HINT)));
 }
 
 // ---- adapter -----------------------------------------------------------------------------------------------------

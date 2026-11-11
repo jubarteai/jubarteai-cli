@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -199,6 +199,26 @@ describe("hooks", () => {
     expect(hooks["SessionStart"]?.[0]?.hooks[0]?.command).toBe("ja hook session-start --harness gemini-cli");
   });
 
+  it("runs ctx.hookCommand while the allow entry keeps the bare name, and a re-run with another program path updates in place", async () => {
+    const program = (node: string): string => `"${node}" "/opt/jubarteai/bin/jubarteai.js"`;
+    await (await hookStep({ hookCommand: program("/old/node") })).apply();
+    const permission = await geminiCliAdapter.permission(ctx({ hookCommand: program("/old/node") }));
+    if (permission === null || !("apply" in permission)) throw new Error("expected a step");
+    await permission.apply();
+    expect((readSettings()["tools"] as Record<string, unknown>)["allowed"]).toEqual(["run_shell_command(jubarteai)"]);
+    expect((await geminiCliAdapter.inspect(ctx({ hookCommand: program("/new/node") }))).hooks).toBe("partial");
+    const step = await hookStep({ hookCommand: program("/new/node") });
+    expect(step.sensitive).toBe(true);
+    expect((await step.apply()).status).toBe("configured");
+    const hooks = readSettings()["hooks"] as Record<string, Group[]>;
+    for (const [event, command] of Object.entries(COMMANDS)) {
+      expect(hooks[event]).toHaveLength(1);
+      expect(hooks[event]?.[0]?.hooks).toHaveLength(1);
+      expect(hooks[event]?.[0]?.hooks[0]?.command).toBe(command.replace(/^jubarteai/, program("/new/node")));
+    }
+    expect((await geminiCliAdapter.inspect(ctx({ hookCommand: program("/new/node") }))).hooks).toBe("configured");
+  });
+
   it("skips when hooks has an unexpected shape, leaving the file untouched", async () => {
     const text = JSON.stringify({ hooks: { SessionStart: "nope" } });
     put(text);
@@ -219,6 +239,47 @@ describe("hooks", () => {
   it("prints instructions for a settings file with comments", async () => {
     put('{\n  /* c */\n}\n');
     expect(isManual(await geminiCliAdapter.hooks(ctx()))).toBe(true);
+  });
+});
+
+describe("already configured", () => {
+  it("returns non-sensitive steps once the entries are in place, so a re-run never prompts or skips", async () => {
+    const first = await permissionStep();
+    expect(first.sensitive).toBe(true);
+    await first.apply();
+    const hooksFirst = await hookStep();
+    expect(hooksFirst.sensitive).toBe(true);
+    await hooksFirst.apply();
+    const permission = await permissionStep();
+    const hooks = await hookStep();
+    expect(permission.sensitive).toBe(false);
+    expect(hooks.sensitive).toBe(false);
+    expect((await permission.apply()).status).toBe("already configured");
+    expect((await hooks.apply()).status).toBe("already configured");
+  });
+
+  it("stays sensitive while a hook is missing", async () => {
+    put(JSON.stringify({ hooks: { SessionEnd: [{ matcher: "", hooks: [{ name: "jubarteai", type: "command", command: "jubarteai hook session-end --harness gemini-cli", timeout: 1000 }] }] } }));
+    expect((await hookStep()).sensitive).toBe(true);
+  });
+});
+
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("an unreadable settings file", () => {
+  it("is printed instructions everywhere, never a throw", async () => {
+    put("{}");
+    chmodSync(settings(), 0o000);
+    try {
+      for (const out of [await geminiCliAdapter.permission(ctx()), await geminiCliAdapter.hooks(ctx())]) {
+        expect(isManual(out)).toBe(true);
+        if (isManual(out)) expect(out.lines.join("\n")).toContain(`Couldn't read ${settings()}: fix its permissions`);
+      }
+      const state = await geminiCliAdapter.inspect(ctx());
+      expect(state.permission).toBe("manual");
+      expect(state.hooks).toBe("manual");
+      expect(state.notes.join(" ")).toContain("fix its permissions");
+    } finally {
+      chmodSync(settings(), 0o600);
+    }
   });
 });
 

@@ -72,6 +72,10 @@ const TREE_RE = /^[0-9a-f]{40}$/;
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const MAX_TREE_DEPTH = 16;
 const MAX_TREE_ENTRIES = 5000;
+const NPM_REGISTRY = "https://registry.npmjs.org/";
+const NPM_CONFIG_TIMEOUT_MS = 15_000;
+/** Emptied for every npm/npx child that starts in a place a repo's .npmrc could reach, or that reads npm's config. */
+const NODE_OPTIONS_OFF: Readonly<Record<string, string>> = { npm_config_node_options: "", NODE_OPTIONS: "" };
 const SHELL_SAFE_RE = /^[A-Za-z0-9_./~+-]+$/;
 
 type Scope = "project" | "global";
@@ -204,10 +208,12 @@ function pluginsFile(): string {
   return join(claudeConfigDir(), "plugins", "installed_plugins.json");
 }
 
+/** A finding that changes nothing (kind "info"): its apply() only returns this fixed result. */
 function infoStep(id: string, label: string, status: StepResult["status"], detail: string, files: string[] = []): PlanStep {
   return {
     id,
     label,
+    kind: "info",
     files,
     sensitive: false,
     apply: async (): Promise<StepResult> => ({ id, label, status, detail }),
@@ -558,10 +564,33 @@ function nodeSkipDetail(nodeVersion: string, scope: Scope, root: string | null, 
   return `Node v${nodeVersion.replace(/^v/, "")} found; the skills CLI needs >= ${SKILLS_CLI_MIN_NODE}. Then run: ${command}`;
 }
 
+/**
+ * The registry `skills add` fetches from: the user's own (a corporate mirror in ~/.npmrc, an npm_config_registry
+ * they exported), read with `npm config get registry` run from the home folder so no project .npmrc applies. Only
+ * an http(s) URL without credentials is taken; anything else, or a failed lookup, gives the public registry.
+ */
+async function userNpmRegistry(): Promise<string> {
+  const res = await runCommand("npm", ["config", "get", "registry"], { cwd: homeDir(), env: { ...NODE_OPTIONS_OFF }, timeoutMs: NPM_CONFIG_TIMEOUT_MS });
+  if (res.code !== 0 || res.timedOut || res.notFound) return NPM_REGISTRY;
+  const value = res.stdout.trim();
+  if (value === "" || value.length > 2048) return NPM_REGISTRY;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username !== "" || url.password !== "") return NPM_REGISTRY;
+    return url.href;
+  } catch {
+    return NPM_REGISTRY;
+  }
+}
+
 async function runSkillsAdd(scope: Scope, root: string | null, tail: string[]): Promise<{ ok: boolean; why: string }> {
   const cwd = scope === "global" || root === null ? homeDir() : root;
   const res = await runCommand("npx", ["-y", `skills@${SKILLS_CLI_VERSION}`, "add", SKILL_REPO, ...tail], {
     cwd,
+    // The child starts in the project, where npm reads the repo's own .npmrc (`registry=`, `node-options=`): a cloned
+    // repo could redirect the fetch of the pinned skills@<version>. Environment variables outrank a project .npmrc, so
+    // the user's registry (resolved without the project) and empty node options are pinned here.
+    env: { npm_config_registry: await userNpmRegistry(), ...NODE_OPTIONS_OFF },
     timeoutMs: SKILLS_ADD_TIMEOUT_MS,
   });
   if (res.notFound) return { ok: false, why: "npx not found" };
@@ -826,10 +855,21 @@ function initStep(opts: { root: string | null; agents: string[]; copies: SkillCo
   const tail = [...(scope === "global" ? ["-g"] : []), ...missing.flatMap((a) => ["-a", a]), "-y"];
   const label = `Install skill for ${missing.join(", ")}${scope === "global" ? " (global)" : ""}`;
   const lockPath = opts.root === null ? null : join(opts.root, "skills-lock.json");
+  // Every folder `add` writes: each missing agent's skill dir (shared dirs once), plus the project lock.
+  const base = scope === "global" ? home : physicalRoot;
+  const files: string[] = [];
+  for (const agent of missing) {
+    const dir = SKILL_AGENT_DIRS[agent]?.[scope];
+    if (dir !== undefined && base !== null) {
+      const folder = join(base, dir, SKILL_NAME);
+      if (!files.includes(folder)) files.push(folder);
+    }
+  }
+  if (scope === "project" && lockPath !== null) files.push(lockPath);
   return {
     id,
     label,
-    files: [],
+    files,
     sensitive: false,
     apply: async (): Promise<StepResult> => {
       const result = (status: StepResult["status"], detail: string): StepResult => ({ id, label, status, detail });

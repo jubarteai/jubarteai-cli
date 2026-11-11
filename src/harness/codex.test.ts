@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyPlan, type PlanStep } from "../safe-edit/plan.js";
-import { codexAdapter, createCodexAdapter, CODEX_NETWORK_MIN_VERSION } from "./codex.js";
+import { codexAdapter, createCodexAdapter, CODEX_CODES, CODEX_NETWORK_MIN_VERSION } from "./codex.js";
 import type { DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 let root: string;
@@ -120,6 +120,23 @@ describe("hooks", () => {
     expect(hooks.SessionEnd[0].hooks[0].timeout).toBe(3);
   });
 
+  it("the hook entries use ctx.hookCommand; a re-run with another program path updates them in place", async () => {
+    const program = (node: string): string => `"${node}" "/opt/jubarteai/bin/jubarteai.js"`;
+    expect(await apply(ctx({ hookCommand: program("/old/node") }))).toEqual(["configured"]);
+    const [step] = (await codexAdapter.hooks(ctx({ hookCommand: program("/new/node") }))) as PlanStep[];
+    expect(step?.sensitive).toBe(true);
+    expect(step?.preview).toContain(JSON.stringify(`${program("/new/node")} hook session-start --harness codex`));
+    expect(await apply(ctx({ hookCommand: program("/new/node") }))).toEqual(["configured"]);
+    const hooks = JSON.parse(fs.readFileSync(hooksJson(), "utf8")).hooks as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
+    for (const event of ["SessionStart", "UserPromptSubmit", "SessionEnd"]) {
+      expect(hooks[event]).toHaveLength(1);
+      expect(hooks[event]?.[0]?.hooks).toHaveLength(1);
+      expect(String(hooks[event]?.[0]?.hooks[0]?.["command"])).toMatch(/^"\/new\/node" /);
+    }
+    expect((await codexAdapter.inspect(ctx({ hookCommand: program("/new/node") }))).hooks).toBe("configured");
+    expect((await codexAdapter.inspect(ctx({ hookCommand: program("/old/node") }))).hooks).toBe("partial");
+  });
+
   it("$CODEX_HOME moves hooks.json", async () => {
     const custom = path.join(root, "ch");
     expect(await apply(ctx({ env: { CODEX_HOME: custom } }))).toEqual(["configured"]);
@@ -138,11 +155,27 @@ describe("hooks", () => {
 });
 
 describe("the trust instruction", () => {
-  it("is printed while the hooks are not in place, and gone once they are", async () => {
+  const trust = (items: Array<PlanStep | ManualInstructions>): ManualInstructions[] => manuals(items).filter((m) => m.code === CODEX_CODES.trustHooks);
+
+  it("is printed, with its code, while the hooks step has something to write, and gone once they are in place", async () => {
     const a = adapter();
-    expect(manuals(await extrasOf(a)).map((m) => m.lines)).toContainEqual(["Trust the new hooks once in Codex: run /hooks"]);
+    expect(trust(await extrasOf(a)).map((m) => m.lines)).toEqual([["Trust the new hooks once in Codex: run /hooks"]]);
     await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, out: sink });
+    expect(trust(await extrasOf(a))).toEqual([]);
     expect(manuals(await extrasOf(a)).flatMap((m) => m.lines)).not.toContain("Trust the new hooks once in Codex: run /hooks");
+  });
+
+  it("comes back when a re-run would rewrite the hooks (another program path)", async () => {
+    const a = adapter();
+    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, out: sink });
+    expect(trust(await extrasOf(a, ctx({ hookCommand: '"/new/node" "/opt/jubarteai/bin/jubarteai.js"' })))).toHaveLength(1);
+  });
+
+  it("is not repeated beside a hooks.json the CLI won't rewrite (the hooks instructions carry the line)", async () => {
+    write(hooksJson(), `// mine\n{}\n`);
+    const a = adapter();
+    expect(trust(await extrasOf(a))).toEqual([]);
+    expect((await a.hooks(ctx())) as ManualInstructions).toMatchObject({ kind: "manual" });
   });
 });
 
@@ -154,8 +187,10 @@ describe("network opt-in (D4–D6)", () => {
     const items = await extrasOf(a);
     const [step] = steps(items);
     expect(steps(items)).toHaveLength(1);
-    expect(step).toMatchObject({ id: "codex:network-optin", sensitive: true, files: [projectConfig()] });
-    expect(step?.preview).toBe(`~/proj/.codex/config.toml (this project only):\n[sandbox_workspace_write]\nnetwork_access = true`);
+    expect(step).toMatchObject({ id: "codex:network-optin", sensitive: true, files: [projectConfig(), path.join(proj, ".gitignore")] });
+    expect(step?.preview).toBe(
+      `~/proj/.codex/config.toml (this project only):\n[sandbox_workspace_write]\nnetwork_access = true\nKept private: /.codex/config.toml is added to .gitignore.`,
+    );
     const [result] = await applyPlan([step as PlanStep], { tty: false, yes: true, out: sink });
     expect(result?.status).toBe("configured");
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
@@ -163,26 +198,57 @@ describe("network opt-in (D4–D6)", () => {
     expect(fs.readFileSync(projectConfig(), "utf8")).not.toContain("[permissions");
   });
 
-  it("D6: private by default, the project file is added to .gitignore", async () => {
+  const PRIVATE_BLOCK = "# jubarteai: private Codex network setting\n/.codex/config.toml\n";
+  const QUESTION = "Share the Codex network setting with everyone who clones the repo?";
+
+  it("D6: an interactive run asks, and 'no' (the default) adds the project file to .gitignore", async () => {
     write(userConfig(), trusted());
     const a = adapter({ share: false });
-    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
-    expect(a.asked).toEqual(["Share the Codex network setting with everyone who clones the repo?"]);
-    expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe("# jubarteai: private Codex network setting\n/.codex/config.toml\n");
+    const [step] = steps(await extrasOf(a, ctx({ tty: true })));
+    expect(step?.preview).toContain("You will be asked whether to share this file with the repo");
+    await applyPlan([step as PlanStep], { tty: false, yes: true, out: sink });
+    expect(a.asked).toEqual([QUESTION]);
+    expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
   });
 
-  it("D6: sharing leaves .gitignore alone", async () => {
+  it("D6: an interactive 'yes' leaves .gitignore alone", async () => {
     write(userConfig(), trusted());
     write(path.join(proj, ".gitignore"), "node_modules\n");
     const a = adapter({ share: true });
-    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
+    await applyPlan(steps(await extrasOf(a, ctx({ tty: true }))), { tty: false, yes: true, out: sink });
+    expect(a.asked).toEqual([QUESTION]);
     expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe("node_modules\n");
+  });
+
+  it("D6: under --yes nothing is asked, even on a TTY: the file is private and ignored", async () => {
+    write(userConfig(), trusted());
+    const a = adapter({ share: true });
+    const [step] = steps(await extrasOf(a, ctx({ tty: true, yes: true })));
+    expect(step?.preview).toContain("Kept private");
+    await applyPlan([step as PlanStep], { tty: true, yes: true, out: sink });
+    expect(a.asked).toEqual([]);
+    expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
+  });
+
+  it("D6: without a TTY nothing is asked either (no /dev/tty prompt from inside apply)", async () => {
+    write(userConfig(), trusted());
+    const a = adapter({ share: true });
+    await applyPlan(steps(await extrasOf(a, ctx({ tty: false, yes: true }))), { tty: false, yes: true, out: sink });
+    expect(a.asked).toEqual([]);
+    expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
+    // A context that never says (an older caller) is not interactive.
+    fs.rmSync(path.join(proj, ".gitignore"));
+    fs.rmSync(projectConfig());
+    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
+    expect(a.asked).toEqual([]);
   });
 
   it("D6: a file git already tracks is not asked about and not ignored", async () => {
     write(userConfig(), trusted());
     const a = adapter({ tracked: true });
-    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
+    const [step] = steps(await extrasOf(a, ctx({ tty: true })));
+    expect(step?.files).toEqual([projectConfig()]);
+    await applyPlan([step as PlanStep], { tty: false, yes: true, out: sink });
     expect(a.asked).toEqual([]);
     expect(fs.existsSync(path.join(proj, ".gitignore"))).toBe(false);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
@@ -230,6 +296,7 @@ describe("network opt-in (D4–D6)", () => {
     expect(text).toContain("Trust this project in Codex");
     expect(text).toContain(`[projects.${JSON.stringify(proj)}] trust_level = "trusted"`);
     expect(text).toContain("Codex keeps its jubarteai MCP entry");
+    expect(manuals(items).filter((m) => m.code !== CODEX_CODES.trustHooks).map((m) => m.code)).toEqual([CODEX_CODES.networkManual]);
     expect(fs.existsSync(projectConfig())).toBe(false);
   });
 
@@ -291,73 +358,166 @@ describe("network opt-in (D4–D6)", () => {
     expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
   });
 
-  it("a user-level key someone else set already opens the network: the step is already configured", async () => {
-    write(userConfig(), `${OPT_IN}`);
+  it("a user-level key, with the project trusted, already opens the network: the step is already configured", async () => {
+    write(userConfig(), `${trusted()}\n${OPT_IN}`);
     const [step] = steps(await extrasOf(adapter()));
     expect(step?.sensitive).toBe(false);
     const [result] = await applyPlan([step as PlanStep], { tty: false, yes: false, out: sink });
     expect(result?.status).toBe("already configured");
     expect(fs.existsSync(projectConfig())).toBe(false);
   });
-});
 
-describe("D5: Codex keeps its MCP entry unless the opt-in is in place", () => {
-  const entry = `[mcp_servers.jubarteai]\nurl = "https://jubarte.ai/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE12" }\n`;
-
-  async function plan(a: HarnessAdapter): Promise<PlanStep[]> {
-    const c = ctx();
-    return [...steps(await extrasOf(a, c)), ...steps(await a.mcpCleanup({ home, projectRoot: proj, platform: "linux", env: {}, startDir: proj }))];
-  }
-
-  it("trusted project: the opt-in is applied first, then the entries go from the user and project configs", async () => {
-    write(userConfig(), `${trusted()}\n${entry}`);
-    write(projectConfig(), `${entry}\n[mcp_servers.other]\nurl = "x"\n`);
-    const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, out: sink });
-    expect(results.map((r) => r.status)).toEqual(["configured", "configured", "configured"]);
-    expect(fs.readFileSync(userConfig(), "utf8")).toBe(trusted());
-    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(`[mcp_servers.other]\nurl = "x"\n\n${OPT_IN}`);
+  // Review M2: P1 showed a user-level key does not open the network for a project Codex has no trust entry for.
+  it("a user-level key does not count for an untrusted project: manual, nothing written", async () => {
+    write(userConfig(), OPT_IN);
+    const items = await extrasOf(adapter());
+    expect(steps(items)).toEqual([]);
+    expect(manuals(items)[0]?.reason).toBe("project not trusted in Codex");
   });
 
-  it("untrusted project: the entries stay and the cleanup steps say they were kept", async () => {
-    write(userConfig(), entry);
+  it("a project-level key does not count for an untrusted project either", async () => {
+    write(userConfig(), `model = "x"\n`);
+    write(projectConfig(), OPT_IN);
+    expect(steps(await extrasOf(adapter()))).toEqual([]);
+  });
+
+  it("a sandbox_mode other than workspace-write, in either config, blocks the opt-in", async () => {
+    for (const [where, text] of [
+      [userConfig, `sandbox_mode = "read-only"\n${trusted()}`],
+      [projectConfig, `sandbox_mode = 'danger-full-access'\n`],
+    ] as const) {
+      write(userConfig(), trusted());
+      fs.rmSync(projectConfig(), { force: true });
+      write(where(), text);
+      if (where === projectConfig) write(userConfig(), trusted());
+      const items = await extrasOf(adapter());
+      expect(steps(items)).toEqual([]);
+      expect(manuals(items)[0]?.reason).toBe("sandbox_mode is not workspace-write");
+    }
+  });
+
+  it("sandbox_mode = workspace-write is fine", async () => {
+    write(userConfig(), `sandbox_mode = "workspace-write"\n${trusted()}`);
+    expect(steps(await extrasOf(adapter()))).toHaveLength(1);
+  });
+
+  // Review B1 probe 2: the repo's own .codex link must never carry the opt-in into ~/.codex/config.toml.
+  it.skipIf(process.platform === "win32")("a project .codex linked to ~/.codex is refused: the user-level config stays byte-identical", async () => {
+    write(userConfig(), `${trusted()}model = "x"\n`);
     const before = fs.readFileSync(userConfig(), "utf8");
+    fs.symlinkSync("../.codex", path.join(proj, ".codex"));
+    const items = await extrasOf(adapter());
+    const [result] = await applyPlan(steps(items), { tty: false, yes: true, out: sink });
+    expect(result).toMatchObject({ status: "failed", detail: "could not write (symlink)" });
+    expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
+    expect(fs.existsSync(path.join(proj, ".gitignore"))).toBe(false);
+  });
+});
+
+describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place", () => {
+  const entry = `[mcp_servers.jubarteai]\nurl = "https://jubarte.ai/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE12" }\n`;
+  const KEPT = "kept: other Codex projects still use it; remove it by hand once every project you use has the network opt-in: ~/.codex/config.toml";
+
+  const scopeOf = (over: Partial<Parameters<HarnessAdapter["mcpCleanup"]>[0]> = {}): Parameters<HarnessAdapter["mcpCleanup"]>[0] => ({
+    home,
+    projectRoot: proj,
+    platform: "linux",
+    env: {},
+    startDir: proj,
+    ...over,
+  });
+  async function plan(a: HarnessAdapter): Promise<PlanStep[]> {
+    return [...steps(await extrasOf(a, ctx({ yes: true }))), ...steps(await a.mcpCleanup(scopeOf()))];
+  }
+
+  // Review M1: one project's opt-in must not break every other Codex project.
+  it("trusted project: the opt-in is applied first, the project's entry goes, the user-level entry is kept and reported", async () => {
+    write(userConfig(), `${trusted()}\n${entry}`);
+    write(projectConfig(), `${entry}\n[mcp_servers.other]\nurl = "x"\n`);
+    const a = adapter();
+    const userBefore = fs.readFileSync(userConfig(), "utf8");
+    const results = await applyPlan(await plan(a), { tty: false, yes: true, out: sink });
+    expect(results.map((r) => r.status)).toEqual(["configured", "configured"]);
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(`[mcp_servers.other]\nurl = "x"\n\n${OPT_IN}`);
+    expect(fs.readFileSync(userConfig(), "utf8")).toBe(userBefore);
+    const manual = manuals(await a.mcpCleanup(scopeOf()));
+    expect(manual).toHaveLength(1);
+    expect(manual[0]?.lines).toEqual([KEPT]);
+    expect(manual[0]?.code).toBe(CODEX_CODES.keptUser);
+  });
+
+  it("the user-level entry is never removed, whatever the project's state", async () => {
+    write(userConfig(), `${trusted()}\n${entry}`);
+    write(projectConfig(), OPT_IN);
+    const a = adapter();
+    const items = await a.mcpCleanup(scopeOf());
+    expect(steps(items)).toEqual([]);
+    expect(manuals(items).flatMap((m) => m.lines)).toEqual([KEPT]);
+    expect(steps(await a.mcpCleanup(scopeOf({ projectRoot: null, startDir: home })))).toEqual([]);
+  });
+
+  // init's D5 fallback writes the user-level entry on purpose; where it is still what Codex uses, a re-run says nothing.
+  it("the user-level entry is not reported where this project's opt-in is not in effect", async () => {
+    write(userConfig(), `${trusted()}\n${entry}`);
+    const a = adapter();
+    expect(await a.mcpCleanup(scopeOf())).toEqual([]);
+    expect(await a.mcpCleanup(scopeOf({ projectRoot: null, startDir: home }))).toEqual([]);
+    expect(await adapter({ version: "codex-cli 0.150.0" }).mcpCleanup(scopeOf())).toEqual([]);
+    write(userConfig(), entry);
+    write(projectConfig(), OPT_IN);
+    expect(await a.mcpCleanup(scopeOf())).toEqual([]);
+  });
+
+  it("untrusted project: the project's entry stays and the cleanup step says it was kept", async () => {
+    write(projectConfig(), entry);
+    const before = fs.readFileSync(projectConfig(), "utf8");
     const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, out: sink });
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ status: "skipped", detail: "kept: Codex keeps its jubarteai MCP entry until its network opt-in is in place" });
-    expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
   });
 
-  it("an opt-in the user declined keeps the entries too", async () => {
-    write(userConfig(), `${trusted()}\n${entry}`);
-    const before = fs.readFileSync(userConfig(), "utf8");
-    const results = await applyPlan(await plan(adapter()), { tty: false, yes: false, out: sink });
-    expect(results.map((r) => r.status)).toEqual(["skipped", "skipped"]);
-    expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
-    expect(fs.existsSync(projectConfig())).toBe(false);
-  });
-
-  it("an older Codex keeps the entries", async () => {
-    write(userConfig(), `${trusted()}\n${entry}`);
-    const before = fs.readFileSync(userConfig(), "utf8");
-    const results = await applyPlan(await plan(adapter({ version: "codex-cli 0.150.0" })), { tty: false, yes: true, out: sink });
+  it("an opt-in the user declined keeps the project's entry too", async () => {
+    write(userConfig(), trusted());
+    write(projectConfig(), entry);
+    const before = fs.readFileSync(projectConfig(), "utf8");
+    const a = adapter();
+    const results = await applyPlan(steps(await a.mcpCleanup(scopeOf())), { tty: false, yes: true, out: sink });
     expect(results.map((r) => r.status)).toEqual(["skipped"]);
-    expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
   });
 
-  it("a later run with the opt-in already there removes a leftover entry", async () => {
-    write(userConfig(), `${trusted()}\n${entry}`);
-    write(projectConfig(), OPT_IN);
+  it("an older Codex keeps the project's entry", async () => {
+    write(userConfig(), trusted());
+    write(projectConfig(), `${OPT_IN}\n${entry}`);
+    const before = fs.readFileSync(projectConfig(), "utf8");
+    const results = await applyPlan(steps(await adapter({ version: "codex-cli 0.150.0" }).mcpCleanup(scopeOf())), { tty: false, yes: true, out: sink });
+    expect(results.map((r) => r.status)).toEqual(["skipped"]);
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
+  });
+
+  it("a user-level key without trust does not release the project's entry (review M2)", async () => {
+    write(userConfig(), OPT_IN);
+    write(projectConfig(), entry);
+    const before = fs.readFileSync(projectConfig(), "utf8");
+    const results = await applyPlan(steps(await adapter().mcpCleanup(scopeOf())), { tty: false, yes: true, out: sink });
+    expect(results.map((r) => r.status)).toEqual(["skipped"]);
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
+  });
+
+  it("a later run with the opt-in already there removes a leftover project entry", async () => {
+    write(userConfig(), trusted());
+    write(projectConfig(), `${OPT_IN}\n${entry}`);
     const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, out: sink });
     expect(results.map((r) => r.status)).toEqual(["already configured", "configured"]);
-    expect(fs.readFileSync(userConfig(), "utf8")).toBe(trusted());
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
   });
 
-  it("run from ~: every Codex entry is kept", async () => {
-    write(userConfig(), entry);
-    const a = adapter();
-    const results = await applyPlan(steps(await a.mcpCleanup({ home, projectRoot: null, platform: "linux", env: {}, startDir: home })), { tty: false, yes: true, out: sink });
-    expect(results.map((r) => r.status)).toEqual(["skipped"]);
-    expect(fs.readFileSync(userConfig(), "utf8")).toBe(entry);
+  it("run from ~: project files are only reported", async () => {
+    write(path.join(home, "work", ".codex", "config.toml"), entry);
+    const items = await adapter().mcpCleanup(scopeOf({ projectRoot: null, startDir: path.join(home, "work") }));
+    expect(steps(items)).toEqual([]);
+    expect(manuals(items)).toHaveLength(1);
   });
 });
 
@@ -379,6 +539,19 @@ describe("inspect", () => {
   it("names why the opt-in is blocked", async () => {
     const state = await adapter({ version: "codex-cli 0.1.0" }).inspect(ctx());
     expect(state.notes).toContain("network opt-in: Codex too old; Codex keeps its jubarteai MCP entry");
+  });
+
+  it.skipIf(process.platform === "win32" || (process.getuid?.() ?? 1) === 0)("an unreadable hooks.json is manual instructions, not a rejection (review)", async () => {
+    write(hooksJson(), "{}");
+    fs.chmodSync(hooksJson(), 0o000);
+    try {
+      const result = await codexAdapter.hooks(ctx());
+      expect(result).toMatchObject({ kind: "manual", harness: "codex" });
+      expect((result as ManualInstructions).lines[0]).toBe("couldn't read ~/.codex/hooks.json: fix its permissions, then run jubarteai init again");
+      expect(await adapter().inspect(ctx())).toMatchObject({ hooks: "manual" });
+    } finally {
+      fs.chmodSync(hooksJson(), 0o600);
+    }
   });
 
   it("a hooks.json that can't be edited is manual", async () => {

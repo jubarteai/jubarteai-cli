@@ -3,23 +3,28 @@
 // entries. Everything is a PlanStep that edits through editJsonFile (I6); other keys and other tools' hooks stay.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { HOOK_TOTAL_BUDGET_MS } from "../constants.js";
+import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { findMcpEntries, isUnderHome, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
+import type { HarnessId } from "../session/harness-env.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const ID = "claude-code";
 
-/** The three hook events, in the order they are registered. `name` is the harness' event key, `arg` the CLI's. */
+/**
+ * The three hook events, in the order they are registered. `name` is the harness' event key, `arg` the CLI's, `timeout`
+ * in seconds (spec §6.3: SessionStart and UserPromptSubmit get HOOK_REGISTERED_TIMEOUT_S).
+ */
 export const HOOK_EVENTS = [
-  { name: "SessionStart", arg: "session-start", timeoutSeconds: Math.ceil(HOOK_TOTAL_BUDGET_MS / 1000) },
-  { name: "UserPromptSubmit", arg: "user-prompt-submit", timeoutSeconds: Math.ceil(HOOK_TOTAL_BUDGET_MS / 1000) },
+  { name: "SessionStart", arg: "session-start", timeout: HOOK_REGISTERED_TIMEOUT_S },
+  { name: "UserPromptSubmit", arg: "user-prompt-submit", timeout: HOOK_REGISTERED_TIMEOUT_S },
   // The harness gives SessionEnd about a second and a half unless the hook asks for more.
-  { name: "SessionEnd", arg: "session-end", timeoutSeconds: 5 },
+  { name: "SessionEnd", arg: "session-end", timeout: 5 },
 ] as const;
 
-export type HookEventSpec = { name: string; arg: string; timeoutSeconds: number };
+/** One registered event; `timeout` is in the harness's own unit (seconds for Claude Code and Codex, milliseconds for Gemini CLI). */
+export type HookEventSpec = { name: string; arg: string; timeout: number };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -46,27 +51,60 @@ export function hookCommand(cliCommand: string, arg: string, harness: string): s
   return `${cliCommand} hook ${arg} --harness ${harness}`;
 }
 
-/** Whether a hook command is one of ours for this event: `jubarteai hook <event> …` under any path or extension, or exactly the configured CLI command. */
-function isOurs(command: string, cliCommand: string, arg: string): boolean {
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Whether a registered hook command is ours for this event and harness: `<program> hook <event> --harness <id>` with any
+ * non-empty program (init's absolute `"<node>" "<bin>"`, a bare `jubarteai`, an older install's path). Matching on the
+ * suffix, not the whole command, lets a re-run after a Node upgrade or a move update the entry instead of adding a
+ * second one, and lets doctor recognize what init wrote.
+ */
+export function isOurHookCommand(command: string, arg: string, harness: string): boolean {
+  const tail = new RegExp(`\\s+hook\\s+${escapeRegExp(arg)}\\s+--harness\\s+${escapeRegExp(harness)}\\s*$`).exec(command);
+  return tail !== null && command.slice(0, tail.index).trim() !== "";
+}
+
+/**
+ * Whether a hook command is one of ours for this event: the `--harness <id>` suffix (isOurHookCommand), the configured
+ * command followed by `hook <event>`, or an older `jubarteai hook <event> …` under any path or extension.
+ */
+function isOurs(command: string, cliCommand: string, arg: string, harness: string): boolean {
+  if (isOurHookCommand(command, arg, harness)) return true;
   if (command.startsWith(`${cliCommand} hook ${arg}`) && /^(\s|$)/.test(command.slice(`${cliCommand} hook ${arg}`.length))) return true;
   return new RegExp(`^\\s*(?:\\S*[\\\\/])?jubarteai(?:\\.(?:cmd|exe))?\\s+hook\\s+${arg}(?:\\s|$)`, "i").test(command);
 }
 
 type HookRef = { group: Record<string, unknown>; hooks: unknown[]; index: number };
 
-function findOurs(groups: unknown[], cliCommand: string, arg: string): HookRef[] {
+function findOurs(groups: unknown[], spec: HooksEditSpec, arg: string): HookRef[] {
   const found: HookRef[] = [];
   for (const group of groups) {
     if (!isObject(group) || !Array.isArray(group["hooks"])) continue;
     const hooks = group["hooks"];
     hooks.forEach((hook, index) => {
-      if (isObject(hook) && typeof hook["command"] === "string" && isOurs(hook["command"], cliCommand, arg)) found.push({ group, hooks, index });
+      if (isObject(hook) && typeof hook["command"] === "string" && isOurs(hook["command"], spec.cliCommand, arg, spec.harness)) found.push({ group, hooks, index });
     });
   }
   return found;
 }
 
-export type HooksEditSpec = { events: readonly HookEventSpec[]; cliCommand: string; harness: string; extra?: Record<string, unknown> };
+/**
+ * What to register: `cliCommand` is the program part of the hook command (InitCtx.hookCommand ?? cliCommand), `extra`
+ * keys go on each entry, `group` keys on a new event group (Gemini CLI's `matcher`).
+ */
+export type HooksEditSpec = {
+  events: readonly HookEventSpec[];
+  cliCommand: string;
+  harness: string;
+  extra?: Record<string, unknown>;
+  group?: Record<string, unknown>;
+};
+
+function wantedEntry(spec: HooksEditSpec, event: HookEventSpec): Record<string, unknown> {
+  return { type: "command", command: hookCommand(spec.cliCommand, event.arg, spec.harness), timeout: event.timeout, ...(spec.extra ?? {}) };
+}
 
 /**
  * Merge our command hooks into `doc.hooks`: a missing event gets a new group, an entry of ours with another command
@@ -84,12 +122,12 @@ export function mergeCommandHooks(doc: Record<string, unknown>, spec: HooksEditS
   const hooks: Record<string, unknown> = isObject(existing) ? existing : {};
   let changed = !isObject(existing);
   for (const event of spec.events) {
-    const wanted = { type: "command", command: hookCommand(spec.cliCommand, event.arg, spec.harness), timeout: event.timeoutSeconds, ...(spec.extra ?? {}) };
+    const wanted = wantedEntry(spec, event);
     const groups = Array.isArray(hooks[event.name]) ? (hooks[event.name] as unknown[]) : [];
-    const ours = findOurs(groups, spec.cliCommand, event.arg);
+    const ours = findOurs(groups, spec, event.arg);
     const first = ours[0];
     if (first === undefined) {
-      hooks[event.name] = [...groups, { hooks: [wanted] }];
+      hooks[event.name] = [...groups, { ...(spec.group ?? {}), hooks: [wanted] }];
       changed = true;
       continue;
     }
@@ -100,14 +138,15 @@ export function mergeCommandHooks(doc: Record<string, unknown>, spec: HooksEditS
         changed = true;
       }
     }
-    // Duplicates of ours (an older entry beside the updated one) go; an emptied group goes with them.
-    for (const dup of ours.slice(1)) {
-      const at = dup.hooks.indexOf(dup.hooks[dup.index]);
-      if (at >= 0) dup.hooks.splice(at, 1);
+    // Duplicates of ours (an older entry beside the updated one) go, found by identity (never by a shifting index, which
+    // could delete another tool's hook); a group they leave empty goes with them.
+    const dupes = new Set<unknown>(ours.slice(1).map((o) => o.hooks[o.index]));
+    if (dupes.size > 0) {
+      const touched = new Set<Record<string, unknown>>(ours.map((o) => o.group));
+      for (const group of touched) group["hooks"] = (group["hooks"] as unknown[]).filter((h) => !dupes.has(h));
+      hooks[event.name] = groups.filter((g) => !(isObject(g) && touched.has(g) && Array.isArray(g["hooks"]) && g["hooks"].length === 0));
       changed = true;
     }
-    const kept = groups.filter((g) => !(isObject(g) && Array.isArray(g["hooks"]) && g["hooks"].length === 0 && ours.some((o) => o.group === g)));
-    if (kept.length !== groups.length) hooks[event.name] = kept;
   }
   if (changed) doc["hooks"] = hooks;
   return { changed };
@@ -120,11 +159,11 @@ export function inspectCommandHooks(doc: Record<string, unknown>, spec: HooksEdi
   let any = 0;
   for (const event of spec.events) {
     const groups = isObject(hooks) && Array.isArray(hooks[event.name]) ? (hooks[event.name] as unknown[]) : [];
-    const ours = findOurs(groups, spec.cliCommand, event.arg);
+    const ours = findOurs(groups, spec, event.arg);
     if (ours.length > 0) any++;
     const first = ours[0];
     const entry = first === undefined ? undefined : (first.hooks[first.index] as Record<string, unknown>);
-    if (entry !== undefined && ours.length === 1 && entry["command"] === hookCommand(spec.cliCommand, event.arg, spec.harness) && entry["timeout"] === event.timeoutSeconds) exact++;
+    if (entry !== undefined && ours.length === 1 && entry["command"] === hookCommand(spec.cliCommand, event.arg, spec.harness) && entry["timeout"] === event.timeout) exact++;
   }
   if (exact === spec.events.length) return "configured";
   return any > 0 ? "partial" : "missing";
@@ -134,7 +173,7 @@ export function inspectCommandHooks(doc: Record<string, unknown>, spec: HooksEdi
 export function hooksPreview(spec: HooksEditSpec): string {
   const hooks: Record<string, unknown> = {};
   for (const event of spec.events) {
-    hooks[event.name] = [{ hooks: [{ type: "command", command: hookCommand(spec.cliCommand, event.arg, spec.harness), timeout: event.timeoutSeconds, ...(spec.extra ?? {}) }] }];
+    hooks[event.name] = [{ ...(spec.group ?? {}), hooks: [wantedEntry(spec, event)] }];
   }
   return JSON.stringify({ hooks }, null, 2);
 }
@@ -219,22 +258,38 @@ function addRules(doc: Record<string, unknown>, rules: string[]): boolean {
   return changed;
 }
 
+/** The instruction for a config that exists but can't be read (no permission): fix that, nothing was written. */
+export function unreadableInstructions(harness: HarnessId, file: string, home: string, title: string): ManualInstructions {
+  const shown = shownPath(file, home);
+  return { kind: "manual", harness, title, lines: [`couldn't read ${shown}: fix its permissions, then run jubarteai init again`], reason: `${shown} could not be read` };
+}
+
 function manualSettings(ctx: InitCtx, file: string, title: string, lines: string[], reason: string): ManualInstructions {
   return { kind: "manual", harness: ID, title, lines: [`Edit ${shownPath(file, ctx.home)} by hand:`, ...lines], reason };
 }
 
-export type JsonSettings = { status: "ok"; doc: Record<string, unknown> } | { status: "missing" } | { status: "bad"; reason: string };
+export type JsonSettings =
+  | { status: "ok"; doc: Record<string, unknown> }
+  | { status: "missing" }
+  | { status: "unreadable" }
+  | { status: "bad"; reason: string };
 
-/** A JSON config as read for planning: parsed, missing, or unusable with a fixed reason. */
+/** A JSON config as read for planning: parsed, missing, unreadable (no permission…), or unusable with a fixed reason. */
 export function readSettings(file: string): JsonSettings {
-  const read = readJsonObject(file);
+  let read: ReturnType<typeof readJsonObject>;
+  try {
+    read = readJsonObject(file);
+  } catch {
+    return { status: "unreadable" };
+  }
   if (read.status === "ok") return { status: "ok", doc: read.doc };
   if (read.status === "missing") return { status: "missing" };
   return { status: "bad", reason: read.status === "jsonc" ? "it has comments or trailing commas" : read.status === "not-object" ? "it is not a JSON object" : "it is not valid JSON" };
 }
 
-function hooksSpec(ctx: { cliCommand: string }): HooksEditSpec {
-  return { events: HOOK_EVENTS, cliCommand: ctx.cliCommand, harness: ID };
+/** The hook entries use the hook command (absolute when init resolved one); the permission rule keeps the bare name. */
+function hooksSpec(ctx: Pick<InitCtx, "cliCommand" | "hookCommand">): HooksEditSpec {
+  return { events: HOOK_EVENTS, cliCommand: ctx.hookCommand ?? ctx.cliCommand, harness: ID };
 }
 
 async function detect(env: DetectEnv): Promise<boolean> {
@@ -249,6 +304,7 @@ async function permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions |
   const id = `${ID}:permission`;
   const label = `Allow ${rules.join(" and ")} in ${shownPath(file, ctx.home)}`;
   const entries = JSON.stringify({ permissions: { allow: rules } }, null, 2);
+  if (settings.status === "unreadable") return unreadableInstructions(ID, file, ctx.home, "Claude Code permission");
   if (settings.status === "bad") {
     return manualSettings(ctx, file, "Claude Code permission", [`add ${rules.map((r) => `"${r}"`).join(", ")} to permissions.allow:`, ...entries.split("\n")], `${shownPath(file, ctx.home)}: ${settings.reason}`);
   }
@@ -289,6 +345,7 @@ async function hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | nu
   const file = settingsPath(ctx.home, ctx.env);
   const spec = hooksSpec(ctx);
   const settings = readSettings(file);
+  if (settings.status === "unreadable") return unreadableInstructions(ID, file, ctx.home, "Claude Code hooks");
   if (settings.status === "bad") {
     return manualSettings(ctx, file, "Claude Code hooks", ["add these hooks:", ...hooksPreview(spec).split("\n")], `${shownPath(file, ctx.home)}: ${settings.reason}`);
   }
@@ -304,6 +361,10 @@ async function inspect(ctx: InitCtx): Promise<AdapterState> {
   const settings = readSettings(file);
   const mcpEntries = await findMcpEntries(ID, { home: ctx.home, projectRoot: ctx.projectRoot, platform: ctx.platform, env: ctx.env });
   const notes: string[] = [];
+  if (settings.status === "unreadable") {
+    notes.push(`${shownPath(file, ctx.home)} could not be read: fix its permissions`);
+    return { permission: "manual", hooks: "manual", mcpEntries, notes };
+  }
   if (settings.status === "bad") {
     notes.push(`${shownPath(file, ctx.home)}: ${settings.reason}; edit it by hand`);
     return { permission: "manual", hooks: "manual", mcpEntries, notes };

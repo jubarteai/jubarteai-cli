@@ -12,6 +12,7 @@ import { callTool } from "../mcp/client.js";
 import { isAgentId, readSession, writeSession } from "../session/cache.js";
 import type { SessionEntry } from "../session/cache.js";
 import type { HarnessId } from "../session/harness-env.js";
+import { overflowSpill } from "./overflow.js";
 import { NOT_SIGNED_IN_LINE, UNREACHABLE_LINE, composeInjection, formatInjection, identityLine, injectionSupported } from "./inject.js";
 import type { HookInput } from "./input.js";
 
@@ -28,6 +29,23 @@ const REUSE_SOURCES: readonly string[] = ["resume", "compact"];
 const LOGIN_CODES: readonly string[] = ["invalid_api_key", "revoked_api_key", "unauthorized"];
 const MAX_AGENT_NAME_CHARS = 200;
 const MAX_SLUG_CHARS = 100;
+
+/**
+ * The events for which `init` registers the harness's own hook (spec §9 "Hooks"). Cursor and Devin import
+ * Claude Code's hooks, so the Claude-registered hook also fires there; when the harness it detected has its
+ * own hook for the event, that one does the work and this one stays out (else two agents connect per session).
+ */
+const OWN_HOOK_EVENTS: Readonly<Record<HarnessId, readonly HookEvent[]>> = {
+  "claude-code": ["session-start", "user-prompt-submit", "session-end"],
+  codex: ["session-start", "user-prompt-submit", "session-end"],
+  "gemini-cli": ["session-start", "user-prompt-submit", "session-end"],
+  cursor: ["session-start", "session-end"],
+  vscode: ["session-start", "session-end"],
+  "copilot-cli": ["session-start", "session-end"],
+  windsurf: [],
+  zed: [],
+  opencode: [],
+};
 
 export function parseHookEvent(value: string | undefined): HookEvent | null {
   return HOOK_EVENTS.find((event) => event === value) ?? null;
@@ -125,7 +143,7 @@ async function sessionStart({ harness, input, seat, binding, runtime }: Handled)
       // The identity line below still names the agent, so later commands can pass --agent.
     }
   }
-  return composeInjection(harness, input.event, identityLine(agent.agentId, agent.name), outcome.envelope.messages);
+  return composeInjection(harness, input.event, identityLine(agent.agentId, agent.name), outcome.envelope.messages, overflowSpill(harness, input.sessionId));
 }
 
 async function userPromptSubmit({ harness, input, seat, runtime }: Handled): Promise<string> {
@@ -133,7 +151,7 @@ async function userPromptSubmit({ harness, input, seat, runtime }: Handled): Pro
   if (entry === null) return "";
   const outcome = await runtime.call(seat, "check_inbox", { agent_id: entry.agent_id }, { timeoutMs: runtime.networkTimeoutMs, signal: runtime.signal });
   if (outcome.exitCode !== 0 || outcome.envelope.messages.length === 0) return "";
-  return composeInjection(harness, input.event, identityLine(entry.agent_id, entry.name), outcome.envelope.messages);
+  return composeInjection(harness, input.event, identityLine(entry.agent_id, entry.name), outcome.envelope.messages, overflowSpill(harness, input.sessionId));
 }
 
 async function sessionEnd({ harness, input, seat, runtime }: Handled): Promise<string> {
@@ -146,12 +164,14 @@ async function sessionEnd({ harness, input, seat, runtime }: Handled): Promise<s
 
 /**
  * Runs one hook event and returns the exact stdout text ("" prints nothing). Outside a bound repo, with
- * no harness known, or for a harness with no injection on this event, it does nothing at all (D28, I7),
+ * no harness known, for a hook another harness's own registered hook duplicates, or for a harness with no
+ * injection on this event, it does nothing at all (D28, I7),
  * so no network call is made.
  */
 export async function runHookEvent(input: HookInput, runtime: HookRuntime): Promise<string> {
   const harness = input.harness;
   if (harness === null) return "";
+  if (input.hint !== null && input.hint !== harness && OWN_HOOK_EVENTS[harness].includes(input.event)) return "";
   if (input.event !== "session-end" && !injectionSupported(harness, input.event)) return "";
   const binding = bindingFor(input.cwd);
   if (binding === null) return "";

@@ -291,7 +291,56 @@ describe("known-old", () => {
     const r = await run("update");
     expect(readFileSync(outside, "utf8")).toBe(`${OLD[0]}\n`);
     expect(r.by("agents-md")).toMatchObject({ status: "skipped" });
-    expect(r.by("agents-md").detail).toContain("outside your home folder");
+    expect(r.by("agents-md").detail).toContain("is a link, or sits in one");
+  });
+
+  // Review B1: a repo's own link must never steer the append into a file outside the project.
+  it.skipIf(!POSIX)("a repo's AGENTS.md -> ../.zshrc is refused, ~/.zshrc stays byte-identical (init, with no TTY)", async () => {
+    const zshrc = join(home, ".zshrc");
+    writeFileSync(zshrc, "export PATH=$PATH:/x\n");
+    symlinkSync("../.zshrc", at("AGENTS.md"));
+    const r = await run("init");
+    expect(readFileSync(zshrc, "utf8")).toBe("export PATH=$PATH:/x\n");
+    expect(r.by("agents-md")).toMatchObject({ status: "skipped" });
+    expect(r.by("agents-md").detail).toContain("is a link, or sits in one");
+    expect(readdirSync(home).filter((n) => n.includes("jubarteai"))).toEqual([]);
+  });
+
+  it.skipIf(!POSIX)("a repo's CLAUDE.md -> ../.zshrc is not followed for the import either", async () => {
+    const zshrc = join(home, ".zshrc");
+    writeFileSync(zshrc, "alias a=b\n");
+    put("AGENTS.md", `${SECTION}\n`);
+    symlinkSync("../.zshrc", at("CLAUDE.md"));
+    await run("init");
+    expect(readFileSync(zshrc, "utf8")).toBe("alias a=b\n");
+  });
+
+  it.skipIf(!POSIX)("a linked folder that leads out of the project is not written through", async () => {
+    mkdirSync(join(home, "shared"));
+    writeFileSync(join(home, "shared", "AGENTS.md"), `${OLD[0]}\n`);
+    symlinkSync("../shared", at("docs"));
+    symlinkSync("docs/AGENTS.md", at("AGENTS.md"));
+    const r = await run("update");
+    expect(r.by("agents-md").status).toBe("skipped");
+    expect(readFileSync(join(home, "shared", "AGENTS.md"), "utf8")).toBe(`${OLD[0]}\n`);
+  });
+
+  // Review NIT: a marked section in a CRLF file was classified as customised.
+  it("a CRLF file with the current marked section is current and is not rewritten", async () => {
+    const crlf = `# Demo\r\n\r\n${SECTION.replace(/\n/g, "\r\n")}\r\n`;
+    put("AGENTS.md", crlf);
+    expect(inspectInstructions(proj).agentsMd).toBe("current");
+    const before = snapshot();
+    await run("update");
+    expect(snapshot()).toEqual(before);
+  });
+
+  it("a CRLF file with an old marked section is refreshed, keeping its line endings", async () => {
+    const head = "# Demo\r\n\r\n";
+    put("AGENTS.md", `${head}${MARKED_OLD(0).replace(/\n/g, "\r\n")}\r\n`);
+    expect(inspectInstructions(proj).agentsMd).toBe("known-old");
+    await run("update");
+    expect(read("AGENTS.md")).toBe(`${head}${SECTION.replace(/\n/g, "\r\n")}\r\n`);
   });
 
   it.skipIf(!POSIX)("refuses a project folder that other users can write to", async () => {
@@ -350,7 +399,6 @@ describe("custom and mention-only", () => {
       `${BEGIN}\n${OLD[0]}\n`,
       `${END}\n${OLD[0]}\n${BEGIN}\n`,
       `${BEGIN}\n${OLD[0]}\n${END}\n${BEGIN}\n${OLD[0]}\n${END}\n`,
-      `${BEGIN}\r\n${OLD[0]}\r\n${END}\r\n`,
     ]) {
       put("AGENTS.md", content);
       const r = await run("update");

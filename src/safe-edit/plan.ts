@@ -21,6 +21,12 @@ export type StepResult = {
 export type PlanStep = {
   id: string;
   label: string;
+  /**
+   * "change" (the default) writes something; "info" is a finding whose apply() only returns its fixed result (already
+   * current, a duplicate load, a tip), so a report-only run (update --check) may run it to print what it found.
+   * applyPlan and summarize treat both alike.
+   */
+  kind?: "change" | "info";
   files: string[];
   /** Sensitive steps (hooks, permission files) get their own prompt and never run without a TTY or --yes. */
   sensitive: boolean;
@@ -80,12 +86,15 @@ async function runStep(step: PlanStep): Promise<StepResult> {
  * Show the plan, then run it. On a TTY (without `yes`) one "Proceed? [Y/n]" covers the whole plan and each sensitive
  * step asks again with its exact entry. Without a TTY the non-sensitive steps run and the sensitive ones are skipped
  * (they need confirmation; their flag says how to apply them) unless `yes`. `yes` runs everything without a prompt.
- * A step that throws is "failed" with a fixed detail and the others still run. A cancelled prompt (Ctrl-C) rejects.
+ * Steps sharing an id are one step (the first wins). A step that throws is "failed" with a fixed detail and the others still run. A cancelled prompt (Ctrl-C) rejects.
  */
 export async function applyPlan(
   steps: PlanStep[],
   opts: { tty: boolean; yes: boolean; out: NodeJS.WritableStream; confirmFn?: typeof confirm },
 ): Promise<StepResult[]> {
+  // Two adapters may return the same shared step (one hooks file for VS Code and Copilot CLI): the first occurrence wins.
+  const seen = new Set<string>();
+  steps = steps.filter((step) => !seen.has(step.id) && seen.add(step.id) !== undefined);
   if (steps.length === 0) return [];
   const ask = opts.confirmFn ?? confirm;
   const prompting = opts.tty && !opts.yes;
