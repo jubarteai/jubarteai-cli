@@ -6,7 +6,7 @@ import type { PlanStep } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { copilotCliAdapter } from "./copilot-cli.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
-import { COPILOT_HOOKS_STEP_ID, GUARD_MISSING_NOTE, vscodeAdapter } from "./vscode.js";
+import { COPILOT_HOOKS_STEP_ID, guardMissingNote, vscodeAdapter } from "./vscode.js";
 
 let root: string;
 let home: string;
@@ -156,6 +156,16 @@ describe("hooks (the shared ~/.copilot/hooks/jubarteai.json)", () => {
     expect(step.files).toEqual([hooksFile(custom)]);
   });
 
+  it("names the resolved hook file in the printed guard line and doctor's note, $COPILOT_HOME included (review R-N18)", async () => {
+    const custom = join(root, "custom");
+    const out = await copilotCliAdapter.permission(ctx({ env: { COPILOT_HOME: custom } }));
+    if (!isManual(out)) throw new Error("expected printed instructions");
+    expect(out.lines.join("\n")).toContain(`preToolUse guard in ${hooksFile(custom)}`);
+    expect(out.lines.join("\n")).not.toContain("~/.copilot");
+    put(hooksFile(custom), JSON.stringify({ version: 1, hooks: { sessionStart: [{ type: "command", command: "jubarteai hook session-start --harness vscode", timeoutSec: 8 }] } }));
+    expect((await copilotCliAdapter.inspect(ctx({ env: { COPILOT_HOME: custom } }))).notes).toContain(guardMissingNote(hooksFile(custom)));
+  });
+
   it("prints the entries for a hooks file with comments and never rewrites it", async () => {
     const text = '{\n  // mine\n  "version": 1\n}\n';
     put(hooksFile(), text);
@@ -185,9 +195,9 @@ describe("inspect", () => {
 
   it("notes a hook file that has the session hooks but not the guard", async () => {
     put(hooksFile(), JSON.stringify({ version: 1, hooks: { sessionStart: [{ type: "command", command: "jubarteai hook session-start --harness vscode", timeoutSec: 8 }] } }));
-    expect((await copilotCliAdapter.inspect(ctx())).notes).toContain(GUARD_MISSING_NOTE);
+    expect((await copilotCliAdapter.inspect(ctx())).notes).toContain(guardMissingNote(hooksFile()));
     await (await hookStep()).apply();
-    expect((await copilotCliAdapter.inspect(ctx())).notes).not.toContain(GUARD_MISSING_NOTE);
+    expect((await copilotCliAdapter.inspect(ctx())).notes).not.toContain(guardMissingNote(hooksFile()));
   });
 
   it("notes that there is no per-prompt injection", async () => {

@@ -7,10 +7,17 @@
 // blocked", whatever was approved. So this hook answers a deny for a shell tool call whose command names one of the
 // five, and `{}` (no decision: the normal permission flow) for everything else. It never answers "allow".
 //
-// It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen. Quotes and
-// backslashes are dropped before matching, so `jubarteai "login"`, `j"ubarteai" login` and `jubarteai \login` match,
-// and the program may follow any shell separator, so chained, `$(…)`, backtick and path forms match too. Matching errs
-// toward a deny: a commit message that quotes `jubarteai login` is refused as well, and the reason says why.
+// It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen. Quoting is undone
+// before matching, so `jubarteai "login"`, `j"ubarteai" login`, `jubarteai \login`, `jubarteai $'login'` and PowerShell's
+// ``jubarteai l`ogin`` match, and the program may follow any shell separator or close a lookup, so chained, `$(…)`,
+// backtick, path, `$(command -v jubarteai) login` and `(Get-Command jubarteai) login` forms match too. Matching errs
+// toward a deny: text that only mentions a person command after the program name (a commit message, the title or
+// query of the agent's own `jubarteai create-knowledge`/`search-knowledge`, a directory named jubarteai followed by
+// `init`) is refused as well, and the reason says to reword it.
+//
+// The matcher is linear in the input (review R-S13): no group can match the same text two ways, and a flag or version
+// token stops at every character a new match could start at, so one long command can't keep the hook busy until the
+// harness's timeout lets the call through (GitHub fails a timed-out `preToolUse` hook open).
 //
 // Pure: no network, no file reads, no binding lookup. It runs in every repo, bound or not, because login and logout
 // change user-level credentials (the stated exception to I7's bound-repo rule).
@@ -35,29 +42,40 @@ export const SHELL_TOOL_MATCHER = "bash|powershell";
 /** The commands the guard refuses, as a regex alternation. */
 const PERSON_ALTERNATION = PERSON_COMMANDS.join("|");
 
+/** Characters a program name can follow (a match may start after any of them); flag and version tokens stop at them. */
+const BOUNDARY = "\\s;&|()<>{}`$=/\\\\";
+
 /**
  * `jubarteai` as a program (after the start, whitespace or a shell separator, or a `/`/`\` path separator), with an
- * optional `.cmd`/`.exe`/`.ps1`/`.js` extension or `@version` (npx), then any flags, then a person command as a whole
- * word. Case-insensitive: macOS and Windows file systems run `JubarteAI` as well.
+ * optional `.cmd`/`.exe`/`.ps1`/`.js` extension or `@version` (npx), optionally closing a lookup (`$(which jubarteai)`,
+ * a backtick), then any flags, then a person command as a whole word. Case-insensitive: macOS and Windows file systems
+ * run `JubarteAI` as well.
+ *
+ * Linear (review R-S13): a flag is `-` then non-boundary characters, so `--x` has one parse (the old `-{1,2}` gave it
+ * two, and a failing run of n flags took 2^n steps); the version and flag tokens exclude every BOUNDARY character, so
+ * the text one attempt walks over never holds the start of another attempt.
  */
 const PERSON_CALL = new RegExp(
-  `(?:^|[\\s;&|()<>{}\`$=/\\\\])jubarteai(?:\\.(?:cmd|exe|ps1|js|mjs))?(?:@\\S*)?(?:\\s+-{1,2}[^\\s;&|()<>]*)*\\s+(${PERSON_ALTERNATION})(?=$|[\\s;&|()<>{}\`])`,
+  `(?:^|[${BOUNDARY}])jubarteai(?:\\.(?:cmd|exe|ps1|js|mjs))?(?:@[^${BOUNDARY}]*)?(?:\\s*[)\`])?(?:\\s+-[^${BOUNDARY}]*)*\\s+(${PERSON_ALTERNATION})(?=$|[\\s;&|()<>{}\`])`,
   "i",
 );
 
 /**
- * The text a shell would see once quoting is undone: quotes dropped (`jubarteai "login"` → `jubarteai login`) and a
- * backtick spaced out. A backslash is a POSIX escape (`jubarteai \login`) but a Windows path separator
- * (`C:\npm\jubarteai.cmd login`), so both readings are returned.
+ * The texts a shell could run once quoting is undone: quotes dropped (`jubarteai "login"` → `jubarteai login`), with a
+ * `$` before a quote dropped too (bash's `$'login'`). A backslash is a POSIX escape (`jubarteai \login`) but a Windows
+ * path separator (`C:\npm\jubarteai.cmd login`), and a backtick is a POSIX command substitution but PowerShell's escape
+ * character (``l`ogin`` is `login`), so three readings are returned: POSIX (backslashes dropped, backticks spaced out),
+ * Windows paths (backslashes as `/`), and PowerShell (backticks dropped, backslashes as `/`).
  */
-function unquoted(text: string): [string, string] {
-  const bare = text.replace(/["']/g, "").replace(/`/g, " ` ");
-  return [bare.replace(/\\/g, ""), bare.replace(/\\/g, "/")];
+function readings(text: string): [string, string, string] {
+  const bare = text.replace(/\$(?=["'])/g, "").replace(/["']/g, "");
+  const spaced = bare.replace(/`/g, " ` ");
+  return [spaced.replace(/\\/g, ""), spaced.replace(/\\/g, "/"), bare.replace(/`/g, "").replace(/\\/g, "/")];
 }
 
 /** The person command a piece of command text runs, or null. */
 export function personCommandIn(text: string): string | null {
-  for (const reading of unquoted(text)) {
+  for (const reading of readings(text)) {
     const match = PERSON_CALL.exec(reading);
     if (match !== null) return (match[1] ?? "").toLowerCase();
   }
@@ -113,23 +131,33 @@ function deny(command: string): ToolGuardOutput {
     permissionDecisionReason:
       `jubarteai ${command} changes the saved account, the repo binding or harness files, so an agent may not run it. ` +
       `Ask the person to run "jubarteai ${command}" themselves in a terminal. ` +
-      `(If this command only mentions it, for example in a commit message, reword it.)`,
+      `(If this command only mentions it, for example in a commit message or the text of a jubarteai knowledge entry or search, ` +
+      `reword it, e.g. "the ${command} command".)`,
   };
 }
 
+/** The answer for a payload over the guard's read cap: what it can't read, it can't clear. */
+const TOO_LARGE: ToolGuardOutput = Object.freeze({
+  permissionDecision: "deny",
+  permissionDecisionReason:
+    "This tool call is too large for the JubarteAI guard to check for jubarteai login, logout, link, init or update. " +
+    "Split the command into smaller ones.",
+});
+
 /**
  * The decision for one `preToolUse` payload (camelCase `toolName`/`toolArgs` or snake_case `tool_name`/`tool_input`).
- * `truncated` means stdin went past the read cap: the prefix is then scanned as plain text, so padding a command can't
- * slip it past the guard. Anything unparsable or unrecognised is `{}`: the guard never blocks a call it can't read.
+ * `tooLarge` means stdin went past the guard's read cap (GUARD_INPUT_MAX_BYTES, far beyond what a model emits as one
+ * tool call): the unread rest could hold a person command anywhere, so the call is denied rather than scanned in part
+ * (review R-S14). Below the cap the whole payload is read and parsed, however the command is padded. Anything
+ * unparsable or unrecognised is `{}`: the guard never blocks a call it can read and finds nothing in.
  */
-export function toolGuardDecision(raw: string, truncated = false): ToolGuardOutput {
+export function toolGuardDecision(raw: string, tooLarge = false): ToolGuardOutput {
+  if (tooLarge) return TOO_LARGE;
   let payload: unknown;
   try {
     payload = JSON.parse(raw);
   } catch {
-    if (!truncated) return {};
-    const command = personCommandIn(raw);
-    return command === null ? {} : deny(command);
+    return {};
   }
   if (!isRecord(payload)) return {};
   const toolName = payload["toolName"] ?? payload["tool_name"];

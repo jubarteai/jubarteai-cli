@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { claudeCodeAdapter, HOOK_EVENTS } from "../harness/claude-code.js";
 import { CODEX_CODES, codexAdapter } from "../harness/codex.js";
+import { copilotCliAdapter } from "../harness/copilot-cli.js";
+import { vscodeAdapter } from "../harness/vscode.js";
 import type { InitCtx } from "../harness/types.js";
 import { applyPlan } from "../safe-edit/plan.js";
 import { planHookRefresh } from "./hook-refresh.js";
@@ -80,5 +82,59 @@ describe("planHookRefresh", () => {
     // The timeouts above may not equal Codex's; either way the entries are ours and complete, so a step exists.
     expect(plan.steps).toHaveLength(1);
     expect(plan.manuals.map((m) => m.code)).toEqual([CODEX_CODES.trustHooks]);
+  });
+
+  describe("the shared Copilot file (VS Code and Copilot CLI)", () => {
+    const copilotFile = (): string => path.join(home, ".copilot", "hooks", "jubarteai.json");
+    const guard = (program: string): Record<string, unknown> => ({
+      type: "command",
+      matcher: "bash|powershell",
+      bash: `${program} hook pre-tool-use --harness vscode || true`,
+      powershell: `try { & ${program === "jubarteai" ? "jubarteai.cmd" : program} hook pre-tool-use --harness vscode } catch { }; exit 0`,
+      timeoutSec: 8,
+    });
+    const sessionOnly = (program: string): string =>
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [{ type: "command", command: `${program} hook session-start --harness vscode`, timeoutSec: 8 }],
+          sessionEnd: [{ type: "command", command: `${program} hook session-end --harness vscode`, timeoutSec: 3 }],
+        },
+      });
+    const write = (text: string): void => {
+      fs.mkdirSync(path.dirname(copilotFile()), { recursive: true });
+      fs.writeFileSync(copilotFile(), text);
+    };
+    const apply = (steps: Parameters<typeof applyPlan>[0]) => applyPlan(steps, { tty: false, yes: true, agentSession: null, out: { write: () => true } as unknown as NodeJS.WritableStream });
+
+    it("adds the missing guard to a file whose session hooks are current: one step, labelled as adding the guard (review R-S16)", async () => {
+      write(sessionOnly("jubarteai"));
+      const plan = await planHookRefresh([vscodeAdapter, copilotCliAdapter], ctx("jubarteai"));
+      expect(plan.incomplete).toEqual([]);
+      expect(plan.steps).toHaveLength(1);
+      const step = plan.steps[0];
+      expect(step).toMatchObject({ sensitive: true, files: [copilotFile()] });
+      expect(step?.preview).toContain("hooks.preToolUse: jubarteai hook pre-tool-use --harness vscode");
+      expect(step?.label).toContain("Add the preToolUse guard");
+      expect(step?.label).toContain(copilotFile());
+
+      const results = await apply(plan.steps);
+      expect(results.map((r) => r.status)).toEqual(["configured"]);
+      expect(results[0]?.label).toContain("Add the preToolUse guard");
+      const hooks = (JSON.parse(fs.readFileSync(copilotFile(), "utf8")) as { hooks: Record<string, unknown> }).hooks;
+      expect(hooks["preToolUse"]).toEqual([guard("jubarteai")]);
+      expect((await planHookRefresh([vscodeAdapter, copilotCliAdapter], ctx("jubarteai"))).steps).toEqual([]);
+    });
+
+    it("a stale program and a missing guard: one refresh step that rewrites the program and adds the guard", async () => {
+      write(sessionOnly(OLD));
+      const plan = await planHookRefresh([vscodeAdapter, copilotCliAdapter], ctx(NEW));
+      expect(plan.steps).toHaveLength(1);
+      expect(plan.steps[0]?.label).toContain("Refresh the hook command");
+      await apply(plan.steps);
+      const text = fs.readFileSync(copilotFile(), "utf8");
+      expect(text).not.toContain("/old/node");
+      expect((JSON.parse(text) as { hooks: Record<string, unknown> }).hooks["preToolUse"]).toEqual([guard(NEW)]);
+    });
   });
 });

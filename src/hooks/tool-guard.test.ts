@@ -8,10 +8,10 @@ const camel = (command: string, toolName = "bash"): string => JSON.stringify({ s
 /** The PascalCase `PreToolUse` alias: snake_case, Claude tool name, parsed `tool_input`. */
 const snake = (command: string, toolName = "Bash"): string => JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s", cwd: "/r", tool_name: toolName, tool_input: { command } });
 
-const denied = (raw: string, truncated = false): boolean => "permissionDecision" in toolGuardDecision(raw, truncated);
+const denied = (raw: string): boolean => "permissionDecision" in toolGuardDecision(raw);
 
-/** Spellings an agent (or an injected prompt) could use to run a person command. `%s` is the command. */
-const PERSON_FORMS: readonly string[] = [
+/** Spellings an agent (or an injected prompt) could use to run a person command. `%s` is the command; a function builds the line. */
+const PERSON_FORMS: ReadonlyArray<string | ((command: string) => string)> = [
   "jubarteai %s",
   "jubarteai %s --with-token",
   "echo jba_x | jubarteai %s --with-token",
@@ -34,12 +34,26 @@ const PERSON_FORMS: readonly string[] = [
   "jubarteai --yes %s",
   'bash -c "jubarteai %s"',
   "cd /r\njubarteai %s",
+  // A path lookup (review R-S15): the program is followed by `)` or a backtick, not whitespace.
+  "$(which jubarteai) %s",
+  '"$(command -v jubarteai)" %s --yes',
+  "`command -v jubarteai` %s",
+  "& (Get-Command jubarteai) %s",
+  // bash ANSI-C and locale quoting.
+  "jubarteai $'%s'",
+  'jubarteai $"%s"',
+  // PowerShell's backtick escape inside the word.
+  (command) => `jubarteai ${command.slice(0, 1)}\`${command.slice(1)}`,
+  (command) => `& jub\`arteai ${command}`,
+  "npm exec jubarteai -- %s",
 ];
+
+const render = (form: string | ((command: string) => string), command: string): string => (typeof form === "string" ? form.replace("%s", command) : form(command));
 
 describe("toolGuardDecision: denies every person command, whatever the spelling", () => {
   for (const command of PERSON_COMMANDS) {
     for (const form of PERSON_FORMS) {
-      const line = form.replace("%s", command);
+      const line = render(form, command);
       it(`${JSON.stringify(line)}`, () => {
         const camelOut = toolGuardDecision(camel(line));
         expect(camelOut).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining(`jubarteai ${command}`) });
@@ -58,10 +72,38 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
     expect(denied(JSON.stringify({ toolName: "someNewShell", toolArgs: { command: "jubarteai link" } }))).toBe(true);
   });
 
-  it("scans a truncated payload as plain text, so padding can't push a command past the read cap", () => {
-    const prefix = `{"toolName":"bash","toolArgs":"{\\"command\\":\\"jubarteai login --with-token ${"x".repeat(50)}`;
-    expect(denied(prefix, true)).toBe(true);
-    expect(denied(`{"toolName":"bash","toolArgs":"{\\"command\\":\\"jubarteai inbox ${"x".repeat(50)}`, true)).toBe(false);
+  it("finds a command however much padding comes before it (the payload is parsed whole; review R-S14)", () => {
+    expect(denied(camel(`echo ${"x".repeat(2 * 1024 * 1024)}; jubarteai login`))).toBe(true);
+    expect(denied(JSON.stringify({ toolName: "bash", toolArgs: JSON.stringify({ description: "y".repeat(2 * 1024 * 1024), command: "jubarteai link" }) }))).toBe(true);
+  });
+
+  it("denies a payload the hook read only in part, whatever the part holds", () => {
+    expect(toolGuardDecision('{"toolName":"bash","toolArgs":"{\\"command\\":\\"echo hi', true)).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+  });
+});
+
+describe("toolGuardDecision: linear time (review R-S13)", () => {
+  /** Milliseconds `fn` takes. The bounds below are far above linear time and far below the old exponential/quadratic. */
+  const time = (fn: () => void): number => {
+    const start = performance.now();
+    fn();
+    return performance.now() - start;
+  };
+
+  it("a run of flag tokens before a failed match, then a later person command: a deny, quickly", () => {
+    for (const flag of ["--a", "-a", "--", "-"]) {
+      const line = `echo jubarteai ${`${flag} `.repeat(60)}x; jubarteai login`;
+      let out: unknown;
+      expect(time(() => (out = toolGuardDecision(camel(line)))), flag).toBeLessThan(1_000);
+      expect(out, flag).toMatchObject({ permissionDecision: "deny" });
+    }
+  });
+
+  it("one long token holding many program names (paths, versions, lookups) stays linear", () => {
+    for (const unit of ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t"]) {
+      const line = unit.repeat(Math.ceil(400_000 / unit.length));
+      expect(time(() => toolGuardDecision(camel(line))), unit).toBeLessThan(2_000);
+    }
   });
 });
 
@@ -95,7 +137,7 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
   });
 
   it("never answers allow, for any line", () => {
-    const lines = [...agentLines, ...PERSON_COMMANDS.flatMap((command) => PERSON_FORMS.map((form) => form.replace("%s", command)))];
+    const lines = [...agentLines, ...PERSON_COMMANDS.flatMap((command) => PERSON_FORMS.map((form) => render(form, command)))];
     for (const line of lines) {
       const out = toolGuardDecision(camel(line));
       expect(Object.keys(out).length === 0 || (out as { permissionDecision?: string }).permissionDecision === "deny", line).toBe(true);

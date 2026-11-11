@@ -98,7 +98,8 @@ function copilotHome(home: string, env: NodeJS.ProcessEnv): string {
   return custom !== undefined && custom !== "" && isAbsolute(custom) ? custom : join(home, ".copilot");
 }
 
-function copilotHooksFile(ctx: Pick<InitCtx, "home" | "env">): string {
+/** The shared hook file: `$COPILOT_HOME/hooks/jubarteai.json` when that is an absolute path, else ~/.copilot/hooks/jubarteai.json. */
+export function copilotHooksFile(ctx: Pick<InitCtx, "home" | "env">): string {
   return join(copilotHome(ctx.home, ctx.env), "hooks", "jubarteai.json");
 }
 
@@ -291,20 +292,41 @@ export function copilotHooksState(ctx: CopilotCtx): AdapterState["hooks"] {
   ]);
 }
 
-/** Doctor's note (VS Code and Copilot CLI) when the shared hook file has no guard of ours. */
-export const GUARD_MISSING_NOTE = `the preToolUse guard that denies an agent's ${PERSON_COMMAND_LIST} is not in ~/.copilot/hooks/jubarteai.json; run \`jubarteai init\` to add it`;
+/** Doctor's note (VS Code and Copilot CLI) when the shared hook file at `file` has no guard of ours. */
+export function guardMissingNote(file: string): string {
+  return `the preToolUse guard that denies an agent's ${PERSON_COMMAND_LIST} is not in ${file}; run \`jubarteai init\` to add it`;
+}
 
-/**
- * Whether the shared hook file holds our session hooks but not the guard (read-only, for doctor's note): a file
- * written before the guard existed, or one the person edited. A missing or unreadable file is reported by the hooks state.
- */
-export function copilotGuardMissing(ctx: CopilotCtx): boolean {
+/** Our entries' states in the shared hook file (read-only), or null when it is missing, unreadable or has no hooks object. */
+function copilotEntryStates(ctx: CopilotCtx): { session: Array<"exact" | "stale" | "none">; guard: "exact" | "stale" | "none" } | null {
   const file = readable(copilotHooksFile(ctx));
-  if (file.status !== "ok" || !isObject(file.doc["hooks"])) return false;
+  if (file.status !== "ok" || !isObject(file.doc["hooks"])) return null;
   const section = file.doc["hooks"];
   const program = hookProgram(ctx);
-  const hasSession = EVENTS.some(({ copilot, event, timeoutS }) => flatHookState(section[copilot], wantedHook(program, event, timeoutS), event, COPILOT_HINT) !== "none");
-  return hasSession && guardState(section[GUARD_KEY], wantedGuard(program)) === "none";
+  return {
+    session: EVENTS.map(({ copilot, event, timeoutS }) => flatHookState(section[copilot], wantedHook(program, event, timeoutS), event, COPILOT_HINT)),
+    guard: guardState(section[GUARD_KEY], wantedGuard(program)),
+  };
+}
+
+/**
+ * Doctor's note when the shared hook file holds our session hooks but not the guard (read-only), naming the resolved
+ * file: a file written before the guard existed, or one the person edited. Null otherwise; a missing or unreadable
+ * file is reported by the hooks state.
+ */
+export function copilotGuardMissingNote(ctx: CopilotCtx): string | null {
+  const states = copilotEntryStates(ctx);
+  if (states === null || states.guard !== "none" || states.session.every((s) => s === "none")) return null;
+  return guardMissingNote(copilotHooksFile(ctx));
+}
+
+/**
+ * Whether rewriting the shared hook file would only add the guard: every session hook already holds exactly the wanted
+ * command and the guard is absent (read-only, for update's refresh label).
+ */
+export function copilotRefreshAddsGuardOnly(ctx: CopilotCtx): boolean {
+  const states = copilotEntryStates(ctx);
+  return states !== null && states.guard === "none" && states.session.every((s) => s === "exact");
 }
 
 // ---- adapter -----------------------------------------------------------------------------------------------------
@@ -386,7 +408,8 @@ export const vscodeAdapter: HarnessAdapter = {
         }
       }
     }
-    if (copilotGuardMissing(ctx)) notes.push(GUARD_MISSING_NOTE);
+    const guardNote = copilotGuardMissingNote(ctx);
+    if (guardNote !== null) notes.push(guardNote);
     return { permission, hooks: copilotHooksState(ctx), mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };
   },
 

@@ -16,7 +16,7 @@ import {
   startFakeServer,
 } from "../../test/helpers/fake-mcp-server.js";
 import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
-import { HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
+import { GUARD_INPUT_MAX_BYTES, HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
 import { routeWith } from "../cli/router.js";
 import { SESSION_END_NETWORK_TIMEOUT_MS, ownHookFile } from "../hooks/events.js";
 import { homeDir } from "../paths.js";
@@ -63,7 +63,7 @@ async function server(messages: unknown[] = []): Promise<FakeServer> {
 }
 
 function deps(over: Partial<HookDeps> = {}): HookDeps {
-  return { call: callTool, budgetMs: HOOK_TOTAL_BUDGET_MS, networkTimeoutMs: HOOK_NETWORK_TIMEOUT_MS, endTimeoutMs: SESSION_END_NETWORK_TIMEOUT_MS, env: {}, ...over };
+  return { call: callTool, budgetMs: HOOK_TOTAL_BUDGET_MS, networkTimeoutMs: HOOK_NETWORK_TIMEOUT_MS, endTimeoutMs: SESSION_END_NETWORK_TIMEOUT_MS, guardMaxBytes: GUARD_INPUT_MAX_BYTES, env: {}, ...over };
 }
 
 type Result = { code: number; out: string; err: string };
@@ -393,10 +393,26 @@ describe("pre-tool-use (the shared Copilot file's guard)", () => {
     expect(JSON.parse(out.text())).toMatchObject({ permissionDecision: "deny" });
   });
 
-  it("scans an oversized payload's prefix instead of dropping it", async () => {
-    const big = JSON.stringify(call(`jubarteai logout; echo ${"x".repeat(1024 * 1024 + 10)}`));
-    const result = await hook("pre-tool-use", big, { harness: "vscode" });
-    expect(JSON.parse(result.out)).toMatchObject({ permissionDecision: "deny" });
+  it("reads a payload past 1 MiB whole, so padding before the command can't hide it (review R-S14)", async () => {
+    const before = JSON.stringify(call(`echo ${"x".repeat(1024 * 1024 + 100)}; jubarteai login`));
+    expect(JSON.parse((await hook("pre-tool-use", before, { harness: "vscode" })).out)).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+    // A description padded ahead of the command in the arguments object, too.
+    const padded = JSON.stringify({ toolName: "bash", toolArgs: JSON.stringify({ description: "y".repeat(1024 * 1024 + 100), command: "jubarteai logout" }) });
+    expect(JSON.parse((await hook("pre-tool-use", padded, { harness: "vscode" })).out)).toMatchObject({ permissionDecision: "deny" });
+    const after = JSON.stringify(call(`jubarteai logout; echo ${"x".repeat(1024 * 1024 + 10)}`));
+    expect(JSON.parse((await hook("pre-tool-use", after, { harness: "vscode" })).out)).toMatchObject({ permissionDecision: "deny" });
+    const innocent = JSON.stringify(call(`echo ${"x".repeat(1024 * 1024 + 10)}; jubarteai inbox`));
+    expect((await hook("pre-tool-use", innocent, { harness: "vscode" })).out).toBe("{}\n");
+  });
+
+  it("denies a payload past the guard's read cap, whatever it holds, since the unread rest could hide a person command", async () => {
+    const cap = 64 * 1024;
+    const over = JSON.stringify(call(`echo ${"x".repeat(cap)}`));
+    const result = await hook("pre-tool-use", over, { harness: "vscode", deps: { guardMaxBytes: cap } });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out)).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+    const under = JSON.stringify(call(`echo ${"x".repeat(cap / 2)}`));
+    expect((await hook("pre-tool-use", under, { harness: "vscode", deps: { guardMaxBytes: cap } })).out).toBe("{}\n");
   });
 
   it("a stdin that never closes is cut at the budget with no decision, so the harness's normal flow decides", async () => {

@@ -4,7 +4,7 @@
 // file (hooks/tool-guard.ts): no network, no session, and always one JSON object on stdout.
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
-import { ARG_INPUT_MAX_BYTES, HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
+import { ARG_INPUT_MAX_BYTES, GUARD_INPUT_MAX_BYTES, HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
 import { SESSION_END_NETWORK_TIMEOUT_MS, parseHookEvent, runHookEvent } from "../hooks/events.js";
 import type { HookRuntime } from "../hooks/events.js";
 import { harnessFromHint, parseHookInput } from "../hooks/input.js";
@@ -16,6 +16,8 @@ export type HookDeps = {
   budgetMs: number;
   networkTimeoutMs: number;
   endTimeoutMs: number;
+  /** The guard's read cap (GUARD_INPUT_MAX_BYTES); a parameter so a test can reach it without 16 MiB of input. */
+  guardMaxBytes: number;
   env: NodeJS.ProcessEnv;
 };
 
@@ -25,6 +27,7 @@ function defaultDeps(): HookDeps {
     budgetMs: HOOK_TOTAL_BUDGET_MS,
     networkTimeoutMs: HOOK_NETWORK_TIMEOUT_MS,
     endTimeoutMs: SESSION_END_NETWORK_TIMEOUT_MS,
+    guardMaxBytes: GUARD_INPUT_MAX_BYTES,
     env: process.env,
   };
 }
@@ -32,10 +35,11 @@ function defaultDeps(): HookDeps {
 type StdinRead = { text: string; overflow: boolean };
 
 /**
- * All of stdin as text ("" when it is a terminal, unreadable, or `signal` aborts first). Past ARG_INPUT_MAX_BYTES it
- * stops reading and returns what it has with `overflow` set: the session events drop it, the guard scans the prefix.
+ * All of stdin as text ("" when it is a terminal, unreadable, or `signal` aborts first). Past `maxBytes` it stops
+ * reading and returns what it has with `overflow` set: the session events drop it (cap ARG_INPUT_MAX_BYTES), the guard
+ * denies it (cap GUARD_INPUT_MAX_BYTES).
  */
-function readAllStdin(stream: NodeJS.ReadableStream, signal: AbortSignal): Promise<StdinRead> {
+function readAllStdin(stream: NodeJS.ReadableStream, signal: AbortSignal, maxBytes: number): Promise<StdinRead> {
   if ((stream as { isTTY?: boolean }).isTTY === true || signal.aborted) return Promise.resolve({ text: "", overflow: false });
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
@@ -54,9 +58,9 @@ function readAllStdin(stream: NodeJS.ReadableStream, signal: AbortSignal): Promi
     const text = (): string => Buffer.concat(chunks).toString("utf8");
     const onData = (chunk: Buffer | string): void => {
       const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-      const room = ARG_INPUT_MAX_BYTES - total;
+      const room = maxBytes - total;
       total += bytes.length;
-      if (total > ARG_INPUT_MAX_BYTES) {
+      if (total > maxBytes) {
         if (room > 0) chunks.push(bytes.subarray(0, room));
         finish({ text: text(), overflow: true });
       } else chunks.push(bytes);
@@ -80,7 +84,7 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
   const timer = setTimeout(() => controller.abort(), deps.budgetMs);
   try {
     if (args.positionals[0] === PRE_TOOL_USE) {
-      await runToolGuard(ctx, controller.signal);
+      await runToolGuard(ctx, controller.signal, deps.guardMaxBytes);
       return 0;
     }
     const event = parseHookEvent(args.positionals[0]);
@@ -93,7 +97,7 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
       signal: controller.signal,
     };
     const work = (async (): Promise<string> => {
-      const read = await readAllStdin(ctx.stdin, controller.signal);
+      const read = await readAllStdin(ctx.stdin, controller.signal, ARG_INPUT_MAX_BYTES);
       return runHookEvent(parseHookInput(read.overflow ? "" : read.text, hint, event, deps.env, ctx.cwd), runtime);
     })().catch(() => "");
     const expired = new Promise<string>((resolve) => {
@@ -110,14 +114,14 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
 }
 
 /**
- * The guard: always exactly one JSON object on stdout, `{}` (no decision) unless the call runs a person command. A
- * read that the budget cuts short is `{}` too: a timeout lets the call through the normal permission flow, as the
- * harness itself does when a hook times out.
+ * The guard: always exactly one JSON object on stdout, `{}` (no decision) unless the call runs a person command or is
+ * too large to read whole (past `maxBytes`, a deny). A read that the budget cuts short is `{}`: a timeout lets the call
+ * through the normal permission flow, as the harness itself does when a hook times out.
  */
-async function runToolGuard(ctx: CommandContext, signal: AbortSignal): Promise<void> {
+async function runToolGuard(ctx: CommandContext, signal: AbortSignal, maxBytes: number): Promise<void> {
   let out = "{}";
   try {
-    const read = await readAllStdin(ctx.stdin, signal);
+    const read = await readAllStdin(ctx.stdin, signal, maxBytes);
     if (!signal.aborted) out = JSON.stringify(toolGuardDecision(read.text, read.overflow));
   } catch {
     // Never block a call the guard couldn't read.

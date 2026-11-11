@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { PlanStep } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
-import { GUARD_MISSING_NOTE, copilotGuardMissing, copilotHooksPlan, copilotHooksState } from "./vscode.js";
+import { copilotGuardMissingNote, copilotHooksFile, copilotHooksPlan, copilotHooksState } from "./vscode.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "copilot-cli" as const;
@@ -42,14 +42,14 @@ export const copilotCliAdapter: HarnessAdapter = {
     return env.which("copilot") !== null || existsSync(copilotDir(env.home, env.env));
   },
 
-  async permission(): Promise<PlanStep | ManualInstructions | null> {
+  async permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions | null> {
     return {
       kind: "manual",
       harness: HARNESS,
       title: "GitHub Copilot CLI: approve jubarteai commands one at a time",
       lines: [
         `Copilot CLI approves programs other than git and gh by name, so approving any jubarteai command for the session or for this repository also approves ${PERSON_COMMAND_LIST}: the commands that change your saved account, the repo binding and your harness files.`,
-        `The session hooks step also registers a preToolUse guard in ~/.copilot/hooks/jubarteai.json that denies an agent's shell call naming ${PERSON_COMMAND_LIST}, whatever was approved. It approves nothing, and it is best effort: a command hidden in a script file or a variable gets past it.`,
+        `The session hooks step also registers a preToolUse guard in ${copilotHooksFile(ctx)} that denies an agent's shell call naming ${PERSON_COMMAND_LIST}, whatever was approved. It approves nothing, and it is best effort: a command hidden in a script file or a variable gets past it.`,
         "The CLI therefore prints no Copilot CLI allow flags. When Copilot CLI asks before a jubarteai command, approve that one command, not every jubarteai command for the session or the repository.",
         `--allow-tool='shell(jubarteai)', --allow-tool='shell(jubarteai:*)', --allow-all-tools and --yolo also pre-approve ${PERSON_COMMAND_LIST}, leaving only the guard in the way: run those five yourself in a terminal.`,
       ],
@@ -67,7 +67,8 @@ export const copilotCliAdapter: HarnessAdapter = {
       "Copilot CLI has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill",
       `no permission rule is written or printed: approve each jubarteai command once when Copilot CLI asks; a session or repository approval of jubarteai also approves ${PERSON_COMMAND_LIST}, which only the preToolUse guard then denies`,
     ];
-    if (copilotGuardMissing(ctx)) notes.push(GUARD_MISSING_NOTE);
+    const guardNote = copilotGuardMissingNote(ctx);
+    if (guardNote !== null) notes.push(guardNote);
     return { permission: "manual", hooks: copilotHooksState(ctx), mcpEntries: [], notes };
   },
 

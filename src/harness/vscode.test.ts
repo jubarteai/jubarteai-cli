@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { spawnSync } from "node:child_process";
-import { COPILOT_HOOKS_STEP_ID, GUARD_MISSING_NOTE, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
+import { COPILOT_HOOKS_STEP_ID, guardMissingNote, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
 let home: string;
@@ -303,18 +303,18 @@ describe("the preToolUse guard in the shared Copilot file (review R-S12)", () =>
   it("a file with the session hooks only is partial, doctor notes the missing guard, and init adds it", async () => {
     put(hooksFile(), JSON.stringify(SESSION_ONLY, null, 2) + "\n");
     expect(copilotHooksState(ctx())).toBe("partial");
-    expect((await vscodeAdapter.inspect(ctx())).notes).toContain(GUARD_MISSING_NOTE);
+    expect((await vscodeAdapter.inspect(ctx())).notes).toContain(guardMissingNote(hooksFile()));
     const step = copilotHooksStep(ctx());
     expect(step.sensitive).toBe(true);
     expect(step.preview).toContain("hooks.preToolUse: jubarteai hook pre-tool-use --harness vscode");
     expect((await step.apply()).status).toBe("configured");
     expect((readJson(hooksFile())["hooks"] as Record<string, unknown>)["preToolUse"]).toEqual([GUARD("jubarteai")]);
     expect(copilotHooksState(ctx())).toBe("configured");
-    expect((await vscodeAdapter.inspect(ctx())).notes).not.toContain(GUARD_MISSING_NOTE);
+    expect((await vscodeAdapter.inspect(ctx())).notes).not.toContain(guardMissingNote(hooksFile()));
   });
 
   it("no guard note when there is no hook file of ours at all (the hooks state says missing)", async () => {
-    expect((await vscodeAdapter.inspect(ctx())).notes).not.toContain(GUARD_MISSING_NOTE);
+    expect((await vscodeAdapter.inspect(ctx())).notes).not.toContain(guardMissingNote(hooksFile()));
   });
 
   it("drops a second copy of ours and rewrites a stale one in place, keeping other tools' entries", async () => {

@@ -57,6 +57,13 @@ export const LOOPBACK_HOSTS: readonly string[] = ["127.0.0.1", "localhost", "[::
 /** Largest value read from a file or stdin for a flag (`--json @file`, `--x-file`). */
 export const ARG_INPUT_MAX_BYTES = 1024 * 1024;
 
+/**
+ * Largest `preToolUse` payload the guard reads (`jubarteai hook pre-tool-use`). The whole payload must be read for a
+ * padded command to be seen, and a model never emits a tool call anywhere near this size; past it the call is denied
+ * as too large to check (review R-S14).
+ */
+export const GUARD_INPUT_MAX_BYTES = 16 * 1024 * 1024;
+
 /** Longest answer accepted at an interactive prompt. */
 export const PROMPT_MAX_CHARS = 8192;
 

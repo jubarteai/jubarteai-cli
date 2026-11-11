@@ -9,9 +9,12 @@
 // stale is touched. An adapter with no hooks of ours, or with only some of the events registered, is init's to
 // finish (update adds no session entries), and an adapter that can only print instructions gets the `init` hint instead.
 // One exception: the shared Copilot file's step writes its entries as a set, so refreshing it also adds the deny-only
-// preToolUse guard when it is missing (a file from before the guard); the step stays sensitive and previews it.
+// preToolUse guard when it is missing (a file from before the guard), even when the session hooks are current; the step
+// stays sensitive, previews it, and is labelled as adding the guard when that is all it changes.
 import { ownHookEvents, ownHookRegistered } from "../hooks/events.js";
+import { PERSON_COMMAND_LIST } from "../harness/agent-commands.js";
 import { CODEX_CODES } from "../harness/codex.js";
+import { COPILOT_HOOKS_STEP_ID, copilotRefreshAddsGuardOnly } from "../harness/vscode.js";
 import type { HarnessAdapter, InitCtx, ManualInstructions } from "../harness/types.js";
 import type { PlanStep } from "../safe-edit/plan.js";
 
@@ -20,7 +23,10 @@ export const HOOK_REFRESH_COPY = {
 } as const;
 
 export type HookRefreshPlan = {
-  /** One sensitive step per hook file whose entries are ours and carry another program. */
+  /**
+   * One sensitive step per hook file whose entries are ours and differ from what init writes (another program, timeout
+   * or duplicates), or, for the shared Copilot file, lack the preToolUse guard.
+   */
   steps: PlanStep[];
   /** Instructions for what update does not write (a file it won't rewrite, Codex's trust prompt). */
   manuals: ManualInstructions[];
@@ -66,7 +72,10 @@ export async function planHookRefresh(adapters: HarnessAdapter[], ctx: InitCtx):
       const key = step.files.join("\n");
       if (!step.sensitive || seenFiles.has(key)) continue;
       seenFiles.add(key);
-      const label = `Refresh the hook command in ${adapter.label} (${step.files.join(", ")})`;
+      const label =
+        step.id === COPILOT_HOOKS_STEP_ID && copilotRefreshAddsGuardOnly(ctx)
+          ? `Add the preToolUse guard that denies an agent's ${PERSON_COMMAND_LIST} to ${step.files.join(", ")}`
+          : `Refresh the hook command in ${adapter.label} (${step.files.join(", ")})`;
       plan.steps.push({
         ...step,
         label,
