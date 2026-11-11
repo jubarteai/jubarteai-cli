@@ -15,16 +15,18 @@
 // query of the agent's own `jubarteai create-knowledge`/`search-knowledge`, a directory named jubarteai followed by
 // `init`) is refused as well, and the reason says to reword it.
 //
-// The matcher is linear in the input (review R-S13, R-S17): no group can match the same text two ways, and a flag or
-// version token never runs over another `jubarteai`, so the text one attempt walks over holds no other attempt's start
-// and one long command can't keep the hook busy until the harness's timeout lets the call through (GitHub fails a
-// timed-out `preToolUse` hook open). The tokens still take `=`, `/`, `<` and `>`, because `npm exec`/`npm x` parse flags
-// after the package name themselves: `npm exec jubarteai --loglevel=silent login` and `npx "jubarteai@>=1" init` run
-// the person command.
+// The matcher is a word-level scan, not one regex (review R-S13, R-S17, R-S18, R-S19): each reading is split once into
+// words and shell separators and walked left to right, so it is linear by construction and one long command can't keep
+// the hook busy until the harness's timeout lets the call through (GitHub fails a timed-out `preToolUse` hook open).
+// After the program come flags the way `npm exec`/`npm x` parse them after the package name: `--flag=value`, or
+// `--flag value` with the value as the next word (a bare `--` takes none), so `npm exec jubarteai --loglevel silent
+// login` runs the person command and is denied. A program word is tested on its own, so a package spec or flag value
+// that itself names the package (`npx jubarteai@https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz login`,
+// `--prefix=../jubarteai-cli`) is one word and can't hide the command after it.
 //
 // Pure: no network, no file reads, no binding lookup. It runs in every repo, bound or not, because login and logout
 // change user-level credentials (the stated exception to I7's bound-repo rule).
-import { PERSON_COMMANDS } from "../harness/agent-commands.js";
+import { AGENT_COMMANDS, PERSON_COMMANDS } from "../harness/agent-commands.js";
 
 /** The `hook` event name of the guard: `jubarteai hook pre-tool-use --harness vscode`. Not a session event. */
 export const PRE_TOOL_USE = "pre-tool-use";
@@ -42,34 +44,75 @@ export const SHELL_TOOL_NAMES: readonly string[] = Object.freeze(["bash", "power
 /** The `matcher` written on the hook entry: the Copilot runtime's shell tools, so no other tool call starts a process. */
 export const SHELL_TOOL_MATCHER = "bash|powershell";
 
-/** The commands the guard refuses, as a regex alternation. */
-const PERSON_ALTERNATION = PERSON_COMMANDS.join("|");
+/** The commands the guard refuses. */
+const PERSON = new Set<string>(PERSON_COMMANDS);
 
-/** Characters a program name can follow (a match may start after any of them). */
-const BOUNDARY = "\\s;&|()<>{}`$=/\\\\";
+/** The agent commands: a word after a flag that names one is the subcommand, not the flag's value. */
+const AGENT = new Set<string>(AGENT_COMMANDS.map((command) => command.toLowerCase()));
+
+/** A reading split into words and shell separators (whitespace dropped): one pass, linear. */
+const PIECES = /[;&|()`]|[^\s;&|()`]+/g;
+
+/** The one-character pieces PIECES returns as separators. */
+const SEPARATORS = new Set([";", "&", "|", "(", ")", "`"]);
+
+/** Separators the program may be followed by when it closes a lookup: `$(which jubarteai) login`, a backtick. */
+const CLOSERS = new Set([")", "`"]);
 
 /**
- * A flag or `@version` token: any run of characters up to the next whitespace, shell separator, parenthesis or
- * backtick that never runs over another `jubarteai` (a tempered token). It takes `=`, `/`, `<`, `>` and `$`, so
- * `--loglevel=silent`, `--registry=https://…` and `@>=1.0.0` are one token each; because it stops before any
- * `jubarteai`, the text it covers can't hold the start of a second match attempt (review R-S17).
+ * A word that runs `jubarteai`: the name at the word's start or after `<`, `>`, `{`, `}`, `$`, `=` or a path separator,
+ * with an optional `.cmd`/`.exe`/`.ps1`/`.js`/`.mjs` extension or an `@version` (npx: a range, a tag or a tarball URL,
+ * whatever it holds) and nothing else after it. So `/usr/local/bin/jubarteai`, `C:/…/jubarteai.cmd`, `jubarteai@>=1` and
+ * `jubarteai@https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz` are the program, and `jubarteai-cli`,
+ * `myjubarteai` and `/tmp/my-jubarteai-cache` are not. Case-insensitive: macOS and Windows file systems run `JubarteAI`
+ * as well. Tested on one word at a time; each failed attempt ends right after the name and `.*` runs only on a match,
+ * so it is linear in the word.
  */
-const TOKEN = "(?:(?!jubarteai)[^\\s;&|()`])*";
+const PROGRAM_WORD = /(?:^|[<>{}$=/\\])jubarteai(?:\.(?:cmd|exe|ps1|js|mjs))?(?:@.*)?$/i;
+
+/** A word's command part, lowercased: what comes before a redirection or brace (`login>out` is `login`). */
+function commandPart(word: string): string {
+  const cut = word.search(/[<>{}]/);
+  return (cut === -1 ? word : word.slice(0, cut)).toLowerCase();
+}
 
 /**
- * `jubarteai` as a program (after the start, whitespace or a shell separator, or a `/`/`\` path separator), with an
- * optional `.cmd`/`.exe`/`.ps1`/`.js` extension or `@version` (npx), optionally closing a lookup (`$(which jubarteai)`,
- * a backtick), then any flags, then a person command as a whole word. Case-insensitive: macOS and Windows file systems
- * run `JubarteAI` as well.
- *
- * Linear (review R-S13, R-S17): a flag is `-` then one TOKEN, so `--x` has one parse (the old `-{1,2}` gave it two, and
- * a failing run of n flags took 2^n steps), and no TOKEN covers another `jubarteai`, so no attempt walks over the
- * start of another.
+ * Where the scan is: outside a jubarteai call, right after the program (a lookup's `)` or backtick may follow), among
+ * its flags, or right after a flag that may take the next word as its value.
  */
-const PERSON_CALL = new RegExp(
-  `(?:^|[${BOUNDARY}])jubarteai(?:\\.(?:cmd|exe|ps1|js|mjs))?(?:@${TOKEN})?(?:\\s*[)\`])?(?:\\s+-${TOKEN})*\\s+(${PERSON_ALTERNATION})(?=$|[\\s;&|()<>{}\`])`,
-  "i",
-);
+type ScanState = "outside" | "program" | "flags" | "flagValue";
+
+/** The person command one reading runs, or null. One left-to-right pass over its pieces. */
+function scanReading(reading: string): string | null {
+  let state: ScanState = "outside";
+  for (const [piece] of reading.matchAll(PIECES)) {
+    // A program word starts a new call wherever it appears, a flag's value included, so no piece is walked twice.
+    if (PROGRAM_WORD.test(piece)) {
+      state = "program";
+      continue;
+    }
+    if (state === "outside") continue;
+    if (SEPARATORS.has(piece)) {
+      state = state === "program" && CLOSERS.has(piece) ? "flags" : "outside";
+      continue;
+    }
+    if (piece.startsWith("-")) {
+      // `--flag=value` carries its value and a bare `--` takes none; `--flag` may take the next word.
+      state = piece === "--" || piece.includes("=") ? "flags" : "flagValue";
+      continue;
+    }
+    const command = commandPart(piece);
+    if (PERSON.has(command)) return command;
+    // After a flag, a word that is not a subcommand is that flag's value (`--loglevel silent`); scan on past it.
+    if (state === "flagValue" && !AGENT.has(command)) {
+      state = "flags";
+      continue;
+    }
+    // The subcommand is an agent command, or something else: no decision for this call.
+    state = "outside";
+  }
+  return null;
+}
 
 /**
  * The texts a shell could run once quoting is undone: quotes dropped (`jubarteai "login"` → `jubarteai login`), with a
@@ -87,8 +130,8 @@ function readings(text: string): [string, string, string] {
 /** The person command a piece of command text runs, or null. */
 export function personCommandIn(text: string): string | null {
   for (const reading of readings(text)) {
-    const match = PERSON_CALL.exec(reading);
-    if (match !== null) return (match[1] ?? "").toLowerCase();
+    const command = scanReading(reading);
+    if (command !== null) return command;
   }
   return null;
 }

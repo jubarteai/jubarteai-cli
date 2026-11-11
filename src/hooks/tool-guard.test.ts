@@ -54,6 +54,19 @@ const PERSON_FORMS: ReadonlyArray<string | ((command: string) => string)> = [
   'npx "jubarteai@>=1" %s',
   "npx 'jubarteai@<2' %s",
   "npm exec jubarteai@https://x/y.tgz %s",
+  // npm also takes a flag's value from the next word (review R-S18): npm 11 runs `login` for each of these.
+  "npm exec jubarteai --loglevel silent %s",
+  "npm x jubarteai --cache /tmp/c %s",
+  "npm exec jubarteai --loglevel silent --cache /tmp/c %s",
+  "npm exec jubarteai --yes -- %s",
+  // A package spec or flag value that itself names the package is one word and hides nothing (review R-S19).
+  "npx jubarteai@https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz %s",
+  "npx --yes jubarteai@file:/tmp/jubarteai-1.0.0.tgz %s",
+  "npm exec jubarteai --prefix=../jubarteai-cli %s",
+  "npm exec jubarteai --cache=/tmp/my-jubarteai-cache %s",
+  "npm exec jubarteai --prefix ../jubarteai-cli %s",
+  // Redirection or a brace right after the command word.
+  "{ jubarteai %s>/dev/null; }",
 ];
 
 const render = (form: string | ((command: string) => string), command: string): string => (typeof form === "string" ? form.replace("%s", command) : form(command));
@@ -115,7 +128,7 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
   });
 
   it("one long token holding many program names (paths, versions, lookups) stays linear", () => {
-    const units = ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t", "--x=/jubarteai ", "jubarteai@>=", "jubarteai --a=b ", "-->jubarteai ", "jubarteai@jubarteai@"];
+    const units = ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t", "--x=/jubarteai ", "jubarteai@>=", "jubarteai --a=b ", "-->jubarteai ", "jubarteai@jubarteai@", "jubarteai --a b ", "jubarteai --a login ", "=jubarteai --a b c ", "jubarteai -- ", "jubarteai@x/jubarteai-1.tgz --a ", "jubarteai --a jubarteai ", "x/jubarteai-cli "];
     for (const unit of units) {
       const line = unit.repeat(Math.ceil(400_000 / unit.length));
       expect(time(() => toolGuardDecision(camel(line))), unit).toBeLessThan(2_000);
@@ -133,8 +146,20 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
     });
   }
 
+  it("an agent command after npm's flags, with or without a value or `--` (review R-S18)", () => {
+    for (const line of [
+      "npm exec jubarteai -- search-knowledge --query update",
+      "npm exec jubarteai --yes search-knowledge --query update",
+      "npm exec jubarteai --loglevel silent inbox --agent 11111111-1111-4111-8111-111111111111",
+      "npx jubarteai@https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz inbox",
+      "npm exec jubarteai --prefix=../jubarteai-cli -- echo-current-task --title login",
+    ]) {
+      expect(toolGuardDecision(camel(line)), line).toEqual({});
+    }
+  });
+
   it("other programs and lookalike words", () => {
-    for (const line of ["git status", "jubarteai-cli login", "myjubarteai login", "jubarteai loginx", "jubarteai inbox --login", "echo jubarteai", "npm run login", "jubarteai search-knowledge --query \"how does init work\""]) {
+    for (const line of ["git status", "jubarteai-cli login", "myjubarteai login", "jubarteai loginx", "jubarteai inbox --login", "echo jubarteai", "npm run login", "ls /tmp/my-jubarteai-cache login", "jubarteai; login", "jubarteai | login", "jubarteai@1 inbox && echo login", "jubarteai search-knowledge --query \"how does init work\""]) {
       expect(toolGuardDecision(camel(line)), line).toEqual({});
     }
   });
