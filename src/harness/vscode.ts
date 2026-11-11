@@ -95,6 +95,15 @@ function copilotHooksFile(ctx: Pick<InitCtx, "home" | "env">): string {
 
 // ---- permission --------------------------------------------------------------------------------------------------
 
+/**
+ * Whether a broad key holds VS Code's object form with `approve: true` (`"jubarteai": { "approve": true }`). It
+ * approves as much as `true` does. The CLI never wrote it, so it is only reported (doctor, printed lines), never
+ * removed: the person may have set other options on it (review R-N13).
+ */
+function isObjectApproval(value: unknown): boolean {
+  return isObject(value) && value["approve"] === true;
+}
+
 function addAutoApprove(doc: Obj): EditOutcome {
   const current = doc[AUTO_APPROVE_KEY];
   if (current === undefined) {
@@ -224,9 +233,13 @@ export const vscodeAdapter: HarnessAdapter = {
           `Open ${file} (Command Palette: Preferences: Open User Settings (JSON)) and add:`,
           ...autoApproveJson(),
           `(merge it into the existing setting; the false entry keeps ${PERSON_COMMAND_LIST} asking)`,
-          `(and remove a "${LEGACY_RULE}": true entry if there is one: VS Code matches the raw command text, so it would still pre-approve a quoted spelling such as jubarteai "login")`,
+          `(and remove a "${LEGACY_RULE}": true or "${LEGACY_RULE}": { "approve": true } entry if there is one: it also pre-approves ${PERSON_COMMAND_LIST}, because VS Code matches the raw command text and the false entry can't catch a quoted spelling such as jubarteai "login")`,
         ],
         reason,
+        [
+          { effect: "allow", entry: AGENT_RULE },
+          { effect: "deny", entry: PERSON_RULE },
+        ],
       );
     if (!existsSync(dir)) return printed("VS Code's user settings directory was not found");
     if (readable(file).status === "unwritable") return printed("settings.json has comments or is not plain JSON, so it is not rewritten");
@@ -263,6 +276,8 @@ export const vscodeAdapter: HarnessAdapter = {
         if (rules[AGENT_RULE] === true && rules[PERSON_RULE] === false) permission = "configured";
         if (rules[LEGACY_RULE] === true) {
           notes.push(`${AUTO_APPROVE_KEY} has a broad "${LEGACY_RULE}": true entry, which also pre-approves ${PERSON_COMMAND_LIST} when spelled with quotes (VS Code matches the raw text); re-run \`jubarteai init\` to remove it`);
+        } else if (isObjectApproval(rules[LEGACY_RULE])) {
+          notes.push(`${AUTO_APPROVE_KEY} has a broad "${LEGACY_RULE}": { "approve": true } entry, which also pre-approves ${PERSON_COMMAND_LIST} when spelled with quotes (VS Code matches the raw text); the CLI didn't write it and leaves it alone, so remove it by hand`);
         }
       }
     }

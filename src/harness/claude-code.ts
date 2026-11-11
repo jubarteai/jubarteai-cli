@@ -8,7 +8,7 @@ import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { findMcpEntries, isUnderHome, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
 import type { HarnessId } from "../session/harness-env.js";
-import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
+import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 import { PERSON_COMMANDS } from "./agent-commands.js";
 
 const ID = "claude-code";
@@ -295,11 +295,11 @@ function addRules(doc: Record<string, unknown>, rules: PermissionRules): boolean
 /** The instruction for a config that exists but can't be read (no permission): fix that, nothing was written. */
 export function unreadableInstructions(harness: HarnessId, file: string, home: string, title: string): ManualInstructions {
   const shown = shownPath(file, home);
-  return { kind: "manual", harness, title, lines: [`couldn't read ${shown}: fix its permissions, then run jubarteai init again`], reason: `${shown} could not be read` };
+  return { kind: "manual", harness, title, lines: [`couldn't read ${shown}: fix its permissions, then run jubarteai init again`], reason: `${shown} could not be read`, rules: [] };
 }
 
-function manualSettings(ctx: InitCtx, file: string, title: string, lines: string[], reason: string): ManualInstructions {
-  return { kind: "manual", harness: ID, title, lines: [`Edit ${shownPath(file, ctx.home)} by hand:`, ...lines], reason };
+function manualSettings(ctx: InitCtx, file: string, title: string, lines: string[], reason: string, rules?: PrintedRule[]): ManualInstructions {
+  return { kind: "manual", harness: ID, title, lines: [`Edit ${shownPath(file, ctx.home)} by hand:`, ...lines], reason, ...(rules === undefined ? {} : { rules }) };
 }
 
 export type JsonSettings =
@@ -339,13 +339,14 @@ async function permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions |
   const label = `Allow ${rules.allow.join(" and ")} in ${shownPath(file, ctx.home)}, asking first for ${ASK_SUBCOMMANDS.join(", ")}`;
   const entries = JSON.stringify({ permissions: { allow: rules.allow, ask: rules.ask } }, null, 2);
   const addLine = `add ${rules.allow.map((r) => `"${r}"`).join(", ")} to permissions.allow and ${rules.ask.map((r) => `"${r}"`).join(", ")} to permissions.ask`;
+  const printed: PrintedRule[] = [...rules.allow.map((entry) => ({ effect: "allow" as const, entry })), ...rules.ask.map((entry) => ({ effect: "ask" as const, entry }))];
   if (settings.status === "unreadable") return unreadableInstructions(ID, file, ctx.home, "Claude Code permission");
   if (settings.status === "bad") {
-    return manualSettings(ctx, file, "Claude Code permission", [`${addLine}:`, ...entries.split("\n")], `${shownPath(file, ctx.home)}: ${settings.reason}`);
+    return manualSettings(ctx, file, "Claude Code permission", [`${addLine}:`, ...entries.split("\n")], `${shownPath(file, ctx.home)}: ${settings.reason}`, printed);
   }
   if (settings.status === "ok") {
     const conflict = permissionConflict(settings.doc);
-    if (conflict !== null) return manualSettings(ctx, file, "Claude Code permission", [addLine], `${shownPath(file, ctx.home)}: ${conflict}`);
+    if (conflict !== null) return manualSettings(ctx, file, "Claude Code permission", [addLine], `${shownPath(file, ctx.home)}: ${conflict}`, printed);
   }
   const done = settings.status === "ok" && hasRules(settings.doc["permissions"], rules);
   return {

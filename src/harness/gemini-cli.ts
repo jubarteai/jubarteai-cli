@@ -10,9 +10,9 @@ import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
-import { AGENT_RULE_WORDS } from "./agent-commands.js";
+import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { hookCommand as commandFor, hooksPreview, inspectCommandHooks, mergeCommandHooks, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
-import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
+import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 
 const HARNESS = "gemini-cli" as const;
 const SETTINGS_FILE = "settings.json";
@@ -78,16 +78,17 @@ function readSettings(file: string): { status: "missing" } | { status: "ok"; doc
 }
 
 function manualUnreadable(file: string, title: string): ManualInstructions {
-  return { kind: "manual", harness: HARNESS, title, lines: [`Couldn't read ${file}: fix its permissions, then run init again.`], reason: "the settings file is not readable by this user" };
+  return { kind: "manual", harness: HARNESS, title, lines: [`Couldn't read ${file}: fix its permissions, then run init again.`], reason: "the settings file is not readable by this user", rules: [] };
 }
 
-function manualSettings(file: string, title: string, entryLines: string[], why: string): ManualInstructions {
+function manualSettings(file: string, title: string, entryLines: string[], why: string, rules?: PrintedRule[]): ManualInstructions {
   return {
     kind: "manual",
     harness: HARNESS,
     title,
     lines: [`Open ${file} and add:`, ...entryLines],
     reason: why,
+    ...(rules === undefined ? {} : { rules }),
   };
 }
 
@@ -213,8 +214,9 @@ export const geminiCliAdapter: HarnessAdapter = {
       return manualSettings(
         file,
         PERMISSION_LABEL,
-        [...JSON.stringify({ tools: { allowed: SHELL_TOOL_ENTRIES } }, null, 2).split("\n"), "(merge it into the existing tools.allowed list)", `(and remove "${LEGACY_SHELL_TOOL_ENTRY}" if it is there: it also pre-approves login, logout, link, init and update)`],
+        [...JSON.stringify({ tools: { allowed: SHELL_TOOL_ENTRIES } }, null, 2).split("\n"), "(merge it into the existing tools.allowed list)", `(and remove "${LEGACY_SHELL_TOOL_ENTRY}" if it is there: it also pre-approves ${PERSON_COMMAND_LIST})`],
         UNWRITABLE,
+        SHELL_TOOL_ENTRIES.map((entry) => ({ effect: "allow", entry })),
       );
     }
     const list = settings.status === "ok" ? allowedList(settings.doc) : "absent";

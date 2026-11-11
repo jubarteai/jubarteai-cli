@@ -18,7 +18,7 @@ import type { HarnessId } from "../session/harness-env.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { isOurHookCommand } from "./claude-code.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
-import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
+import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 
 export type Obj = Record<string, unknown>;
 export type HookEvent = "session-start" | "user-prompt-submit" | "session-end";
@@ -91,8 +91,9 @@ export function cleanupScopeOf(ctx: InitCtx): CleanupScope {
   return { home: ctx.home, projectRoot: ctx.projectRoot, platform: ctx.platform, env: ctx.env };
 }
 
-export function manual(harness: HarnessId, title: string, lines: string[], reason: string): ManualInstructions {
-  return { kind: "manual", harness, title, lines, reason };
+/** Printed instructions; `rules` (permission instructions only) lists the entries `lines` tells the person to add. */
+export function manual(harness: HarnessId, title: string, lines: string[], reason: string, rules?: PrintedRule[]): ManualInstructions {
+  return { kind: "manual", harness, title, lines, reason, ...(rules === undefined ? {} : { rules }) };
 }
 
 /** The `hook` command a harness runs for one event. */
@@ -189,9 +190,10 @@ function permissionInstructions(): ManualInstructions {
     [
       `Cursor's allow rule names only the program, so \`${SHELL_ENTRY}\` would also pre-approve ${PERSON_COMMAND_LIST}: the commands that change your saved account, the repo binding and your harness files.`,
       "The CLI therefore writes no Cursor allow rule. Approve jubarteai commands when Cursor asks (in the IDE and in the Agent CLI).",
-      `If you accept that trade-off, add "${SHELL_ENTRY}" to permissions.allow in ~/.cursor/cli-config.json yourself (the CLI refuses those five commands inside a Cursor agent shell only when CURSOR_AGENT is set).`,
+      `If you accept that it also pre-approves ${PERSON_COMMAND_LIST}, add "${SHELL_ENTRY}" to permissions.allow in ~/.cursor/cli-config.json yourself (the CLI refuses those five commands inside a Cursor agent shell only when CURSOR_AGENT is set).`,
     ],
     "Cursor's shell rule cannot exclude subcommands; the person commands stay behind a prompt (spec I6, review R-M1)",
+    [],
   );
 }
 

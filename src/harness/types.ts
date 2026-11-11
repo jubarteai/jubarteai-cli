@@ -16,7 +16,17 @@ export type ManualInstructions = {
    * match on the printed text. Absent for instructions that are only printed.
    */
   code?: string;
+  /**
+   * Permission instructions only: every rule entry `lines` tells the person to add, exactly as it appears in the
+   * harness's config (or flag), with its effect. Empty when the instructions recommend no rule. Not printed itself;
+   * printed-permissions.test.ts checks each entry against the harness's matching so a whole-program allow can't hide
+   * next to a caveat sentence (review R-S11).
+   */
+  rules?: PrintedRule[];
 };
+
+/** One permission entry a person is told to add: `entry` is the exact rule text (a JSON key, list item or flag value). */
+export type PrintedRule = { effect: "allow" | "ask" | "deny"; entry: string };
 
 export type DetectEnv = {
   home: string;

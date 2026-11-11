@@ -12,7 +12,7 @@ import { runCommand } from "../install/run.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
-import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
+import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 
 const HARNESS = "opencode" as const;
 const LABEL = "OpenCode: allow the jubarteai agent commands";
@@ -191,6 +191,9 @@ function legacyLines(major: Major | null): string[] {
   return [`(remove ${where} if it is there: it also pre-approves ${PERSON_COMMAND_LIST})`];
 }
 
+/** The entries the printed lines add: one allow per agent command, the same glob in either version's syntax. */
+const PRINTED_RULES: readonly PrintedRule[] = COMMAND_PATTERNS.map((entry) => ({ effect: "allow", entry }));
+
 function manualPermission(file: string, major: Major, why: string): ManualInstructions {
   return {
     kind: "manual",
@@ -198,6 +201,7 @@ function manualPermission(file: string, major: Major, why: string): ManualInstru
     title: LABEL,
     lines: [`Open ${file} and merge in:`, ...(major === 2 ? v2Lines() : v1Lines()), ...legacyLines(major)],
     reason: why,
+    rules: [...PRINTED_RULES],
   };
 }
 
@@ -215,6 +219,7 @@ function manualUnknownVersion(dir: string): ManualInstructions {
       ...legacyLines(null),
     ],
     reason: "could not read the OpenCode version (`opencode --version`), and the two versions use different rule syntax",
+    rules: [...PRINTED_RULES],
   };
 }
 
@@ -291,7 +296,7 @@ export const opencodeAdapter: HarnessAdapter = {
     const file = configFile(dir, major === 2 ? V2_FILES : V1_FILES);
     const read = readConfig(file);
     if (read.status === "unreadable") {
-      return { kind: "manual", harness: HARNESS, title: LABEL, lines: [`Couldn't read ${file}: fix its permissions, then run init again.`], reason: "the config file is not readable by this user" };
+      return { kind: "manual", harness: HARNESS, title: LABEL, lines: [`Couldn't read ${file}: fix its permissions, then run init again.`], reason: "the config file is not readable by this user", rules: [] };
     }
     if (read.status !== "ok" && read.status !== "missing") {
       return manualPermission(file, major, "the config has comments or is not plain JSON, so it is not rewritten");

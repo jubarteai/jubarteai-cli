@@ -121,6 +121,7 @@ export const zedAdapter: HarnessAdapter = {
         LABEL_PERMISSION,
         [`Open ${file} and add:`, ...permissionJson(), `(merge it into the existing agent.tool_permissions setting; ${PERSON_COMMAND_LIST} keep asking. If it has a ${JSON.stringify(LEGACY_PATTERN)} pattern, replace that: it also approves ${PERSON_COMMAND_LIST})`],
         "settings.json has comments or is not plain JSON, so it is not rewritten",
+        [{ effect: "allow", entry: ALLOW_PATTERN }],
       );
     }
     return jsonEditStep({

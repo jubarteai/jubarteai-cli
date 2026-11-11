@@ -3,7 +3,8 @@
 // coordinator did not adopt for v1, and the legacy Cascade formats are undocumented, so both come back as printed
 // instructions (D25). The permission lines write no rule for the bare program: Windsurf's allow list matches by prefix, so
 // `jubarteai` would also pre-approve the person commands, and Windsurf sets no variable the CLI could use to refuse
-// them (spec I6, review R-M3). They name agent commands only and put the person commands on the deny list. Cleanup touches install.sh's one path, ~/.codeium/windsurf/mcp_config.json (`mcpServers.jubarteai`).
+// them (spec I6, review R-M3). They put the person commands on the deny list first (Turbo checks only that list,
+// review R-N11) and name agent commands only in the optional allow entries. Cleanup touches install.sh's one path, ~/.codeium/windsurf/mcp_config.json (`mcpServers.jubarteai`).
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { PlanStep } from "../safe-edit/plan.js";
@@ -17,6 +18,8 @@ const LABEL = "Windsurf";
 
 /** The deny-list entries for the person commands, quoted for prose. */
 const DENY_ENTRIES = PERSON_COMMANDS.map((command) => `"jubarteai ${command}"`).join(", ");
+/** The agent-command allow entries the printed lines give as examples. */
+const EXAMPLE_ALLOW = ["jubarteai search-knowledge", "jubarteai inbox"] as const;
 
 const windsurfDir = (home: string): string => join(home, ".codeium", "windsurf");
 
@@ -36,12 +39,13 @@ export const windsurfAdapter: HarnessAdapter = {
       HARNESS,
       "Windsurf: approve jubarteai commands as Windsurf asks",
       [
-        `Windsurf's terminal allow list matches by prefix, so an entry for jubarteai would also pre-approve ${PERSON_COMMAND_LIST}: the commands that change your saved account, the repo binding and your harness files.`,
-        "The CLI therefore writes no Windsurf rule. Approve jubarteai commands when Windsurf asks.",
-        `To skip some prompts, add agent commands one by one to the allow list (for example "jubarteai search-knowledge", "jubarteai inbox"), never jubarteai alone, and add ${DENY_ENTRIES} to the deny list. How Windsurf matches a chained command such as "jubarteai inbox && jubarteai login" is not verified, so approving as asked is the safe choice.`,
+        `First, add ${DENY_ENTRIES} to Windsurf's terminal deny list. Windsurf's docs say every auto-execution level checks the deny list, including Turbo, which runs any command not on it; these five change your saved account, the repo binding and your harness files.`,
+        `Windsurf's terminal allow list matches by prefix, so an entry for jubarteai would also pre-approve ${PERSON_COMMAND_LIST}. The CLI therefore writes no Windsurf rule. Approve jubarteai commands when Windsurf asks.`,
+        `To skip some prompts, add agent commands one by one to the allow list (for example ${EXAMPLE_ALLOW.map((entry) => `"${entry}"`).join(", ")}), never jubarteai alone. How Windsurf matches a chained command such as "jubarteai inbox && jubarteai login" is not verified, so approving as asked is the safe choice.`,
         "(Windsurf documents no settings file for these lists, so the CLI does not write one)",
       ],
       "Windsurf's permission format is not verified (D25); a whole-program entry would also pre-approve the person commands",
+      [...PERSON_COMMANDS.map((command) => ({ effect: "deny" as const, entry: `jubarteai ${command}` })), ...EXAMPLE_ALLOW.map((entry) => ({ effect: "allow" as const, entry }))],
     );
   },
 

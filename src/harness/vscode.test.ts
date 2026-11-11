@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
-import { agentCommandPattern, personCommandPattern } from "./agent-commands.js";
+import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { COPILOT_HOOKS_STEP_ID, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -305,6 +305,23 @@ describe("vscode inspect", () => {
     expect(done.notes.join("\n")).not.toContain('"jubarteai": true');
     put(settings(), JSON.stringify({ [AUTO_APPROVE]: { [AGENT_KEY]: true, [PERSON_KEY]: true } }));
     expect((await vscodeAdapter.inspect(ctx())).permission).toBe("missing");
+  });
+
+  it("notes the object form jubarteai: { approve: true } and leaves it for the person to remove (review R-N13)", async () => {
+    const object = { approve: true, matchCommandLine: true };
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: object } }));
+    const notes = (await vscodeAdapter.inspect(ctx())).notes.join("\n");
+    expect(notes).toContain('"jubarteai": { "approve": true }');
+    expect(notes).toContain("remove it by hand");
+    expect(notes).toContain(PERSON_COMMAND_LIST);
+    // init adds its keys and leaves the object as the person set it.
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    await step.apply();
+    expect((JSON.parse(readFileSync(settings(), "utf8")) as Record<string, Record<string, unknown>>)[AUTO_APPROVE]).toEqual({ jubarteai: object, [AGENT_KEY]: true, [PERSON_KEY]: false });
+    // An object that doesn't approve is not reported.
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: { approve: false } } }));
+    expect((await vscodeAdapter.inspect(ctx())).notes.join("\n")).not.toContain("approve");
   });
 
   it("lists user-profile and project mcp.json files that still hold the entry", async () => {
