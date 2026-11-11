@@ -4,69 +4,17 @@ import { redactSecrets, safeForDisplay, transportErrorEnvelope, writeJson } from
 import { GLOBAL_FLAGS, parseArgs } from "./args.js";
 import type { FlagSpec, ParsedArgs } from "./args.js";
 import { COMMANDS } from "./commands.js";
-import type { CommandContext, CommandDef, CommandGroup } from "./commands.js";
+import type { CommandContext, CommandDef } from "./commands.js";
+import { renderCommandHelp, renderHelp } from "./help.js";
+
+export { renderCommandHelp, renderHelp };
 
 export type RouteContext = Omit<CommandContext, "globals">;
-
-const GROUP_TITLES: ReadonlyArray<{ group: CommandGroup; title: string }> = [
-  { group: "account", title: "Account" },
-  { group: "tools", title: "Tools" },
-  { group: "setup", title: "Setup" },
-  { group: "internal", title: "Internal (used by hooks and shims)" },
-];
 
 const HELP_ALL_FLAG: FlagSpec = { name: "all", type: "boolean", description: "With --help, also list internal commands", hidden: true };
 const UNEXPECTED_ERROR = `${CLI_NAME}: unexpected error`;
 const USAGE_HINT = `Run "${CLI_NAME} --help" for usage.`;
 const TRANSPORT_CODES: Readonly<Record<number, string>> = { 3: "auth_error", 4: "network_error", 5: "not_signed_in" };
-
-function flagLines(specs: readonly FlagSpec[], includeHidden: boolean): Array<[string, string]> {
-  const lines: Array<[string, string]> = [];
-  for (const spec of specs) {
-    if (spec.hidden === true && !includeHidden) continue;
-    let syntax = `--${spec.name}`;
-    if (spec.type === "string" || spec.type === "string[]") syntax += " <value>";
-    else if (spec.type === "number") syntax += " <number>";
-    else if (spec.type === "json") syntax += " <json|@file|->";
-    const description = spec.type === "string[]" ? `${spec.description} (repeatable)` : spec.description;
-    lines.push([syntax, description]);
-    if (spec.file === true && spec.type !== "boolean") {
-      lines.push([`--${spec.name}-file <path|->`, `Read ${spec.name} from a file (- for stdin)`]);
-    }
-  }
-  return lines;
-}
-
-function renderColumns(rows: Array<[string, string]>): string {
-  const width = rows.reduce((max, [left]) => Math.max(max, left.length), 0);
-  return rows.map(([left, right]) => `  ${left.padEnd(width)}  ${right}`).join("\n");
-}
-
-export function renderHelp(commands: readonly CommandDef[], opts: { all: boolean }): string {
-  const sections: string[] = [
-    `${CLI_NAME} - command-line interface for JubarteAI`,
-    `Usage:\n  ${CLI_NAME} <command> [options]\n  ${CLI_NAME} --help | --version`,
-  ];
-  for (const { group, title } of GROUP_TITLES) {
-    if (group === "internal" && !opts.all) continue;
-    const members = commands.filter((command) => command.group === group);
-    if (members.length === 0) continue;
-    sections.push(`${title}:\n${renderColumns(members.map((command): [string, string] => [command.name, command.summary]))}`);
-  }
-  sections.push(`Global options:\n${renderColumns(flagLines(GLOBAL_FLAGS, false))}`);
-  sections.push(`Run "${CLI_NAME} <command> --help" for a command's options.`);
-  return `${sections.join("\n\n")}\n`;
-}
-
-export function renderCommandHelp(command: CommandDef): string {
-  const names = new Set(command.flags.map((spec) => spec.name));
-  const globals = GLOBAL_FLAGS.filter((spec) => !names.has(spec.name));
-  const sections = [`Usage:\n  ${CLI_NAME} ${command.usage ?? `${command.name} [options]`}`, command.summary];
-  const own = flagLines(command.flags, false);
-  if (own.length > 0) sections.push(`Options:\n${renderColumns(own)}`);
-  sections.push(`Global options:\n${renderColumns(flagLines(globals, false))}`);
-  return `${sections.join("\n\n")}\n`;
-}
 
 /** Splits argv at the command name: the first token that is not a flag or a global flag's value. */
 function splitAtCommand(argv: readonly string[]): { head: string[]; command: string | undefined; tail: string[] } {

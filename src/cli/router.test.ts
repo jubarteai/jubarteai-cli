@@ -69,8 +69,8 @@ describe("routeWith: help and version", () => {
       expect(text).toContain("Account:");
       expect(text).toContain("Tools:");
       expect(text).toContain("Setup:");
+      expect(text.indexOf("Setup:")).toBeLessThan(text.indexOf("Account:"));
       expect(text.indexOf("Account:")).toBeLessThan(text.indexOf("Tools:"));
-      expect(text.indexOf("Tools:")).toBeLessThan(text.indexOf("Setup:"));
       expect(text).toContain("Search knowledge");
       expect(text).toContain("--workspace <value>");
       expect(text).not.toContain("Internal");

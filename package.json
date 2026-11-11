@@ -1,8 +1,9 @@
 {
   "name": "jubarteai",
-  "version": "0.0.0-dev",
+  "version": "0.1.0",
   "description": "Command-line interface for JubarteAI, the agentic connection platform.",
   "license": "MIT",
+  "author": "A&A GLOBAL INTERNATIONAL LLC",
   "type": "module",
   "bin": {
     "jubarteai": "bin/jubarteai.js"
@@ -25,8 +26,25 @@
   "bugs": {
     "url": "https://github.com/jubarteai/jubarteai-cli/issues"
   },
+  "keywords": [
+    "jubarteai",
+    "mcp",
+    "cli",
+    "agents",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "cursor",
+    "knowledge"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run clean && npm run build",
     "test": "vitest run",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"

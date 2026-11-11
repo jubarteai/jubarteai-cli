@@ -1,10 +1,15 @@
 import { callCommand } from "../commands/call.js";
 import { connectCommand } from "../commands/connect.js";
+import { doctorCommand } from "../commands/doctor.js";
+import { hookCommand } from "../commands/hook.js";
 import { inboxCommand } from "../commands/inbox.js";
+import { initCommand } from "../commands/init.js";
+import { linkCommand } from "../commands/link.js";
 import { loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
 import { statusCommand } from "../commands/status.js";
 import { TOOL_COMMANDS } from "../commands/tool.js";
+import { updateCommand } from "../commands/update.js";
 import type { ParsedArgs, FlagSpec } from "./args.js";
 
 export type CommandContext = {
@@ -28,10 +33,14 @@ export type CommandDef = {
 };
 
 /**
- * Every command the CLI answers to. Later tasks add entries here and nowhere else. Help lists each group's
- * commands in this order: account first, then connect, the tool commands in spec §5.3 order, call, inbox.
+ * Every command the CLI answers to, in help order: setup (init, link, doctor, update), account, connect, the tool
+ * commands in spec 5.3 order, call, inbox, then the internal hook command (listed only by `--help --all`).
  */
 export const COMMANDS: CommandDef[] = [
+  initCommand,
+  linkCommand,
+  doctorCommand,
+  updateCommand,
   loginCommand,
   logoutCommand,
   statusCommand,
@@ -39,4 +48,5 @@ export const COMMANDS: CommandDef[] = [
   ...TOOL_COMMANDS,
   callCommand,
   inboxCommand,
+  hookCommand,
 ];

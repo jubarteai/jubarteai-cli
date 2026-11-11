@@ -32,7 +32,6 @@ describe("main", () => {
     const io = capture();
     expect(await main(["--version"])).toBe(0);
     expect(io.out()).toBe(`${cliVersion()}\n`);
-    expect(io.out()).toBe("0.0.0-dev\n");
     expect(io.err()).toBe("");
   });
 
