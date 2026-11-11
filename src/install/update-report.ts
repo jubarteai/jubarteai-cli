@@ -35,7 +35,8 @@ export const UPDATE_COPY = {
     "this machine has no jubarteai login, so the MCP entries stay (your agents still use them); run jubarteai init to switch to the CLI, then jubarteai update offers the cleanup",
   mcpKept: "kept (--keep-mcp)",
   cliInstallDeclined: "kept the installed CLI",
-  cliReexecMissing: "installed, but the new jubarteai isn't on PATH; open a new terminal and run: jubarteai update",
+  cliReexecMissing: "installed, but the updated jubarteai isn't where npm should have put it; open a new terminal and run: jubarteai update",
+  cliNotGlobal: "installed outside npm's global folder (npx, a project's node_modules or a checkout), so it isn't updated here; update it the way you installed it",
   cliReexecFailed: "installed, but the new jubarteai couldn't be started; run: jubarteai update",
 } as const;
 

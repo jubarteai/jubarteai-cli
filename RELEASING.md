@@ -1,6 +1,6 @@
 # Releasing jubarteai
 
-A release is a `vX.Y.Z` tag on `main`. Pushing the tag runs `.github/workflows/release.yml`: the whole CI matrix, then a publish job that checks the tag equals the `package.json` version and that the commit is on `main`, builds, and runs `npm publish --provenance --access public`.
+A release is a `vX.Y.Z` tag on `main`. Pushing the tag runs `.github/workflows/release.yml`: the whole CI matrix; then a **Build the tarball** job, which has no publishing rights (it runs `npm ci` and the build, then `npm pack`, and uploads the tarball as an artifact); then a **Publish to npm** job, which installs and builds nothing: it checks that the tag equals the tarball's version and that the commit is on `main`, then runs `npm publish <tarball> --tag <latest|next> --provenance --access public --ignore-scripts`. A version with a `-` in it (for example `0.2.0-rc.1`) is published under the `next` dist-tag and never becomes `latest`.
 
 There is no npm token anywhere. Publishing uses npm trusted publishing (OIDC): npm trusts one GitHub repository and one workflow file name. Keep the workflow named `release.yml`, and keep the repository `jubarteai/jubarteai-cli` public (provenance is not generated from a private repo).
 
@@ -103,7 +103,7 @@ An unused trusted-publisher configuration expires 2 days after it is created. Do
    ```
 
    The tag must equal `v` plus the `package.json` version, and the tagged commit must be on `main`, or the publish job stops before publishing.
-4. Watch the **Release** run in GitHub Actions: the test matrix first, then **Publish to npm**.
+4. Watch the **Release** run in GitHub Actions: the test matrix, then **Build the tarball**, then **Publish to npm**.
 5. Verify the release:
 
    ```bash
@@ -113,6 +113,7 @@ An unused trusted-publisher configuration expires 2 days after it is created. Do
    ```
 
    Expected: `X.Y.Z`; a provenance object (npm also shows a "Built and signed on GitHub Actions" badge on the package page); and `X.Y.Z` printed by the CLI.
+   For a prerelease, `npm view jubarteai dist-tags` must show `next: X.Y.Z-...` and `latest` unchanged, and the install command is `npx --yes jubarteai@next --version`.
 6. **First release only:** on npmjs.com, package **Settings**, **Publishing access**, choose **Require two-factor authentication and disallow tokens**. It only affects token authentication, so the trusted publisher keeps working.
 7. Anything outside this repository that tells people to run the CLI through npm (the skills README, install pages, the app's install and update scripts) waits until step 5 passes on production.
 

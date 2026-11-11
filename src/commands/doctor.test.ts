@@ -315,6 +315,69 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
     expect(settings.split("hook session-start --harness claude-code").length - 1).toBe(1);
   });
 
+  describe("Codex's user-level MCP entry (init's D5 fallback)", () => {
+    const codexConfig = (): string => join(sandbox, ".codex", "config.toml");
+    function writeCodexEntry(token: string, origin = fake.origin, form: "inline" | "table" = "inline"): void {
+      mkdirSync(join(sandbox, ".codex"), { recursive: true });
+      const headers =
+        form === "inline"
+          ? `http_headers = { "Authorization" = ${JSON.stringify(`Bearer ${token}`)} }\n`
+          : `\n[mcp_servers.jubarteai.http_headers]\nAuthorization = ${JSON.stringify(`Bearer ${token}`)}\n`;
+      writeFileSync(codexConfig(), `model = "o4"\n\n[mcp_servers.jubarteai]\nurl = "${origin}/api/mcp"\n${headers}`);
+    }
+    function neverShown(out: string, token: string): void {
+      expect(out).not.toContain(token);
+      expect(out).not.toContain(createHash("sha256").update(token).digest("hex"));
+      expect(out).not.toContain(createHash("sha256").update(token).digest("base64"));
+    }
+
+    it("is ok when it holds a saved login's key for its origin, never printing the key or a digest", async () => {
+      fake.addKey(TOKEN_GOOD);
+      saveSeat("s1", seat("acme", "ada@example.com", TOKEN_GOOD), { makeDefault: true });
+      writeCodexEntry(TOKEN_GOOD);
+      const { report, out } = await runJson();
+      expect(check(report, "codex_mcp_entry")).toMatchObject({ level: "ok", detail: "uses your saved login for acme", data: { matched: true, workspace: "acme" } });
+      // S4: the deliberate entry is not a leftover while the project has no network opt-in.
+      expect(check(report, "harness:codex").data?.["mcp_entries"]).toEqual([]);
+      neverShown(out, TOKEN_GOOD);
+      const human = await run(["doctor"]);
+      expect(human.out).toContain("Codex MCP entry: uses your saved login for acme");
+      neverShown(human.out, TOKEN_GOOD);
+    });
+
+    it("reads the key from a [mcp_servers.jubarteai.http_headers] table too", async () => {
+      saveSeat("s1", seat("acme", "ada@example.com", TOKEN_GOOD), { makeDefault: true });
+      writeCodexEntry(TOKEN_GOOD, fake.origin, "table");
+      expect(check((await runJson()).report, "codex_mcp_entry")).toMatchObject({ level: "ok" });
+    });
+
+    it.each<[string, () => void]>([
+      ["a key that is not saved", () => writeCodexEntry(TOKEN_UNKNOWN)],
+      ["a saved key for another origin", () => writeCodexEntry(TOKEN_GOOD, "https://elsewhere.example")],
+      ["no Authorization header", () => writeFileSync(codexConfig(), `[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\n`)],
+    ])("warns for %s, naming no key", async (_name, write) => {
+      saveSeat("s1", seat("acme", "ada@example.com", TOKEN_GOOD), { makeDefault: true });
+      mkdirSync(join(sandbox, ".codex"), { recursive: true });
+      write();
+      const { report, out } = await runJson();
+      expect(check(report, "codex_mcp_entry")).toMatchObject({
+        level: "warn",
+        detail: "holds a key that isn't a saved login; run jubarteai init to refresh it",
+        data: { matched: false },
+      });
+      neverShown(out, TOKEN_GOOD);
+      neverShown(out, TOKEN_UNKNOWN);
+    });
+
+    it("says nothing when Codex has no jubarteai entry", async () => {
+      mkdirSync(join(sandbox, ".codex"), { recursive: true });
+      writeFileSync(codexConfig(), `model = "o4"\n`);
+      const { report } = await runJson();
+      expect(report.checks.some((c) => c.id === "codex_mcp_entry")).toBe(false);
+      expect(report.checks.some((c) => c.id === "harness:codex")).toBe(true);
+    });
+  });
+
   it("names a leftover MCP entry and where it is", async () => {
     mkdirSync(join(sandbox, ".claude"));
     writeFileSync(join(sandbox, ".claude.json"), JSON.stringify({ mcpServers: { jubarteai: { type: "http", url: "https://example.com/api/mcp" } } }));

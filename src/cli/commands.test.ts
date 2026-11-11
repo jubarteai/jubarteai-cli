@@ -52,13 +52,16 @@ describe("COMMANDS", () => {
     expect(COMMANDS.filter((command) => command.group === "internal").map((command) => command.name)).toEqual(["hook"]);
   });
 
-  it("lists every public command in --help, Setup first, and leaves hook out", async () => {
+  it("lists every public command in --help, Setup first, and names hook under Internal on one line (spec 5.5)", async () => {
     const { code, out, err } = await run(["--help"]);
     expect(code).toBe(0);
     expect(err).toBe("");
     for (const name of PUBLIC_COMMANDS) expect(listed(out, name), name).toBe(true);
     expect(listed(out, "hook")).toBe(false);
-    expect(out).not.toContain("Internal");
+    const internal = out.split("\n").filter((line) => line.startsWith("Internal"));
+    expect(internal).toEqual(["Internal (used by hooks and shims): hook (not for direct use; details: jubarteai --help --all)"]);
+    expect(out.indexOf("Tools:")).toBeLessThan(out.indexOf("Internal"));
+    expect(out.indexOf("Internal")).toBeLessThan(out.indexOf("Global options:"));
     expect(out.indexOf("Setup:")).toBeLessThan(out.indexOf("Account:"));
     expect(out.indexOf("Account:")).toBeLessThan(out.indexOf("Tools:"));
     expect(out.indexOf("  init ")).toBeLessThan(out.indexOf("  link "));

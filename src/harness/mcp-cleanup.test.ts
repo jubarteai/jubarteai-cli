@@ -240,13 +240,13 @@ exec ${JSON.stringify(realGit)} "$@"
     expect(localKeys(file)).toEqual({ [submodule]: {}, [superproject]: { jubarteai: entry } });
   });
 
-  it("run from ~ or /, the local scope is only reported", async () => {
-    const file = writeJson(path.join(home, ".claude.json"), { projects: { [home]: { mcpServers: { jubarteai: entry } } } });
-    const before = fs.readFileSync(file, "utf8");
+  it("run from ~ or /, there is no project, so no local scope is looked for or reported (the user file is not a project config)", async () => {
+    const file = writeJson(path.join(home, ".claude.json"), { mcpServers: { jubarteai: entry }, projects: { [home]: { mcpServers: { jubarteai: entry } } } });
     const items = await cleanup("claude-code", scope({ projectRoot: null, startDir: home }));
-    expect(steps(items)).toEqual([]);
-    expect(manuals(items)).toHaveLength(1);
-    expect(fs.readFileSync(file, "utf8")).toBe(before);
+    expect(manuals(items)).toEqual([]);
+    expect(steps(items)).toHaveLength(1);
+    await run(items);
+    expect(readJson(file)).toEqual({ mcpServers: {}, projects: { [home]: { mcpServers: { jubarteai: entry } } } });
   });
 });
 
@@ -407,6 +407,26 @@ describe("files that are reported, never edited", () => {
   });
 });
 
+describe("run from ~: the user-level files are never project candidates", () => {
+  it("~/.cursor/mcp.json is one user-level step, not also a project report", async () => {
+    const f = writeJson(path.join(home, ".cursor", "mcp.json"), { mcpServers: { jubarteai: entry } });
+    const items = await cleanup("cursor", scope({ projectRoot: null, startDir: home }));
+    expect(manuals(items)).toEqual([]);
+    expect(steps(items)).toHaveLength(1);
+    await run(items);
+    expect(readJson(f)).toEqual({ mcpServers: {} });
+  });
+
+  it("the same when HOME is reached through a link", async () => {
+    const link = path.join(root, "homelink");
+    fs.symlinkSync(home, link);
+    writeJson(path.join(home, ".cursor", "mcp.json"), { mcpServers: { jubarteai: entry } });
+    const items = await cleanup("cursor", scope({ home: link, projectRoot: null, startDir: home }));
+    expect(manuals(items)).toEqual([]);
+    expect(steps(items)).toHaveLength(1);
+  });
+});
+
 describe("the other harnesses' paths", () => {
   it("Cursor: user and project mcpServers", async () => {
     const proj = path.join(home, "proj");
@@ -500,6 +520,20 @@ describe("Codex config.toml", () => {
     const items = await mcpCleanupFor("codex", scope(), { gate: async () => "kept: because" });
     const results = await run(items);
     expect(results).toEqual([expect.objectContaining({ status: "skipped", detail: "kept: because" })]);
+    expect(fs.readFileSync(f, "utf8")).toBe(toml());
+  });
+
+  it("run from ~ (cwd = HOME): ~/.codex/config.toml is the user-level file, never a project-level report", async () => {
+    const f = write(path.join(home, ".codex", "config.toml"), toml());
+    for (const [projectRoot, env] of [[null, {}], [null, { CODEX_HOME: path.join(home, ".codex") }]] as const) {
+      const items = await mcpCleanupFor("codex", scope({ projectRoot, startDir: home, env: { ...env } }), { keepUser: "kept for the test" });
+      expect(steps(items)).toEqual([]);
+      expect(manuals(items).flatMap((m) => m.lines)).toEqual(["kept: kept for the test: ~/.codex/config.toml"]);
+    }
+    // Without keepUser it is an ordinary user-level step, not a "run from ~" report.
+    const plain = await mcpCleanupFor("codex", scope({ projectRoot: null, startDir: home }));
+    expect(manuals(plain)).toEqual([]);
+    expect(steps(plain)).toHaveLength(1);
     expect(fs.readFileSync(f, "utf8")).toBe(toml());
   });
 

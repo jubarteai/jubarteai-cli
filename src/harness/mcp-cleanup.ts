@@ -289,28 +289,42 @@ async function targetsFor(harness: CleanupHarness, scope: CleanupScope): Promise
       break;
     }
   }
-  return mergeSameFile(out);
+  return mergeSameFile(out, scope);
 }
 
-/** One target per (real file, entry path): a project directory that is the home directory names the user file again, and the user one wins. */
-function mergeSameFile(targets: Target[]): Target[] {
+/**
+ * One target per (real file, entry path). A path that is one of the harness' user-level configs (by real path) is never a
+ * project candidate, whichever order the targets were listed in: run from ~, the project walk reaches ~/.codex/config.toml
+ * and ~/.cursor/mcp.json, which are the user's files, not a project's. Claude Code's local scope lives in the user file
+ * itself and belongs to a project, so with no project (run from ~ or /) there is none to look for.
+ */
+function mergeSameFile(targets: Target[], scope: CleanupScope): Target[] {
+  const id = (real: string, entryPath: string[] | null): string => `${real}\u0000${entryPath === null ? "toml" : entryPath.join("\u0001")}`;
+  const userIds = new Set<string>();
+  for (const target of targets) {
+    if (target.project) continue;
+    const real = physical(target.file);
+    if (target.format === "toml") userIds.add(id(real, null));
+    else for (const e of target.entries) userIds.add(id(real, e.path));
+  }
   const merged: Target[] = [];
   const seen = new Set<string>();
   for (const target of targets) {
+    if (target.project && target.entries.length > 0 && !target.inProject && scope.projectRoot === null) continue;
     const real = physical(target.file);
-    const entries = target.entries.filter((e) => {
-      const id = `${real}\u0000${e.path.join("\u0001")}`;
-      if (seen.has(id)) return false;
-      seen.add(id);
-      return true;
-    });
     if (target.format === "toml") {
-      const id = `${real}\u0000toml`;
-      if (seen.has(id)) continue;
-      seen.add(id);
+      const key = id(real, null);
+      if ((target.project && userIds.has(key)) || seen.has(key)) continue;
+      seen.add(key);
       merged.push(target);
       continue;
     }
+    const entries = target.entries.filter((e) => {
+      const key = id(real, e.path);
+      if ((target.project && userIds.has(key)) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if (entries.length > 0) merged.push({ ...target, entries });
   }
   return merged;

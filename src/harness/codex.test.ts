@@ -526,7 +526,7 @@ describe("inspect", () => {
     const a = adapter();
     write(userConfig(), `${trusted()}\n[mcp_servers.jubarteai]\nurl = "x"\n[features]\nhooks = false\n`);
     let state = await a.inspect(ctx());
-    expect(state).toMatchObject({ permission: "n/a", hooks: "missing", mcpEntries: [userConfig()] });
+    expect(state).toMatchObject({ permission: "n/a", hooks: "missing", mcpEntries: [] });
     expect(state.notes).toEqual(["Codex hooks are turned off ([features] hooks = false)", "the network opt-in is not written yet: run jubarteai init"]);
     await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, out: sink });
     await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
@@ -534,6 +534,21 @@ describe("inspect", () => {
     expect(state.hooks).toBe("configured");
     expect(state.notes).toContain("Trust the new hooks once in Codex: run /hooks");
     expect(state.notes).not.toContain("the network opt-in is not written yet: run jubarteai init");
+  });
+
+  // S4: init never removes the deliberate D5 user-level entry, so doctor must not call it a leftover forever.
+  it("lists the user-level MCP entry only where this project's opt-in is in effect; a project entry always", async () => {
+    const entry = `[mcp_servers.jubarteai]\nurl = "https://jubarte.ai/api/mcp"\n`;
+    write(userConfig(), `${trusted()}\n${entry}`);
+    const a = adapter();
+    expect((await a.inspect(ctx())).mcpEntries).toEqual([]);
+    expect((await adapter({ version: "codex-cli 0.150.0" }).inspect(ctx())).mcpEntries).toEqual([]);
+    write(projectConfig(), entry);
+    expect((await a.inspect(ctx())).mcpEntries).toEqual([projectConfig()]);
+    write(projectConfig(), `${OPT_IN}\n${entry}`);
+    expect((await a.inspect(ctx())).mcpEntries.sort()).toEqual([projectConfig(), userConfig()].sort());
+    write(projectConfig(), OPT_IN);
+    expect((await a.inspect(ctx())).mcpEntries).toEqual([userConfig()]);
   });
 
   it("names why the opt-in is blocked", async () => {

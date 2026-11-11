@@ -3,7 +3,10 @@ import { GLOBAL_FLAGS } from "./args.js";
 import type { FlagSpec } from "./args.js";
 import type { CommandDef, CommandGroup } from "./commands.js";
 
-/** Help lists the groups in this order: Setup first, then Account, then Tools; Internal only with --help --all. */
+/**
+ * Help lists the groups in this order: Setup first, then Account, then Tools, then Internal (spec §5.5: `hook` is
+ * documented under "Internal"). Plain --help names the internal commands on one line; --help --all lists them in full.
+ */
 const GROUP_TITLES: ReadonlyArray<{ group: CommandGroup; title: string }> = [
   { group: "setup", title: "Setup" },
   { group: "account", title: "Account" },
@@ -39,9 +42,12 @@ export function renderHelp(commands: readonly CommandDef[], opts: { all: boolean
     `Usage:\n  ${CLI_NAME} <command> [options]\n  ${CLI_NAME} --help | --version`,
   ];
   for (const { group, title } of GROUP_TITLES) {
-    if (group === "internal" && !opts.all) continue;
     const members = commands.filter((command) => command.group === group);
     if (members.length === 0) continue;
+    if (group === "internal" && !opts.all) {
+      sections.push(`${title}: ${members.map((command) => command.name).join(", ")} (not for direct use; details: ${CLI_NAME} --help --all)`);
+      continue;
+    }
     sections.push(`${title}:\n${renderColumns(members.map((command): [string, string] => [command.name, command.summary]))}`);
   }
   sections.push(`Global options:\n${renderColumns(flagLines(GLOBAL_FLAGS, false))}`);

@@ -1,14 +1,14 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AGENT_A, AGENT_B, SEAT_ID, createSandbox, deadOrigin, expectNoSecrets, sendJson, startFakeServer } from "../../test/helpers/fake-mcp-server.js";
 import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
 import { callTool } from "../mcp/client.js";
-import { sessionsDir } from "../paths.js";
+import { homeDir, sessionsDir } from "../paths.js";
 import { readSession, sessionKey, writeSession } from "../session/cache.js";
 import type { HarnessId } from "../session/harness-env.js";
-import { SESSION_END_NETWORK_TIMEOUT_MS, parseHookEvent, runHookEvent } from "./events.js";
+import { SESSION_END_NETWORK_TIMEOUT_MS, ownHookFile, ownHookRegistered, parseHookEvent, runHookEvent } from "./events.js";
 import type { HookEvent, HookRuntime } from "./events.js";
 import { identityLine } from "./inject.js";
 import type { HookInput } from "./input.js";
@@ -327,6 +327,21 @@ describe("session-end", () => {
   });
 });
 
+/** The key and `--harness` value `init` writes in each harness's own hook file (cursor.ts, vscode.ts). */
+const OWN_KEY: Partial<Record<HookEvent, string>> = { "session-start": "sessionStart", "session-end": "sessionEnd" };
+
+/** Writes the harness's own hook file the way init does, with `events` registered (an absolute program, as init writes it). */
+function registerOwnHooks(harness: HarnessId, events: HookEvent[], program = '"/usr/local/bin/node" "/opt/jubarteai/bin/jubarteai.js"'): string {
+  const file = ownHookFile(harness, homeDir(), process.env);
+  if (file === null) throw new Error(`no hook file for ${harness}`);
+  const hint = harness === "copilot-cli" ? "vscode" : harness;
+  const hooks: Record<string, unknown> = {};
+  for (const event of events) hooks[OWN_KEY[event] as string] = [{ type: "command", command: `${program} hook ${event} --harness ${hint}`, timeout: 8 }];
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ version: 1, hooks }));
+  return file;
+}
+
 describe("a hook another harness's own registered hook duplicates (M4)", () => {
   it.each<[HarnessId, HookEvent]>([
     ["cursor", "session-start"],
@@ -335,12 +350,51 @@ describe("a hook another harness's own registered hook duplicates (M4)", () => {
     ["vscode", "session-end"],
     ["copilot-cli", "session-start"],
     ["copilot-cli", "session-end"],
-  ])("detected %s differs from the claude-code hint on %s: nothing, no request", async (harness, event) => {
+  ])("detected %s differs from the claude-code hint on %s, and its own hook is registered: nothing, no request", async (harness, event) => {
     bind(sandbox.repo);
     const s = await connectingServer(MESSAGES);
     sandbox.signIn(s.origin);
+    registerOwnHooks(harness, [event]);
     writeSession(harness, "sess-1", { harness, agent_id: AGENT_B, seat_id: SEAT_ID, origin: s.origin }, { overwrite: true });
     expect(await runHookEvent(input(event, { harness, hint: "claude-code" }), runtime())).toBe("");
+    expect(s.requests).toHaveLength(0);
+  });
+
+  // Cursor installed after init, or its hooks declined: the Claude-registered hook is the only one that runs there.
+  it.each<[string, () => void]>([
+    ["no hook file", () => undefined],
+    ["a hook file without our entry", () => registerOwnHooks("cursor", ["session-end"])],
+    ["our entry for another harness", () => writeFileSync(registerOwnHooks("cursor", []), JSON.stringify({ hooks: { sessionStart: [{ command: "jubarteai hook session-start --harness claude-code" }] } }))],
+    ["a file that isn't JSON", () => writeFileSync(registerOwnHooks("cursor", []), "{ // mine\n}")],
+  ])("Cursor with %s: the claude-code hook connects the agent for Cursor", async (_name, setup) => {
+    bind(sandbox.repo);
+    const s = await connectingServer();
+    sandbox.signIn(s.origin);
+    setup();
+    const out = await runHookEvent(input("session-start", { harness: "cursor", hint: "claude-code" }), runtime());
+    expect(out).toContain(AGENT_A);
+    expect(s.toolCalls()).toHaveLength(1);
+    expect(readSession("cursor", "sess-1")?.agent_id).toBe(AGENT_A);
+  });
+
+  it("an unreadable hook file is 'not registered', never a throw", () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const file = registerOwnHooks("cursor", ["session-start"]);
+    expect(ownHookRegistered("cursor", "session-start", homeDir(), process.env)).toBe(true);
+    chmodSync(file, 0o000);
+    try {
+      expect(ownHookRegistered("cursor", "session-start", homeDir(), process.env)).toBe(false);
+    } finally {
+      chmodSync(file, 0o600);
+    }
+  });
+
+  it("a Windsurf/Devin session never defers (no hook of ours exists there) and, with no injection, prints nothing", async () => {
+    bind(sandbox.repo);
+    const s = await connectingServer();
+    sandbox.signIn(s.origin);
+    expect(ownHookRegistered("windsurf", "session-start", homeDir(), process.env)).toBe(false);
+    expect(await runHookEvent(input("session-start", { harness: "windsurf", hint: "claude-code" }), runtime())).toBe("");
     expect(s.requests).toHaveLength(0);
   });
 

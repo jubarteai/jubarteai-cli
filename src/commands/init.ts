@@ -21,19 +21,23 @@ import {
   INIT_COPY,
   accountChoiceLabel,
   bindingStepLabel,
+  codexActsAs,
+  codexForeignLines,
+  codexUnreadableLines,
   flagSkipDetail,
   noLoginForWorkspace,
   repoUsesWorkspace,
   useAccountQuestion,
   usingAccount,
 } from "../install/init-copy.js";
-import { resolveCliCommand } from "../install/cli-command.js";
+import { cliCommandInfo } from "../install/cli-command.js";
 import { runCommandSync } from "../install/run.js";
 import { planSkillSteps } from "../install/skill.js";
 import { safeForDisplay } from "../output.js";
 import { envOrigin, takeEnvToken } from "../process-env.js";
 import { choose, confirm, isInteractive } from "../prompt.js";
-import { TomlConflictError, editTomlFile, getTomlTable, setTomlKey } from "../safe-edit/toml-edit.js";
+import { readConfigText } from "../safe-edit/json-edit.js";
+import { TomlConflictError, editTomlFile, getTomlTable, readTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
 import { applyPlan, summarize } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 
@@ -286,9 +290,10 @@ function bindingStep(
 /**
  * Codex's fallback (spec D5, install.sh's register_codex): with no network opt-in available the Codex shell can't
  * reach the CLI, so Codex keeps talking to the MCP server. The key goes only into Codex's user-level config, mode 0600,
- * never into a project file (I1), and an existing entry is never overwritten.
+ * never into a project file (I1), and an existing entry is never overwritten (codexUpdateStep refreshes its key).
+ * It is offered whenever Codex has no user-level entry and skips itself when the network opt-in is in effect by the time it runs.
  */
-function codexRegisterStep(ctx: InitCtx, seat: StoredSeat): PlanStep {
+function codexRegisterStep(ctx: InitCtx, seat: StoredSeat, optInInEffect: () => Promise<boolean>): PlanStep {
   const file = join(codexHome(ctx.home, ctx.env), "config.toml");
   const shown = shownPath(file, ctx.home);
   const url = `${seat.origin}${MCP_PATH}`;
@@ -304,6 +309,8 @@ function codexRegisterStep(ctx: InitCtx, seat: StoredSeat): PlanStep {
     preview: `${shown}:\n[${CODEX_MCP_TABLE}]\nurl = ${JSON.stringify(url)}\nhttp_headers = { "Authorization" = "Bearer <your key>" }`,
     flag: "--yes",
     async apply(): Promise<StepResult> {
+      // The opt-in step ran before this one: when it took effect, Codex's shell reaches the CLI and needs no key of its own.
+      if (await optInInEffect()) return { id, label, status: "skipped", detail: INIT_COPY.codexRegisterNotNeeded };
       if (!API_KEY_RE.test(token)) return { id, label, status: "failed", detail: INIT_COPY.codexKeyShape };
       let exists = false;
       try {
@@ -321,6 +328,87 @@ function codexRegisterStep(ctx: InitCtx, seat: StoredSeat): PlanStep {
           { createIfMissing: true, mode: CODEX_CONFIG_MODE, withinHome },
         );
         if (exists) return { id, label, status: "already configured", detail: INIT_COPY.codexEntryExists };
+        if (result.status === "refused") return { id, label, status: "failed", detail: `could not write (${result.reason ?? "refused"})` };
+        return { id, label, status: result.status === "changed" ? "configured" : "already configured" };
+      } catch (error) {
+        if (error instanceof TomlConflictError) return { id, label, status: "skipped", detail: INIT_COPY.codexTableInline };
+        throw error;
+      }
+    },
+  };
+}
+
+const CODEX_UPDATE_STEP_ID = "codex:mcp-update";
+const BEARER_VALUE = /("Authorization"[ \t]*=[ \t]*)"Bearer ([^"\\\r\n]*)"/;
+
+/** The user-level Codex config file. */
+function codexUserFile(home: string, env: NodeJS.ProcessEnv): string {
+  return join(codexHome(home, env), "config.toml");
+}
+
+type CodexEntry = { url: string | null; bearer: string | null };
+
+/** The jubarteai entry of the user-level Codex config, or null when there is none (or no readable file). */
+function readCodexEntry(file: string): CodexEntry | null {
+  let text: string;
+  try {
+    const read = readConfigText(file);
+    if (read.status !== "ok") return null;
+    text = read.text;
+  } catch {
+    return null;
+  }
+  try {
+    const table = getTomlTable(text, CODEX_MCP_TABLE);
+    if (table === null) return null;
+    const url = readTomlKey(text, CODEX_MCP_TABLE, "url");
+    const match = BEARER_VALUE.exec(table.body);
+    return { url: typeof url === "string" ? url : null, bearer: match === null ? null : (match[2] ?? null) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A Codex entry whose key is no longer this account's (a re-login revoked the old CLI key): the step that writes the new
+ * one, behind its own prompt. The same user-level file and rules as codexRegisterStep.
+ */
+function codexUpdateStep(ctx: InitCtx, seat: StoredSeat, url: string): PlanStep {
+  const file = codexUserFile(ctx.home, ctx.env);
+  const shown = shownPath(file, ctx.home);
+  const token = seat.token;
+  const withinHome = isUnderHome(file, ctx.home);
+  const label = INIT_COPY.codexUpdateLabel;
+  const id = CODEX_UPDATE_STEP_ID;
+  return {
+    id,
+    label,
+    files: [file],
+    sensitive: true,
+    preview: `${shown}:\n[${CODEX_MCP_TABLE}]\nhttp_headers = { "Authorization" = "Bearer <your key>" }\n${codexActsAs(safeForDisplay(seat.user.email, DISPLAY_MAX), workspaceName(seat))}`,
+    flag: "--yes",
+    async apply(): Promise<StepResult> {
+      if (!API_KEY_RE.test(token)) return { id, label, status: "failed", detail: INIT_COPY.codexKeyShape };
+      let unreadable = false;
+      try {
+        const result = editTomlFile(
+          file,
+          (text) => {
+            const table = getTomlTable(text, CODEX_MCP_TABLE);
+            // Re-checked at apply time: only this account's own entry is ever rewritten.
+            if (table === null || readTomlKey(text, CODEX_MCP_TABLE, "url") !== url) return { text, changed: false };
+            const bodyStart = table.end - table.body.length;
+            const body = table.body;
+            if (!BEARER_VALUE.test(body)) {
+              unreadable = true;
+              return { text, changed: false };
+            }
+            const next = body.replace(BEARER_VALUE, (_all, head: string) => `${head}${JSON.stringify(`Bearer ${token}`)}`);
+            return { text: text.slice(0, bodyStart) + next + text.slice(table.end), changed: next !== body };
+          },
+          { createIfMissing: false, mode: CODEX_CONFIG_MODE, withinHome },
+        );
+        if (unreadable) return { id, label, status: "skipped", detail: INIT_COPY.codexUnreadableReason };
         if (result.status === "refused") return { id, label, status: "failed", detail: `could not write (${result.reason ?? "refused"})` };
         return { id, label, status: result.status === "changed" ? "configured" : "already configured" };
       } catch (error) {
@@ -354,8 +442,10 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
   const plan = new PlanBuilder();
   const detectEnv = defaultDetectEnv();
   // Permission rules and every printed line use the bare name agents type; only hook entries run the absolute
-  // `"<node>" "<bin>"` (resolveCliCommand), so a hook works from an editor whose PATH lacks the CLI.
-  const ctx: InitCtx = { ...detectEnv, projectRoot: root, cliCommand: CLI_NAME, hookCommand: resolveCliCommand(), yes: inputs.yes, tty: inputs.tty };
+  // `"<node>" "<bin>"` (cliCommandInfo), so a hook works from an editor whose PATH lacks the CLI.
+  const cli = cliCommandInfo();
+  if (cli.npx) inputs.notes.push(INIT_COPY.npxNote);
+  const ctx: InitCtx = { ...detectEnv, projectRoot: root, cliCommand: CLI_NAME, hookCommand: cli.command, yes: inputs.yes, tty: inputs.tty };
   const detected = await detectHarnesses(detectEnv);
 
   // 4. Binding.
@@ -404,10 +494,37 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
 
   const scope: CleanupScope = { home: ctx.home, projectRoot: root, platform: ctx.platform, startDir: inputs.cwd, env: ctx.env };
 
-  // D5: no network opt-in for Codex, and no MCP entry of its own at user level: offer to register one.
-  if (detected.some((adapter) => adapter.id === CODEX_ID) && !codexOptIn) {
+  // D5: Codex without a user-level MCP entry of its own gets one registered, unless the network opt-in is in effect when the
+  // step runs (it skips itself then). An entry that is there is never replaced: its key is refreshed when it is this
+  // account's address with another key, and a different address is only reported.
+  const codex = detected.find((adapter) => adapter.id === CODEX_ID);
+  if (codex !== undefined) {
+    const file = codexUserFile(ctx.home, ctx.env);
+    const url = `${seat.origin}${MCP_PATH}`;
+    const optInInEffect = async (): Promise<boolean> => {
+      try {
+        const items = (await codex.extras?.(ctx)) ?? [];
+        return items.some((item) => !isManual(item) && item.id === CODEX_OPT_IN_STEP_ID && !item.sensitive);
+      } catch {
+        return false;
+      }
+    };
     const has = await plan.guarded(CODEX_REGISTER_STEP_ID, INIT_COPY.codexRegisterLabel, () => hasUserLevelCodexEntry(scope));
-    if (has === false) plan.step(codexRegisterStep(ctx, seat));
+    if (has === false) {
+      if (!(await optInInEffect())) plan.step(codexRegisterStep(ctx, seat, optInInEffect));
+    } else if (has === true) {
+      const entry = readCodexEntry(file);
+      const shown = shownPath(file, ctx.home);
+      if (entry !== null && entry.url !== null && entry.url !== url) {
+        plan.manual({ kind: "manual", harness: CODEX_ID, title: INIT_COPY.codexForeignTitle, lines: codexForeignLines(shown, safeForDisplay(entry.url, DISPLAY_MAX)), reason: INIT_COPY.codexForeignReason });
+      } else if (entry !== null && entry.url === url) {
+        if (entry.bearer === null) {
+          plan.manual({ kind: "manual", harness: CODEX_ID, title: INIT_COPY.codexUnreadableTitle, lines: codexUnreadableLines(shown), reason: INIT_COPY.codexUnreadableReason });
+        } else if (entry.bearer !== seat.token) {
+          plan.step(codexUpdateStep(ctx, seat, url));
+        }
+      }
+    }
   }
 
   // MCP cleanup (D3), for every harness: a stale entry in a committed project file matters whether or not the editor is installed here.

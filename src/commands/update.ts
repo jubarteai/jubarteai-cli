@@ -28,9 +28,11 @@ import { inspectInstructions, notProjectReason, planInstructionSteps } from "../
 import { runCommand, which } from "../install/run.js";
 import {
   fetchLatestVersion,
+  globalInstallOf,
   installCliVersion,
   isNewer,
   reexecCli,
+  type CliInstall,
   type CliInstallOutcome,
   type ReexecOutcome,
 } from "../install/self-update.js";
@@ -89,9 +91,12 @@ export type UpdateDeps = {
   /** The registry's latest CLI version, or null when it couldn't be looked up. */
   fetchLatest(): Promise<string | null>;
   currentVersion(): string;
-  installCli(version: string): Promise<CliInstallOutcome>;
-  /** Run the newly installed CLI with these arguments (it inherits the terminal) and give back its exit code. */
-  reexec(args: string[]): Promise<ReexecOutcome>;
+  /** Where the running CLI is installed in npm's global layout; null outside it (npx cache, a checkout). */
+  locateInstall(): CliInstall | null;
+  /** `npm install -g jubarteai@<version>` into `prefix` (the running install's). */
+  installCli(version: string, prefix: string): Promise<CliInstallOutcome>;
+  /** Run `node <entry> <args>` (the bin script npm just replaced; it inherits the terminal) and give back its exit code. */
+  reexec(entry: string, args: string[]): Promise<ReexecOutcome>;
   isTty(): boolean;
   confirm: typeof confirm;
   detect(): Promise<HarnessAdapter[]>;
@@ -104,6 +109,7 @@ export type UpdateDeps = {
 const defaultDeps: UpdateDeps = {
   fetchLatest: () => fetchLatestVersion(),
   currentVersion: cliVersion,
+  locateInstall: () => globalInstallOf(process.argv[1]),
   installCli: installCliVersion,
   reexec: reexecCli,
   isTty: isInteractive,
@@ -148,23 +154,31 @@ async function selfUpdate(p: Printer, opts: Options, deps: UpdateDeps, tty: bool
     p.row(cliVersionRow({ kind: "current", current, latest }));
     return { done: false, pending: 0, failed: 0 };
   }
+  // Only a copy in npm's global layout is updated by `npm install -g`; any other is reported, not touched.
+  const install = deps.locateInstall();
+  if (install === null) {
+    p.row({ level: "warn", name: "CLI", text: `a newer CLI is available: ${current} -> ${latest}; ${UPDATE_COPY.cliNotGlobal}` });
+    return { done: false, pending: 0, failed: 0 };
+  }
   p.row(cliVersionRow({ kind: "newer", current, latest }));
   if (opts.check) return { done: false, pending: 1, failed: 0 };
 
-  p.line(`This will run: npm install -g jubarteai@${latest}`);
+  p.line(`This will run: npm install -g jubarteai@${latest} (into ${install.prefix})`);
+  // D28 (update-sh grill): with no terminal to ask and no --yes, update proceeds, the self-update included.
   const go = tty && !opts.yes ? await deps.confirm("Proceed?", { defaultYes: true }) : true;
   if (!go) {
     p.row({ level: "warn", name: "CLI", text: `${UPDATE_COPY.cliInstallDeclined} (${current}); update it later with: npm install -g jubarteai@${latest}` });
     return { done: false, pending: 0, failed: 0 };
   }
-  const installed = await deps.installCli(latest);
+  const installed = await deps.installCli(latest, install.prefix);
   if (!installed.ok) {
     p.line(`  CLI: failed: npm install -g jubarteai@${latest}`);
     for (const line of cliInstallFailedLines(latest, { eacces: installed.eacces, timedOut: installed.timedOut, platform: process.platform })) p.line(line);
     return { done: false, pending: 0, failed: 1 };
   }
   p.line(`  CLI: installed ${latest}; continuing with it`);
-  const handed = await deps.reexec(reexecArgs(opts));
+  // The file npm just replaced in place, never a PATH lookup (a stale copy elsewhere on PATH would run instead).
+  const handed = await deps.reexec(install.entry, reexecArgs(opts));
   if (handed.started) return { done: true, code: handed.code };
   p.row({ level: "warn", name: "CLI", text: handed.reason === "not-found" ? UPDATE_COPY.cliReexecMissing : UPDATE_COPY.cliReexecFailed });
   return { done: true, code: 1 };

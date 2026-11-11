@@ -51,6 +51,13 @@ export const INIT_COPY = {
   codexKept: "kept: Codex keeps its jubarteai MCP entry until its network setting is in place",
   codexEntryExists: "Codex already has a jubarteai entry there",
   codexTableInline: "jubarteai is set inline in that file, so add the entry by hand",
+  codexRegisterNotNeeded: "the network opt-in is in place",
+  codexUpdateLabel: "Update the key in Codex's MCP config (user level)",
+  codexForeignTitle: "Codex MCP entry for another JubarteAI address",
+  codexForeignReason: "its url is not this account's, so the key was left alone",
+  codexUnreadableTitle: "Codex MCP entry key",
+  codexUnreadableReason: "its key is not in a form init can rewrite",
+  npxNote: "You ran jubarteai through npx: install it globally (npm i -g jubarteai) so the hooks keep working.",
   codexKeyShape: "the saved key has an unexpected format, so log in again",
 
   // link (spec section 5.5).
@@ -107,4 +114,19 @@ export function linkPrevious(workspace: string, form: "private" | "shared"): str
 /** What `link` reports after a form-only conversion. */
 export function linkConverted(form: "private" | "shared"): string {
   return `Switched the binding to the ${form} form.`;
+}
+
+/** The preview line of the Codex key update: which account Codex will use. */
+export function codexActsAs(email: string, workspace: string): string {
+  return `Codex will act as ${email} — ${workspace} on this machine`;
+}
+
+/** Lines for a Codex entry whose url is not this account's. */
+export function codexForeignLines(shown: string, url: string): string[] {
+  return [`${shown} has a jubarteai entry for ${url}, which is not this account's address.`, "It was left as it is. To use this account in Codex, edit its url and key there by hand."];
+}
+
+/** Lines for a Codex entry whose key init can't rewrite safely. */
+export function codexUnreadableLines(shown: string): string[] {
+  return [`${shown} sets the jubarteai key in a form init can't rewrite (an environment variable, or a table of its own).`, "Make sure it holds this account's key, or edit it by hand."];
 }

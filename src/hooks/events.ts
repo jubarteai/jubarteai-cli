@@ -1,12 +1,14 @@
 // What each hook event does (spec §6.3). Every path ends in a string to print ("" for nothing) and none
 // throws for a server, network or file problem: a hook must never fail the harness (I7).
 import { existsSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { isResolveError, resolveSeat } from "../auth/resolve-seat.js";
 import type { ResolvedSeat } from "../auth/resolve-seat.js";
 import { findBinding } from "../binding/binding.js";
 import type { Binding } from "../binding/binding.js";
+import { isOurHookCommand, settingsPath as claudeSettingsPath } from "../harness/claude-code.js";
+import { codexHome } from "../harness/mcp-cleanup.js";
 import type { Envelope } from "../mcp/client.js";
 import { callTool } from "../mcp/client.js";
 import { isAgentId, readSession, writeSession } from "../session/cache.js";
@@ -15,6 +17,8 @@ import type { HarnessId } from "../session/harness-env.js";
 import { overflowSpill } from "./overflow.js";
 import { NOT_SIGNED_IN_LINE, UNREACHABLE_LINE, composeInjection, formatInjection, identityLine, injectionSupported } from "./inject.js";
 import type { HookInput } from "./input.js";
+import { homeDir } from "../paths.js";
+import { readJsonObject } from "../safe-edit/json-edit.js";
 
 export type HookEvent = "session-start" | "user-prompt-submit" | "session-end";
 
@@ -31,21 +35,80 @@ const MAX_AGENT_NAME_CHARS = 200;
 const MAX_SLUG_CHARS = 100;
 
 /**
- * The events for which `init` registers the harness's own hook (spec §9 "Hooks"). Cursor and Devin import
- * Claude Code's hooks, so the Claude-registered hook also fires there; when the harness it detected has its
- * own hook for the event, that one does the work and this one stays out (else two agents connect per session).
+ * The hooks `init` registers in each harness's own hook file (spec §9 "Hooks"): the `--harness` value its commands
+ * carry and, per event, the key it sits under. Cursor and Devin import Claude Code's hooks, so the Claude-registered
+ * hook also fires there; when the detected harness's own file holds our hook for the event, that one does the work
+ * and this one stays out (else two agents connect per session). Windsurf, Zed and OpenCode get no hook of ours.
  */
-const OWN_HOOK_EVENTS: Readonly<Record<HarnessId, readonly HookEvent[]>> = {
-  "claude-code": ["session-start", "user-prompt-submit", "session-end"],
-  codex: ["session-start", "user-prompt-submit", "session-end"],
-  "gemini-cli": ["session-start", "user-prompt-submit", "session-end"],
-  cursor: ["session-start", "session-end"],
-  vscode: ["session-start", "session-end"],
-  "copilot-cli": ["session-start", "session-end"],
-  windsurf: [],
-  zed: [],
-  opencode: [],
+const OWN_HOOKS: Readonly<Record<HarnessId, { hint: HarnessId; keys: Partial<Record<HookEvent, string>> } | null>> = {
+  "claude-code": { hint: "claude-code", keys: { "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "session-end": "SessionEnd" } },
+  codex: { hint: "codex", keys: { "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "session-end": "SessionEnd" } },
+  "gemini-cli": { hint: "gemini-cli", keys: { "session-start": "SessionStart", "user-prompt-submit": "BeforeAgent", "session-end": "SessionEnd" } },
+  cursor: { hint: "cursor", keys: { "session-start": "sessionStart", "session-end": "sessionEnd" } },
+  // One file serves VS Code and Copilot CLI; its commands carry --harness vscode.
+  vscode: { hint: "vscode", keys: { "session-start": "sessionStart", "session-end": "sessionEnd" } },
+  "copilot-cli": { hint: "vscode", keys: { "session-start": "sessionStart", "session-end": "sessionEnd" } },
+  windsurf: null,
+  zed: null,
+  opencode: null,
 };
+
+function absoluteEnvDir(env: NodeJS.ProcessEnv, name: string): string | null {
+  const value = env[name];
+  return value !== undefined && value !== "" && isAbsolute(value) ? value : null;
+}
+
+/** The file that holds a harness's own jubarteai hooks, or null for a harness `init` registers none in. */
+export function ownHookFile(harness: HarnessId, home: string, env: NodeJS.ProcessEnv): string | null {
+  switch (harness) {
+    case "claude-code":
+      return claudeSettingsPath(home, env);
+    case "codex":
+      return join(codexHome(home, env), "hooks.json");
+    case "cursor":
+      return join(home, ".cursor", "hooks.json");
+    case "gemini-cli":
+      return join(home, ".gemini", "settings.json");
+    case "vscode":
+    case "copilot-cli":
+      return join(absoluteEnvDir(env, "COPILOT_HOME") ?? join(home, ".copilot"), "hooks", "jubarteai.json");
+    default:
+      return null;
+  }
+}
+
+/** Every string under a `command` key anywhere in `value` (the harnesses nest hook entries differently). */
+function commandStrings(value: unknown, out: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const item of value) commandStrings(item, out);
+  } else if (isRecord(value)) {
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "command" && typeof item === "string") out.push(item);
+      else commandStrings(item, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether `harness`'s own hook file holds our hook for `event` (a command ending `hook <event> --harness <its id>`
+ * under the event's key). Read-only and never throws: a missing, unreadable or unparsable file is "no".
+ */
+export function ownHookRegistered(harness: HarnessId, event: HookEvent, home: string, env: NodeJS.ProcessEnv): boolean {
+  const own = OWN_HOOKS[harness];
+  const key = own?.keys[event];
+  const file = ownHookFile(harness, home, env);
+  if (own === null || key === undefined || file === null) return false;
+  try {
+    const read = readJsonObject(file);
+    if (read.status !== "ok") return false;
+    const hooks = read.doc["hooks"];
+    if (!isRecord(hooks)) return false;
+    return commandStrings(hooks[key]).some((command) => isOurHookCommand(command, event, own.hint));
+  } catch {
+    return false;
+  }
+}
 
 export function parseHookEvent(value: string | undefined): HookEvent | null {
   return HOOK_EVENTS.find((event) => event === value) ?? null;
@@ -171,7 +234,9 @@ async function sessionEnd({ harness, input, seat, runtime }: Handled): Promise<s
 export async function runHookEvent(input: HookInput, runtime: HookRuntime): Promise<string> {
   const harness = input.harness;
   if (harness === null) return "";
-  if (input.hint !== null && input.hint !== harness && OWN_HOOK_EVENTS[harness].includes(input.event)) return "";
+  // Another harness's hook running here (Claude Code's, imported by Cursor) defers only to a hook of this harness's own
+  // that is really registered: Cursor installed after init, or its hooks declined, leaves this one to do the work.
+  if (input.hint !== null && input.hint !== harness && ownHookRegistered(harness, input.event, homeDir(), process.env)) return "";
   if (input.event !== "session-end" && !injectionSupported(harness, input.event)) return "";
   const binding = bindingFor(input.cwd);
   if (binding === null) return "";

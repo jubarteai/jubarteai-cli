@@ -224,6 +224,18 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect((json(join(sb.home, ".claude", "settings.json"))["permissions"] as { allow: string[] }).allow).toEqual(["Bash(jubarteai *)"]);
   });
 
+  it("run through npx, the hooks name the bare command and a note says to install globally", async () => {
+    withEnvKey();
+    mkdirSync(join(sb.root, ".npm", "_npx", "h", "bin"), { recursive: true });
+    const cached = join(sb.root, ".npm", "_npx", "h", "bin", "jubarteai.js");
+    writeFileSync(cached, "// fake bin\n");
+    process.argv[1] = cached;
+    const result = await run(["init", "--yes", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.home, ".claude", "settings.json"))).toContain('"command": "jubarteai hook session-start --harness claude-code"');
+    expect(result.err).toContain(INIT_COPY.npxNote);
+  });
+
   it("OpenCode's instructions name the bare command, never the absolute hook command", async () => {
     withEnvKey();
     mkdirSync(join(sb.home, ".config", "opencode"), { recursive: true });
@@ -617,6 +629,111 @@ describe("init: MCP cleanup and Codex", () => {
     expect(result.code, result.err).toBe(0);
     expect(read(join(sb.home, ".codex", "config.toml"))).toBe(original);
     expect(result.err).not.toContain(INIT_COPY.codexRegisterLabel);
+  });
+
+  it("refreshes the key in Codex's own entry after a re-login revoked the old one: the file holds the new key only", async () => {
+    withEnvKey();
+    expect((await run(["init", "--yes"])).code).toBe(0);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toContain(KEY);
+
+    // A new login: another key for the same seat (the old one is revoked by the server).
+    const NEW_KEY = "jba_INITTESTNEWKEYNEWKEY0000002";
+    fake.addKey(NEW_KEY);
+    process.env.JUBARTEAI_TOKEN = NEW_KEY;
+    resetEnvTokenForTests();
+    const result = await run(["init", "--yes"]);
+    expect(result.code, result.err).toBe(0);
+    const config = read(join(sb.home, ".codex", "config.toml"));
+    expect(config).toContain(`http_headers = { "Authorization" = "Bearer ${NEW_KEY}" }`);
+    expect(config).not.toContain(KEY);
+    expect(config.match(/\[mcp_servers\.jubarteai\]/g)).toHaveLength(1);
+    expect(summaryLine(result.err, new RegExp(`^${INIT_COPY.codexUpdateLabel.replace(/[()']/g, "\\$&")}`))).toMatch(/: configured$/);
+    if (posix) expect(statSync(join(sb.home, ".codex", "config.toml")).mode & 0o777).toBe(0o600);
+    expect(sb.callLog()).not.toContain(NEW_KEY);
+    expect(result.err).not.toContain(NEW_KEY);
+    expect(result.err).not.toContain(KEY);
+  });
+
+  it("leaves the entry alone when its key is already this account's (nothing to update)", async () => {
+    withEnvKey();
+    expect((await run(["init", "--yes"])).code).toBe(0);
+    const before = read(join(sb.home, ".codex", "config.toml"));
+    resetEnvTokenForTests();
+    const again = await run(["init", "--yes"]);
+    expect(again.err).not.toContain(INIT_COPY.codexUpdateLabel);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(before);
+  });
+
+  it("asks before updating the key, shows who Codex will act as, and never shows the key", async () => {
+    storeSeats();
+    mkdirSync(join(sb.home, ".codex"), { recursive: true });
+    const config = `model = "x"\n\n[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_REVOKEDKEYREVOKEDKEY0001" }\n`;
+    writeFileSync(join(sb.home, ".codex", "config.toml"), config);
+    const tty = scriptedTty(() => "");
+    const result = await run(["init", "--no-hooks", "--no-permissions", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(tty.prompts.some((p) => p.startsWith(`Apply "${INIT_COPY.codexUpdateLabel}"?`))).toBe(true);
+    expect(result.err).toContain("Codex will act as ada@example.com — Beta LLC on this machine");
+    expect(result.err).toContain('"Authorization" = "Bearer <your key>"');
+    expect(result.err + tty.shown()).not.toMatch(/jba_[A-Za-z0-9]/);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(config.replace("jba_REVOKEDKEYREVOKEDKEY0001", "jba_BETAKEYBETAKEYBETAKEY0002"));
+  });
+
+  it("with no terminal the key update is listed as skipped with its flag, and the file is untouched", async () => {
+    storeSeats();
+    mkdirSync(join(sb.home, ".codex"), { recursive: true });
+    const config = `[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_REVOKEDKEYREVOKEDKEY0001" }\n`;
+    writeFileSync(join(sb.home, ".codex", "config.toml"), config);
+    const result = await run(["init", "--no-hooks", "--no-permissions", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(config);
+    expect(result.err).toMatch(/Update the key in Codex's MCP config \(user level\): skipped \(needs confirmation; rerun with --yes\)/);
+  });
+
+  it("an entry for another address is left byte-identical and reported by hand", async () => {
+    withEnvKey();
+    mkdirSync(join(sb.home, ".codex"), { recursive: true });
+    const original = `[mcp_servers.jubarteai]\nurl = "https://other.example.com/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_OTHERSERVERKEYOTHER0001" }\n`;
+    writeFileSync(join(sb.home, ".codex", "config.toml"), original);
+    const result = await run(["init", "--yes"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(original);
+    expect(result.err).not.toContain(INIT_COPY.codexUpdateLabel);
+    expect(result.err).toContain(INIT_COPY.manualHeading);
+    expect(result.err).toContain(INIT_COPY.codexForeignTitle);
+    expect(result.err).toContain("https://other.example.com/api/mcp");
+    expect(result.err).not.toContain("jba_OTHERSERVER");
+  });
+
+  it("an entry whose key is not in the inline form is reported, not rewritten", async () => {
+    withEnvKey();
+    mkdirSync(join(sb.home, ".codex"), { recursive: true });
+    const original = `[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\nbearer_token_env_var = "JUBARTEAI_TOKEN"\n`;
+    writeFileSync(join(sb.home, ".codex", "config.toml"), original);
+    const result = await run(["init", "--yes"]);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toBe(original);
+    expect(result.err).toContain(INIT_COPY.codexUnreadableTitle);
+  });
+
+  it("still offers the fallback entry when the opt-in is declined, and writes it on yes", async () => {
+    storeSeats();
+    trustCodexProject();
+    const tty = scriptedTty((p) => (p.includes("Allow network access for jubarteai") ? "n" : ""));
+    const result = await run(["init", "--no-hooks", "--no-permissions", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(tty.prompts.some((p) => p.startsWith(`Apply "${INIT_COPY.codexRegisterLabel}"?`))).toBe(true);
+    expect(existsSync(join(sb.repo, ".codex", "config.toml"))).toBe(false);
+    expect(read(join(sb.home, ".codex", "config.toml"))).toContain("[mcp_servers.jubarteai]");
+  });
+
+  it("skips the fallback entry at apply time when the opt-in took effect first", async () => {
+    withEnvKey();
+    trustCodexProject();
+    const result = await run(["init", "--yes", "--no-hooks", "--no-permissions", "--keep-mcp"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.repo, ".codex", "config.toml"))).toContain("network_access = true");
+    expect(read(join(sb.home, ".codex", "config.toml"))).not.toContain("[mcp_servers.jubarteai]");
+    expect(result.err).toContain(`${INIT_COPY.codexRegisterLabel}: skipped (${INIT_COPY.codexRegisterNotNeeded})`);
   });
 
   it("an old Codex gets the fallback entry too, and the opt-in is explained by hand", async () => {

@@ -303,7 +303,12 @@ async function extras(ctx: InitCtx, deps: CodexDeps): Promise<Array<PlanStep | M
 }
 
 async function inspect(ctx: InitCtx, deps: CodexDeps): Promise<AdapterState> {
-  const mcpEntries = await findMcpEntries(ID, { home: ctx.home, projectRoot: ctx.projectRoot, platform: ctx.platform, env: ctx.env });
+  const found = await findMcpEntries(ID, { home: ctx.home, projectRoot: ctx.projectRoot, platform: ctx.platform, env: ctx.env });
+  const optIn = await evaluateOptIn(ctx, ctx.projectRoot, deps);
+  // The user-level entry is a leftover only where this project's opt-in is in effect (mcpCleanup's keepUser rule);
+  // anywhere else it is the entry Codex uses on purpose (D5), which init never removes.
+  const userFile = path.resolve(path.join(codexHome(ctx.home, ctx.env), "config.toml"));
+  const mcpEntries = optIn.ok && optIn.alreadySet ? found : found.filter((file) => path.resolve(file) !== userFile);
   const notes: string[] = [];
   const file = hooksFile(ctx);
   const current = readSettings(file);
@@ -320,7 +325,6 @@ async function inspect(ctx: InitCtx, deps: CodexDeps): Promise<AdapterState> {
   if (hooksState === "configured" || hooksState === "partial") notes.push(TRUST_INSTRUCTION);
   const userConfig = readText(path.join(codexHome(ctx.home, ctx.env), "config.toml"));
   if (userConfig !== null && readTomlKeySafe(userConfig, "features", "hooks") === false) notes.push("Codex hooks are turned off ([features] hooks = false)");
-  const optIn = await evaluateOptIn(ctx, ctx.projectRoot, deps);
   if (optIn.ok) {
     if (!optIn.alreadySet) notes.push("the network opt-in is not written yet: run jubarteai init");
   } else {

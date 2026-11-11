@@ -140,7 +140,15 @@ describe("node floor", () => {
 
     it("release.yml publishes through OIDC: id-token write, provenance, no npm token", () => {
       expect(release).toMatch(/id-token: write/);
-      expect(release).toMatch(/npm publish --provenance --access public/);
+      expect(release).toMatch(/npm publish "\$TARBALL" --tag "\$DIST_TAG" --provenance --access public --ignore-scripts/);
+      // The privileged job publishes the tarball built elsewhere: no install, no build, no persisted git token.
+      const publishStart = release.indexOf("\n  publish:\n");
+      const publishJob = release.slice(publishStart);
+      expect(publishJob).not.toMatch(/npm ci|npm run build|npm pack/);
+      expect(publishJob).toMatch(/persist-credentials: false/);
+      expect(release.slice(0, publishStart)).not.toMatch(/id-token: write/);
+      // A prerelease version never takes the latest dist-tag.
+      expect(release).toMatch(/\*-\*\) dist_tag=next/);
       expect(release).toMatch(/uses: \.\/\.github\/workflows\/ci\.yml/);
       expect(release).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./);
     });

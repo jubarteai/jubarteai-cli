@@ -60,7 +60,7 @@ describe("routeWith: help and version", () => {
     }
   });
 
-  it("prints grouped help with no arguments and for --help, hiding internal commands", async () => {
+  it("prints grouped help with no arguments and for --help, naming internal commands on one line", async () => {
     for (const argv of [[], ["--help"], ["-h"]]) {
       const h = harness(registry);
       expect(await h.run(argv)).toBe(0);
@@ -73,7 +73,8 @@ describe("routeWith: help and version", () => {
       expect(text.indexOf("Account:")).toBeLessThan(text.indexOf("Tools:"));
       expect(text).toContain("Search knowledge");
       expect(text).toContain("--workspace <value>");
-      expect(text).not.toContain("Internal");
+      expect(text).toContain("\nInternal (used by hooks and shims): hook (not for direct use; details: jubarteai --help --all)\n");
+      expect(text).not.toContain("Internal (used by hooks and shims):\n");
       expect(text).not.toContain("Harness hook entry");
       expect(h.err()).toBe("");
     }
@@ -91,6 +92,7 @@ describe("routeWith: help and version", () => {
     expect(await h.run(["--help"])).toBe(0);
     expect(h.out()).toContain("Global options:");
     expect(h.out()).not.toContain("Account:");
+    expect(h.out()).not.toContain("Internal");
   });
 
   it("<cmd> --help prints that command's flags and does not run it", async () => {

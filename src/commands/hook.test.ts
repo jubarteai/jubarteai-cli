@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -18,7 +18,8 @@ import {
 import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
 import { HOOK_NETWORK_TIMEOUT_MS, HOOK_TOTAL_BUDGET_MS } from "../constants.js";
 import { routeWith } from "../cli/router.js";
-import { SESSION_END_NETWORK_TIMEOUT_MS } from "../hooks/events.js";
+import { SESSION_END_NETWORK_TIMEOUT_MS, ownHookFile } from "../hooks/events.js";
+import { homeDir } from "../paths.js";
 import { callTool } from "../mcp/client.js";
 import { readSession, writeSession } from "../session/cache.js";
 import { hookCommand, runHook } from "./hook.js";
@@ -287,6 +288,19 @@ describe("detection and per-harness output", () => {
     bind(sandbox.repo);
     const s = await server();
     sandbox.signIn(s.origin);
+    // Cursor's own hooks, as init registers them: only then does the imported Claude hook stand aside.
+    const cursorHooks = ownHookFile("cursor", homeDir(), process.env) as string;
+    mkdirSync(dirname(cursorHooks), { recursive: true });
+    writeFileSync(
+      cursorHooks,
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [{ command: "jubarteai hook session-start --harness cursor", timeout: 8 }],
+          sessionEnd: [{ command: "jubarteai hook session-end --harness cursor", timeout: 3 }],
+        },
+      }),
+    );
     expect(await hook("session-start", CURSOR_STDIN(), { harness: "claude-code" })).toEqual({ code: 0, out: "", err: "" });
     expect(s.requests).toHaveLength(0);
     expect(readSession("cursor", "cur-1")).toBeNull();

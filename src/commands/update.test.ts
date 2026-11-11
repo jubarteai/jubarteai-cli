@@ -33,6 +33,7 @@ import { CODEX_CODES } from "../harness/codex.js";
 import type { HarnessAdapter, ManualInstructions } from "../harness/types.js";
 import type { PlanStep } from "../safe-edit/plan.js";
 import { AGENTS_MD_MARKERS, SKILL_REPO, SKILLS_CLI_VERSION, agentsMdSnippet, agentsMdSnippetHistory } from "../install/constants.js";
+import { cliEntryFor } from "../install/self-update.js";
 import { skillTreeSha, type LatestSkill } from "../install/skill.js";
 import type { UpdateDeps } from "./update.js";
 import { createUpdateCommand, reexecArgs } from "./update.js";
@@ -84,16 +85,21 @@ if (me === "npx") {
   else if (argv[0] === "plugin" && argv[1] === "update") fs.writeFileSync(state, JSON.stringify(cfg.pluginListAfterUpdate || current()));
   else process.exit(64);
 } else if (me === "npm") {
+  if (argv[0] === "prefix") {
+    if (!cfg.globalPrefix) process.exit(1);
+    process.stdout.write(cfg.globalPrefix + "\\n");
+    process.exit(0);
+  }
   if (cfg.stderr) process.stderr.write(cfg.stderr);
   process.exit(cfg.exitCode || 0);
-} else if (me === "jubarteai") {
+} else if (me === "jubarteai" || me === "jubarteai.js") {
   process.exit(cfg.exitCode || 0);
 }
 `;
 
 type Call = { argv: string[]; cwd: string; sawToken: boolean };
 
-type Sandbox = { root: string; home: string; project: string; bin: string; fixture: string; latest: LatestSkill };
+type Sandbox = { root: string; home: string; project: string; bin: string; fixture: string; latest: LatestSkill; prefix: string };
 let sb: Sandbox;
 const ENV_KEYS = ["HOME", "USERPROFILE", "PATH", "JUBARTEAI_TOKEN", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const;
 let saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
@@ -113,8 +119,25 @@ function stub(name: "npx" | "claude" | "npm" | "jubarteai", config: object = {})
   writeFileSync(join(sb.bin, `${name}.json`), JSON.stringify({ fixture: sb.fixture, ...config }));
 }
 
+/** The bin script npm replaces under the running install's prefix: what the re-exec must run. */
+const entryFile = (): string => cliEntryFor(sb.prefix);
+
+function stubEntry(config: object = {}): void {
+  const file = entryFile();
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `#!${process.execPath}\n${STUB}`);
+  writeFileSync(`${file}.json`, JSON.stringify(config));
+}
+
+function entryCalls(): Call[] {
+  return logOf(`${entryFile()}.log`);
+}
+
 function calls(name: string): Call[] {
-  const file = join(sb.bin, `${name}.log`);
+  return logOf(join(sb.bin, `${name}.log`));
+}
+
+function logOf(file: string): Call[] {
   if (!existsSync(file)) return [];
   return readFileSync(file, "utf8")
     .split("\n")
@@ -191,6 +214,7 @@ async function update(argv: string[] = [], opts: RunOpts = {}): Promise<RunResul
     confirm,
     latestSkill: sb.latest,
     nodeVersion: "24.22.1",
+    locateInstall: () => ({ prefix: sb.prefix, entry: entryFile() }),
     ...opts.deps,
   };
   const stdout = new Capture();
@@ -224,7 +248,7 @@ beforeEach(() => {
   writeTree(fixture, LATEST_FILES);
   const tree = skillTreeSha(fixture);
   if (tree === null) throw new Error("fixture has no tree");
-  sb = { root, home, project, bin, fixture, latest: { version: "2.0.0", tree } };
+  sb = { root, home, project, bin, fixture, latest: { version: "2.0.0", tree }, prefix: join(root, "prefix") };
   const gitPath = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
   writeFileSync(join(bin, "git"), `#!/bin/sh\nexec "${gitPath}" "$@"\n`);
   chmodSync(join(bin, "git"), 0o755);
@@ -240,7 +264,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  const recorded = ["npx", "claude", "npm", "jubarteai"].flatMap((tool) => calls(tool));
+  const recorded = [...["npx", "claude", "npm", "jubarteai"].flatMap((tool) => calls(tool)), ...entryCalls()];
   for (const key of ENV_KEYS) {
     const value = saved[key];
     if (value === undefined) delete process.env[key];
@@ -258,8 +282,11 @@ afterEach(() => {
 
 describe.skipIf(!posix)("update: self-update", () => {
   it("newer CLI on the registry → asks Proceed?, runs npm install -g jubarteai@<v>, re-execs with --no-self-update and the same flags", async () => {
-    stub("npm");
-    stub("jubarteai", { exitCode: 0 });
+    // npm's configured global prefix is elsewhere: the CLI that runs lives under sb.prefix (the ~/.local fallback).
+    stub("npm", { globalPrefix: "/usr/local" });
+    stubEntry({ exitCode: 0 });
+    // A stale copy that comes first on PATH must not be what runs next.
+    stub("jubarteai", { exitCode: 9 });
     staleProjectCopy();
     const r = await update(["--yes", "--keep-mcp"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true } });
 
@@ -267,25 +294,30 @@ describe.skipIf(!posix)("update: self-update", () => {
     expect(r.out).toContain(`a newer CLI is available: ${CURRENT_CLI} -> ${NEWER_CLI}`);
     // --yes: no prompt for the install either.
     expect(r.confirm).not.toHaveBeenCalled();
-    expect(npmInstalls().map((c) => c.argv)).toEqual([["install", "-g", `jubarteai@${NEWER_CLI}`]]);
+    // Into the prefix the running CLI came from, so that copy is the one updated.
+    expect(npmInstalls().map((c) => c.argv)).toEqual([["install", "-g", "--prefix", sb.prefix, `jubarteai@${NEWER_CLI}`]]);
     // From HOME, so the project's own .npmrc can't pick the registry for a global install.
     expect(npmInstalls()[0]?.cwd).toBe(sb.home);
-    expect(calls("jubarteai").map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes", "--keep-mcp"]]);
+    // The re-exec runs the file npm replaced under that prefix, never the PATH lookup.
+    expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes", "--keep-mcp"]]);
+    expect(calls("jubarteai")).toEqual([]);
     // The new binary runs where update was started (it updates this project).
-    expect(calls("jubarteai")[0]?.cwd).toBe(realpathSync(process.cwd()));
+    expect(entryCalls()[0]?.cwd).toBe(realpathSync(process.cwd()));
     // The new binary did the rest: this process ran no skill step of its own.
     expect(npxAdds()).toEqual([]);
   });
 
   it("asks Proceed? [Y/n] on a terminal without --yes, and passes the re-executed CLI's exit code back", async () => {
-    stub("npm");
-    stub("jubarteai", { exitCode: 1 });
+    stub("npm", { globalPrefix: sb.prefix });
+    stubEntry({ exitCode: 1 });
     const confirm = vi.fn(async () => true);
     const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true, confirm } });
 
     expect(confirm).toHaveBeenCalledWith("Proceed?", { defaultYes: true });
-    expect(r.out).toContain(`This will run: npm install -g jubarteai@${NEWER_CLI}`);
-    expect(calls("jubarteai").map((c) => c.argv)).toEqual([["update", "--no-self-update"]]);
+    expect(r.out).toContain(`This will run: npm install -g jubarteai@${NEWER_CLI} (into ${sb.prefix})`);
+    // npm's global prefix is the running one: no --prefix.
+    expect(npmInstalls().map((c) => c.argv)).toEqual([["install", "-g", `jubarteai@${NEWER_CLI}`]]);
+    expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update"]]);
     expect(r.code).toBe(1);
   });
 
@@ -326,12 +358,36 @@ describe.skipIf(!posix)("update: self-update", () => {
     expect(r.code).toBe(1);
   });
 
-  it("installed but no new jubarteai on PATH → says how to finish, exit 1", async () => {
+  it("installed but the updated entry isn't under the prefix → says how to finish, exit 1, and never runs the PATH copy", async () => {
     stub("npm");
+    stub("jubarteai");
     const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI) } });
 
     expect(r.out).toContain("open a new terminal and run: jubarteai update");
+    expect(calls("jubarteai")).toEqual([]);
     expect(r.code).toBe(1);
+  });
+
+  it("a CLI outside npm's global folder (npx cache, a checkout) is not self-updated: advisory, and the update carries on", async () => {
+    stub("npm");
+    staleProjectCopy();
+    const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), locateInstall: () => null } });
+
+    expect(r.out).toContain("installed outside npm's global folder");
+    expect(r.out).toContain("update it the way you installed it");
+    // Neither `npm prefix -g` nor `npm install` (the skill step's own `npm config get registry` is unrelated).
+    expect(calls("npm").filter((c) => c.argv[0] === "install" || c.argv[0] === "prefix")).toEqual([]);
+    expect(npxAdds()).toHaveLength(1);
+    expect(r.code).toBe(0);
+  });
+
+  it("--check: a newer CLI outside npm's global folder is an advisory, not a change", async () => {
+    currentProjectCopy();
+    writeFileSync(join(sb.project, "AGENTS.md"), CURRENT_SECTION);
+    const r = await update(["--check"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), locateInstall: () => null } });
+
+    expect(r.out).toContain("[warn] CLI: a newer CLI is available");
+    expect(r.code).toBe(0);
   });
 
   it("--check never installs and reports a newer CLI as a change (exit 2), even when everything else is current", async () => {
@@ -341,7 +397,7 @@ describe.skipIf(!posix)("update: self-update", () => {
     const r = await update(["--check"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI) } });
 
     expect(npmInstalls()).toEqual([]);
-    expect(calls("jubarteai")).toEqual([]);
+    expect(entryCalls()).toEqual([]);
     expect(r.out).toContain("[todo] CLI: a newer CLI is available");
     expect(r.out).toContain("1 change(s) pending");
     expect(r.code).toBe(2);
@@ -622,10 +678,10 @@ describe.skipIf(!posix)("update: no key, ever (D2, D3, D21)", () => {
     const outputs: string[] = [];
 
     // 1. the self-update hand-over (npm + the new binary)
-    stub("jubarteai");
+    stubEntry();
     const handed = await update(["--yes"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true } });
     outputs.push(handed.out, handed.err);
-    expect(calls("jubarteai")).toHaveLength(1);
+    expect(entryCalls()).toHaveLength(1);
 
     // 2. the rest, in this process: check, then apply (prompting, so every preview is printed)
     const check = await update(["--check"]);

@@ -3,12 +3,13 @@
 // uses it to say a newer CLI exists. Nothing here reads, sends or prints a key: the registry is asked anonymously,
 // npm and the re-executed CLI get childEnv() (never JUBARTEAI_TOKEN).
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
+import { posix, resolve, win32 } from "node:path";
 import { CLI_NAME } from "../constants.js";
 import { homeDir } from "../paths.js";
 import { childEnv } from "../process-env.js";
-import { resolveInvocation, runCommand, type Probe } from "./run.js";
+import { runCommand } from "./run.js";
 
 /** The registry document for the `latest` dist-tag of the package. */
 export const CLI_REGISTRY_LATEST_URL = "https://registry.npmjs.org/jubarteai/latest";
@@ -142,10 +143,8 @@ export async function fetchLatestVersion(opts?: { timeoutMs?: number; signal?: A
 
 /** How long `npm install -g` may take before it is stopped. */
 export const CLI_INSTALL_TIMEOUT_MS = 180_000;
-
-export type CliInstallOutcome =
-  | { ok: true }
-  | { ok: false; eacces: boolean; timedOut: boolean; notFound: boolean };
+/** How long `npm prefix -g` may take. */
+const NPM_PREFIX_TIMEOUT_MS = 10_000;
 
 /**
  * npm runs from the home folder with node options emptied: started in the project it would read that repository's
@@ -157,14 +156,111 @@ const NPM_ENV: Readonly<Record<string, string>> = { npm_config_node_options: "",
 /** npm's own words for "can't write to the global folder" (it prints the code; the message is never shown). */
 const PERMISSION_CODES = /\b(EACCES|EPERM)\b/;
 
+/** Where the running CLI lives in npm's global layout. */
+export type CliInstall = {
+  /** npm's global prefix this copy was installed under (`npm install -g --prefix <this>` updates it in place). */
+  prefix: string;
+  /** The package's bin script under that prefix: the file `npm install -g` replaces, run with `node <entry>`. */
+  entry: string;
+};
+
+/** The bin script npm installs under `prefix` (POSIX `lib/node_modules/…`, Windows `node_modules\…`). */
+export function cliEntryFor(prefix: string, platform: NodeJS.Platform = process.platform): string {
+  const p = platform === "win32" ? win32 : posix;
+  return platform === "win32"
+    ? p.join(prefix, "node_modules", CLI_NAME, "bin", `${CLI_NAME}.js`)
+    : p.join(prefix, "lib", "node_modules", CLI_NAME, "bin", `${CLI_NAME}.js`);
+}
+
+type LocateOptions = {
+  platform?: NodeJS.Platform;
+  realpath?: (path: string) => string;
+  isFile?: (path: string) => boolean;
+};
+
+function fileExists(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * `npm install -g jubarteai@<version>` through runCommand (argument array, no shell, childEnv: no key), from the
- * home folder, 180 s.
- * Never throws; npm's output is only searched for a permission code, never printed (it can carry paths).
+ * Where the running CLI is installed, from the real path of its bin script (`process.argv[1]`, a symlink or a .cmd
+ * shim on PATH resolves to it): POSIX `<prefix>/lib/node_modules/jubarteai/bin/jubarteai.js`, Windows
+ * `<prefix>\node_modules\jubarteai\bin\jubarteai.js` (and, since a project-local install has that same shape there,
+ * only with npm's global shim `<prefix>\jubarteai.cmd` beside it). Null for anything else: an npx cache, a
+ * project's node_modules, a development checkout. Such a copy is not updated by `npm install -g`.
  */
-export async function installCliVersion(version: string): Promise<CliInstallOutcome> {
+export function globalInstallOf(argv1: string | undefined, opts: LocateOptions = {}): CliInstall | null {
+  if (argv1 === undefined || argv1 === "") return null;
+  const platform = opts.platform ?? process.platform;
+  const realpath = opts.realpath ?? ((x: string) => realpathSync(x));
+  const isFile = opts.isFile ?? fileExists;
+  const p = platform === "win32" ? win32 : posix;
+  let real: string;
+  try {
+    real = realpath(argv1);
+  } catch {
+    return null;
+  }
+  const bin = p.dirname(real);
+  const pkg = p.dirname(bin);
+  const modules = p.dirname(pkg);
+  const same = (a: string, b: string): boolean => (platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+  if (!same(p.basename(real), `${CLI_NAME}.js`) || !same(p.basename(bin), "bin") || !same(p.basename(pkg), CLI_NAME)) return null;
+  if (!same(p.basename(modules), "node_modules")) return null;
+  let prefix: string;
+  if (platform === "win32") {
+    prefix = p.dirname(modules);
+    if (!isFile(p.join(prefix, `${CLI_NAME}.cmd`))) return null;
+  } else {
+    const lib = p.dirname(modules);
+    if (p.basename(lib) !== "lib") return null;
+    prefix = p.dirname(lib);
+  }
+  return { prefix, entry: cliEntryFor(prefix, platform) };
+}
+
+/** npm's configured global prefix (`npm prefix -g`, from HOME, node options off), or null when it can't be read. */
+export async function npmGlobalPrefix(): Promise<string | null> {
+  const res = await runCommand("npm", ["prefix", "-g"], { cwd: homeDir(), env: { ...NPM_ENV }, timeoutMs: NPM_PREFIX_TIMEOUT_MS });
+  if (res.code !== 0 || res.timedOut) return null;
+  const line = res.stdout.trim().split("\n")[0]?.trim() ?? "";
+  return line === "" ? null : line;
+}
+
+function samePath(a: string, b: string): boolean {
+  const norm = (x: string): string => {
+    try {
+      return realpathSync(x);
+    } catch {
+      return resolve(x);
+    }
+  };
+  const x = norm(a);
+  const y = norm(b);
+  return process.platform === "win32" ? x.toLowerCase() === y.toLowerCase() : x === y;
+}
+
+export type CliInstallOutcome =
+  | { ok: true }
+  | { ok: false; eacces: boolean; timedOut: boolean; notFound: boolean };
+
+/**
+ * `npm install -g jubarteai@<version>` into `prefix`, the prefix the running CLI was installed under: when that is
+ * not npm's configured global prefix (the `--prefix "$HOME/.local"` fallback of the install shim), `--prefix
+ * <prefix>` is passed, so the copy that runs is the one updated (and a fallback install doesn't hit EACCES on every
+ * run). A failed `npm prefix -g` lookup passes `--prefix` too: naming the prefix is always right. Through runCommand
+ * (argument array, no shell, childEnv: no key), from the home folder, 180 s. Never throws; npm's output is only
+ * searched for a permission code, never printed (it can carry paths).
+ */
+export async function installCliVersion(version: string, prefix: string): Promise<CliInstallOutcome> {
   if (!isSemver(version)) return { ok: false, eacces: false, timedOut: false, notFound: false };
-  const res = await runCommand("npm", ["install", "-g", `jubarteai@${version}`], {
+  const configured = await npmGlobalPrefix();
+  const prefixArgs = configured !== null && samePath(configured, prefix) ? [] : ["--prefix", prefix];
+  const res = await runCommand("npm", ["install", "-g", ...prefixArgs, `jubarteai@${version}`], {
     cwd: homeDir(),
     env: { ...NPM_ENV },
     timeoutMs: CLI_INSTALL_TIMEOUT_MS,
@@ -173,31 +269,7 @@ export async function installCliVersion(version: string): Promise<CliInstallOutc
   return { ok: false, eacces: PERMISSION_CODES.test(`${res.stderr}\n${res.stdout}`), timedOut: res.timedOut, notFound: res.notFound };
 }
 
-export type ReexecOutcome = { started: true; code: number } | { started: false; reason: "not-found" | "unsafe-shim" | "spawn-failed" };
-
-function probe(env: NodeJS.ProcessEnv): Probe {
-  return {
-    platform: process.platform,
-    env,
-    execPath: process.execPath,
-    isFile: (p) => {
-      try {
-        return statSync(p).isFile();
-      } catch {
-        return false;
-      }
-    },
-    isExecutable: (p) => {
-      try {
-        if (!statSync(p).isFile()) return false;
-        accessSync(p, constants.X_OK);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-  };
-}
+export type ReexecOutcome = { started: true; code: number } | { started: false; reason: "not-found" | "spawn-failed" };
 
 /** Exit code of a child that ended on a signal, as a shell reports it (128 + the signal number). */
 function signalCode(signal: NodeJS.Signals | null): number {
@@ -207,18 +279,19 @@ function signalCode(signal: NodeJS.Signals | null): number {
 }
 
 /**
- * Runs the `jubarteai` now on PATH (the one npm just installed) with `args`, inheriting the terminal, and resolves
- * with its exit code. The environment is childEnv() (never the key). While it runs, SIGINT and SIGTERM don't end
- * this process: Ctrl-C reaches the child through the terminal, and a SIGTERM is passed on to it.
+ * Runs `node <entry> <args>` — `entry` is the bin script npm just replaced in place under the running install's
+ * prefix, never whatever `jubarteai` comes first on PATH (that can be another, stale copy) — with this process's own
+ * Node, inheriting the terminal, and resolves with its exit code. The environment is childEnv() (never the key).
+ * While it runs, SIGINT and SIGTERM don't end this process: Ctrl-C reaches the child through the terminal, and a
+ * SIGTERM is passed on to it.
  */
-export async function reexecCli(args: string[]): Promise<ReexecOutcome> {
+export async function reexecCli(entry: string, args: string[]): Promise<ReexecOutcome> {
+  if (!fileExists(entry)) return { started: false, reason: "not-found" };
   const env = childEnv();
-  const invocation = resolveInvocation(CLI_NAME, args, probe(env));
-  if (!invocation.ok) return { started: false, reason: invocation.reason };
   return new Promise<ReexecOutcome>((done) => {
     let child: ChildProcess;
     try {
-      child = spawn(invocation.file, invocation.args, { env, stdio: "inherit", shell: false, windowsHide: false });
+      child = spawn(process.execPath, [entry, ...args], { env, stdio: "inherit", shell: false, windowsHide: false });
     } catch {
       done({ started: false, reason: "spawn-failed" });
       return;
