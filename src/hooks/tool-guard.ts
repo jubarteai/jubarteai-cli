@@ -7,7 +7,8 @@
 // blocked", whatever was approved. So this hook answers a deny for a shell tool call whose command names one of the
 // five, and `{}` (no decision: the normal permission flow) for everything else. It never answers "allow".
 //
-// It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen. Quoting is undone
+// It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen, nor a glob that
+// doesn't start with the literal name (`npx ./*.tgz login`, `/opt/homebrew/bin/jubartea? login`; spec I6). Quoting is undone
 // before matching, so `jubarteai "login"`, `j"ubarteai" login`, `jubarteai \login`, `jubarteai $'login'` and PowerShell's
 // ``jubarteai l`ogin`` match, and the program may follow any shell separator or close a lookup, so chained, `$(…)`,
 // backtick, path, `$(command -v jubarteai) login` and `(Get-Command jubarteai) login` forms match too. Matching errs
@@ -24,12 +25,13 @@
 // that itself names the package (`npx jubarteai@https://registry.npmjs.org/jubarteai/-/jubarteai-1.0.0.tgz login`,
 // `--prefix=../jubarteai-cli`) is one word and can't hide the command after it. The package's `npm pack` tarball is the
 // program too (`npx ./jubarteai-0.1.0.tgz login`), and a redirection between the program and its command is skipped
-// (`jubarteai 2>/dev/null login`). The work is bounded: JSON nested in a large argument past a character budget, or
-// nested too deep, is denied as too large to check rather than scanned level after level (review round 9).
+// (`jubarteai 2>/dev/null login`). The work is bounded: arguments past a scan budget (each string's characters plus a
+// fixed cost per value walked and per JSON parse attempt) or nested too deep are denied as too large to check rather
+// than scanned level after level or string after string (review rounds 9 and 11).
 //
 // Pure: no network, no file reads, no binding lookup. It runs in every repo, bound or not, because login and logout
 // change user-level credentials (the stated exception to I7's bound-repo rule).
-import { GUARD_SCAN_MAX_CHARS, GUARD_SCAN_MAX_DEPTH } from "../constants.js";
+import { GUARD_SCAN_BUDGET, GUARD_SCAN_MAX_DEPTH, GUARD_SCAN_PARSE_COST, GUARD_SCAN_VALUE_COST } from "../constants.js";
 import { AGENT_COMMANDS, PERSON_COMMANDS } from "../harness/agent-commands.js";
 
 /** The `hook` event name of the guard: `jubarteai hook pre-tool-use --harness vscode`. Not a session event. */
@@ -90,7 +92,8 @@ const PROGRAM_WORD = /(?:^|[<>{}$=/\\])jubarteai(?:\.(?:cmd|exe|ps1|js|mjs))?(?:
  * word of its own (review R-S2, round 9). A glob in place of the version (`npx ./jubarteai-*.tgz login`) is the
  * program too, since bash expands it before npx starts (review R-S2, round 10). Tested on the word's last segment
  * (after `:`, a path separator or a redirection/brace/`$`/`=` character), so `jubarteai-cli-0.1.0.tgz` and
- * `my-jubarteai-1.0.0.tgz` are not the program.
+ * `my-jubarteai-1.0.0.tgz` are not the program. A glob that doesn't start with the literal name (`./*.tgz`,
+ * `./jubarte?i-0.1.0.tgz`) is not seen; spec I6 records it rather than widening the match (review R-S2, round 11).
  */
 const TARBALL_SEGMENT = /^jubarteai(?:-[\d*?[]|[*?[]).*\.tgz$/i;
 
@@ -194,10 +197,20 @@ export function personCommandIn(text: string): string | null {
   return null;
 }
 
-/** The strings collected from tool arguments for scanning, and how many characters were read to collect them. */
+/** The strings collected from tool arguments for scanning, and what collecting them cost (GUARD_SCAN_BUDGET's units). */
 interface Collected {
   strings: string[];
-  chars: number;
+  cost: number;
+}
+
+/**
+ * Whether a trimmed string could parse as a JSON object or array: it starts and ends with a matching bracket. Anything
+ * else would only throw, and a thrown exception is the costliest step of a parse attempt (review R-S1, round 11).
+ */
+function looksLikeJsonContainer(trimmed: string): boolean {
+  const first = trimmed.charAt(0);
+  const last = trimmed.charAt(trimmed.length - 1);
+  return (first === "[" && last === "]") || (first === "{" && last === "}");
 }
 
 /**
@@ -207,17 +220,22 @@ interface Collected {
  * strings, and re-reads `$(…)` or a backtick across JSON string boundaries, so `["$(npm exec jubarteai --cache ", " login)"]`
  * runs `login` although no single string holds it (review R-S1, round 10). The top level is the arguments themselves
  * (Copilot CLI's `toolArgs` JSON string), the runtime's wrapper rather than anything a shell runs, so it is only parsed.
- * Every string read counts toward `maxChars` once, and false means the arguments go past it or nest deeper than
- * GUARD_SCAN_MAX_DEPTH: JSON nested level after level inside a large argument would otherwise multiply the work into
- * the hook's timeout, which fails open, and a level never walked could hold the command (review R-S1, round 9).
+ * Every value walked costs GUARD_SCAN_VALUE_COST, every string its length on top, and every parse attempt
+ * GUARD_SCAN_PARSE_COST; false means the arguments cost more than `budget` or nest deeper than GUARD_SCAN_MAX_DEPTH.
+ * JSON nested level after level inside a large argument, or millions of tiny strings, would otherwise push the work into
+ * the hook's timeout, which fails open, and a value never walked could hold the command (review R-S1, rounds 9 and 11).
+ * The cost is charged before the work it stands for, so a payload over budget is refused after at most a budget's work.
  */
-function collectStrings(value: unknown, into: Collected, maxChars: number, depth = 0): boolean {
+function collectStrings(value: unknown, into: Collected, budget: number, depth = 0): boolean {
   if (depth > GUARD_SCAN_MAX_DEPTH) return false;
+  into.cost += GUARD_SCAN_VALUE_COST;
   if (typeof value === "string") {
-    into.chars += value.length;
-    if (into.chars > maxChars) return false;
+    into.cost += value.length;
+    if (into.cost > budget) return false;
     const trimmed = value.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    if (looksLikeJsonContainer(trimmed)) {
+      into.cost += GUARD_SCAN_PARSE_COST;
+      if (into.cost > budget) return false;
       let parsed: unknown;
       try {
         parsed = JSON.parse(trimmed);
@@ -226,15 +244,16 @@ function collectStrings(value: unknown, into: Collected, maxChars: number, depth
       }
       if (parsed !== null && typeof parsed === "object") {
         if (depth > 0) into.strings.push(value);
-        return collectStrings(parsed, into, maxChars, depth + 1);
+        return collectStrings(parsed, into, budget, depth + 1);
       }
     }
     into.strings.push(value);
     return true;
   }
+  if (into.cost > budget) return false;
   if (value === null || typeof value !== "object") return true;
-  if (Array.isArray(value)) return value.every((item) => collectStrings(item, into, maxChars, depth + 1));
-  return Object.entries(value).every(([key, item]) => collectStrings(key, into, maxChars, depth + 1) && collectStrings(item, into, maxChars, depth + 1));
+  if (Array.isArray(value)) return value.every((item) => collectStrings(item, into, budget, depth + 1));
+  return Object.entries(value).every(([key, item]) => collectStrings(key, into, budget, depth + 1) && collectStrings(item, into, budget, depth + 1));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -253,10 +272,26 @@ function argsObject(args: unknown): Record<string, unknown> | null {
   }
 }
 
-/** Whether the call runs a shell command: a known shell tool name, or arguments with a string `command`. */
-function isShellCall(toolName: unknown, args: unknown): boolean {
+/** Whether the call runs a shell command: a known shell tool name, or arguments (`argsObject`'s) with a string `command`. */
+function isShellCall(toolName: unknown, parsedArgs: Record<string, unknown> | null): boolean {
   if (typeof toolName === "string" && SHELL_TOOL_NAMES.includes(toolName.toLowerCase())) return true;
-  return typeof argsObject(args)?.["command"] === "string";
+  return typeof parsedArgs?.["command"] === "string";
+}
+
+/**
+ * The strings in the tool arguments, or null past the scan budget or nesting cap. camelCase `toolArgs` sent as a JSON
+ * string was already parsed by argsObject, so it is charged as collectStrings would charge it (the string and one parse
+ * attempt) and its object walked one level down, rather than parsed a second time.
+ */
+function argumentStrings(args: unknown, parsedArgs: Record<string, unknown> | null, budget: number): string[] | null {
+  const collected: Collected = { strings: [], cost: 0 };
+  if (typeof args === "string" && parsedArgs !== null) {
+    collected.cost = GUARD_SCAN_VALUE_COST + args.length + GUARD_SCAN_PARSE_COST;
+    if (collected.cost > budget || !collectStrings(parsedArgs, collected, budget, 1)) return null;
+  } else if (!collectStrings(args, collected, budget)) {
+    return null;
+  }
+  return collected.strings;
 }
 
 function deny(command: string): ToolGuardOutput {
@@ -283,11 +318,12 @@ const TOO_LARGE: ToolGuardOutput = Object.freeze({
  * `tooLarge` means stdin went past the guard's read cap (GUARD_INPUT_MAX_BYTES, far beyond what a model emits as one
  * tool call): the unread rest could hold a person command anywhere, so the call is denied rather than scanned in part
  * (review R-S14). Below the cap the whole payload is read and parsed, however the command is padded. A shell call whose
- * arguments would take more than `maxScanChars` characters of scanning (JSON nested in a large argument), or nest
- * deeper than GUARD_SCAN_MAX_DEPTH, is denied the same way, so the scan stays bounded (review R-S1, round 9). Anything
+ * arguments cost more than `scanBudget` to scan (GUARD_SCAN_BUDGET: characters plus a fixed cost per value and per
+ * JSON parse attempt), or nest deeper than GUARD_SCAN_MAX_DEPTH, is denied the same way, so the scan stays bounded
+ * (review R-S1, rounds 9 and 11). Anything
  * unparsable or unrecognised is `{}`: the guard never blocks a call it can read and finds nothing in.
  */
-export function toolGuardDecision(raw: string, tooLarge = false, maxScanChars = GUARD_SCAN_MAX_CHARS): ToolGuardOutput {
+export function toolGuardDecision(raw: string, tooLarge = false, scanBudget = GUARD_SCAN_BUDGET): ToolGuardOutput {
   if (tooLarge) return TOO_LARGE;
   let payload: unknown;
   try {
@@ -298,11 +334,12 @@ export function toolGuardDecision(raw: string, tooLarge = false, maxScanChars = 
   if (!isRecord(payload)) return {};
   const toolName = payload["toolName"] ?? payload["tool_name"];
   const args = payload["toolArgs"] ?? payload["tool_input"];
-  if (!isShellCall(toolName, args)) return {};
+  const parsedArgs = argsObject(args);
+  if (!isShellCall(toolName, parsedArgs)) return {};
   try {
-    const collected: Collected = { strings: [], chars: 0 };
-    if (!collectStrings(args, collected, maxScanChars)) return TOO_LARGE;
-    for (const text of collected.strings) {
+    const strings = argumentStrings(args, parsedArgs, scanBudget);
+    if (strings === null) return TOO_LARGE;
+    for (const text of strings) {
       const command = personCommandIn(text);
       if (command !== null) return deny(command);
     }

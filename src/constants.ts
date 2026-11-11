@@ -65,13 +65,30 @@ export const ARG_INPUT_MAX_BYTES = 1024 * 1024;
 export const GUARD_INPUT_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
- * Most characters the guard scans for one payload: every string collected from the tool arguments, a JSON-looking
- * string and each string parsed out of it counted separately. Twice the read cap covers the Copilot runtime's own
- * nesting (`toolArgs` is a JSON string holding `command`); JSON nested deeper than that inside a large argument would
- * multiply the scan into the hook's timeout, which fails open, so past this budget the call is denied as too large to
- * check (review R-S1, round 9). Bounds the scan at about a second on a laptop.
+ * The guard's scan budget for one payload, in characters: every string collected from the tool arguments counts its
+ * length (a JSON-looking string and each string parsed out of it separately), and every value walked and every JSON
+ * parse attempt counts a fixed cost on top (GUARD_SCAN_VALUE_COST, GUARD_SCAN_PARSE_COST), since the work per string is
+ * not only its characters. Twice the read cap covers the Copilot runtime's own nesting (`toolArgs` is a JSON string
+ * holding `command`); JSON nested deeper than that inside a large argument, or millions of tiny strings, would otherwise
+ * push the scan into the hook's timeout, which fails open, so past this budget the call is denied as too large to check
+ * (review R-S1, rounds 9 and 11).
  */
-export const GUARD_SCAN_MAX_CHARS = 2 * GUARD_INPUT_MAX_BYTES;
+export const GUARD_SCAN_BUDGET = 2 * GUARD_INPUT_MAX_BYTES;
+
+/**
+ * What every value the guard walks costs in GUARD_SCAN_BUDGET on top of a string's own length: an array, an object, a
+ * key, a number or a string. A string's fixed cost (its readings and their scans) is about a microsecond whatever its
+ * length, so this caps a payload at about half a million values, far beyond any tool call a model emits (review R-S1,
+ * round 11).
+ */
+export const GUARD_SCAN_VALUE_COST = 64;
+
+/**
+ * What every JSON.parse attempt on a JSON-looking string costs in GUARD_SCAN_BUDGET on top of the string: a failed parse
+ * throws, and an exception costs a few microseconds, so a payload of tiny invalid JSON strings (`"[]]"`) is capped at
+ * about a hundred thousand attempts (review R-S1, round 11).
+ */
+export const GUARD_SCAN_PARSE_COST = 256;
 
 /** Deepest nesting of arrays, objects and JSON-in-strings the guard walks; deeper arguments are denied, not skipped. */
 export const GUARD_SCAN_MAX_DEPTH = 20;

@@ -111,6 +111,15 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
     expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "jubarteai login" } }))).toBe(true);
   });
 
+  it("toolArgs as a JSON string, parsed once: padded with whitespace, an array, or naming the shell only by its command", () => {
+    expect(denied(JSON.stringify({ toolName: "bash", toolArgs: ` \n${JSON.stringify({ command: "jubarteai login" })}\t ` }))).toBe(true);
+    expect(denied(JSON.stringify({ toolName: "bash", toolArgs: JSON.stringify(["echo hi", "jubarteai logout"]) }))).toBe(true);
+    expect(denied(JSON.stringify({ toolName: "someNewShell", toolArgs: JSON.stringify({ command: "jubarteai link" }) }))).toBe(true);
+    expect(toolGuardDecision(JSON.stringify({ toolName: "someNewShell", toolArgs: JSON.stringify({ command: "jubarteai inbox" }) }))).toEqual({});
+    // The top level is the runtime's wrapper, only parsed: a person command split across its strings is not run by a shell.
+    expect(toolGuardDecision(JSON.stringify({ toolName: "bash", toolArgs: JSON.stringify({ command: "echo $(npm exec jubarteai --cache ", description: " login)" }) }))).toEqual({});
+  });
+
   it("reads object keys and JSON nested in a string, unescaped, and the JSON's raw text too (a shell runs that text)", () => {
     expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "echo", "jubarteai login": 1 } }))).toBe(true);
     expect(denied(camel('["echo hi", "jubarteai \\u006cogin"]'))).toBe(true);
@@ -164,12 +173,52 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
   });
 
-  it("a large JSON-shaped command: its raw text and its strings scanned, decided quickly (review R-S1, round 10)", () => {
-    const items = Array.from({ length: 400_000 }, () => "a b c d e");
-    const line = JSON.stringify([...items, "$(npm exec jubarteai --cache ", " login)"]);
+  it("a large JSON-shaped command with no person command: its raw text and every string scanned, decided quickly (review R-S3, round 11)", () => {
+    // Under the scan budget, so every one of the 250k strings is collected and scanned before the answer, which is {}.
+    const items = Array.from({ length: 250_000 }, () => "a b c d e");
     let out: unknown;
-    expect(time(() => (out = toolGuardDecision(camel(line))))).toBeLessThan(3_000);
-    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+    expect(time(() => (out = toolGuardDecision(camel(JSON.stringify(items)))))).toBeLessThan(3_000);
+    expect(out).toEqual({});
+    // The same array with the command split across its last two strings is denied by the raw text (review R-S1, round 10).
+    expect(toolGuardDecision(camel(JSON.stringify([...items, "$(npm exec jubarteai --cache ", " login)"])))).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+  });
+
+  describe("millions of tiny strings: refused as too large to check, quickly, not scanned into the timeout (review R-S1, round 11)", () => {
+    /** The largest payload `wrap` builds from `head` plus copies of `item` that stays under the 16 MiB read cap. */
+    const fill = (head: unknown[], item: unknown, wrap: (items: unknown[]) => string): string => {
+      const base = wrap(head).length;
+      const per = wrap([...head, item]).length - base;
+      return wrap([...head, ...Array.from({ length: Math.floor((16 * 1024 * 1024 - 1024 - base) / per) }, () => item)]);
+    };
+    const vscode = (items: unknown[]): string => JSON.stringify({ tool_name: "run_in_terminal", tool_input: { command: JSON.stringify(items) } });
+    const argv = (items: unknown[]): string => JSON.stringify({ tool_name: "bash", tool_input: { command: "echo", args: items } });
+    const copilot = (items: unknown[]): string => JSON.stringify({ toolName: "bash", toolArgs: JSON.stringify({ command: JSON.stringify(items) }) });
+    const shapes: ReadonlyArray<[string, () => string]> = [
+      ["VS Code command, a JSON array of \"[\"", () => fill(["$(jubarteai login)"], "[", vscode)],
+      ["the same strings in a separate argument array", () => fill(["$(jubarteai login)"], "[", argv)],
+      ["Copilot camelCase, a JSON array of \"[\"", () => fill(["echo"], "[", copilot)],
+      ["a plain array of empty strings", () => fill(["echo"], "", argv)],
+      ["invalid JSON strings that start and end with a bracket", () => fill(["echo"], "[]]", argv)],
+      ["empty arrays", () => fill(["echo"], [], argv)],
+    ];
+    for (const [name, build] of shapes) {
+      it(name, () => {
+        const raw = build();
+        expect(raw.length).toBeGreaterThan(15 * 1024 * 1024);
+        expect(raw.length).toBeLessThan(16 * 1024 * 1024);
+        let out: unknown;
+        expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(2_000);
+        expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+      }, 20_000);
+    }
+
+    it("just under the budget, the slowest per-string shape still answers well inside the timeout", () => {
+      // About a hundred thousand failed parse attempts, the costliest step per string, and no person command: {}.
+      const raw = argv(["echo", ...Array.from({ length: 100_000 }, () => "[]]")]);
+      let out: unknown;
+      expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(3_000);
+      expect(out).toEqual({});
+    });
   });
 
   it("nested JSON past the scan budget is denied as too large to check, without scanning it (review R-S1, round 9)", () => {
@@ -238,6 +287,17 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
     ]) {
       expect(toolGuardDecision(camel(line)), line).toEqual({});
     }
+  });
+
+  it("the scan budget counts a fixed cost per value and per JSON parse attempt, not only characters (review R-S1, round 11)", () => {
+    const argv = (items: string[]): string => JSON.stringify({ tool_name: "bash", tool_input: { command: "echo", args: items } });
+    const tooLarge = { permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") };
+    // A thousand empty strings: a few characters, but a thousand values.
+    expect(toolGuardDecision(argv(Array.from({ length: 1000 }, () => "")))).toEqual({});
+    expect(toolGuardDecision(argv(Array.from({ length: 1000 }, () => "")), false, 32_000)).toEqual(tooLarge);
+    // A hundred strings each: the same characters, but "[]]" is a parse attempt and "abc" is not.
+    expect(toolGuardDecision(argv(Array.from({ length: 100 }, () => "abc")), false, 20_000)).toEqual({});
+    expect(toolGuardDecision(argv(Array.from({ length: 100 }, () => "[]]")), false, 20_000)).toEqual(tooLarge);
   });
 
   it("the scan budget and depth: a shell call it can't scan whole is denied, a non-shell one is left alone", () => {
