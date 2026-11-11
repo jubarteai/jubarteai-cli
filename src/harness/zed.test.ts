@@ -1,0 +1,172 @@
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { zedAdapter } from "./zed.js";
+import type { InitCtx, ManualInstructions } from "./types.js";
+
+let home: string;
+let savedHome: string | undefined;
+
+beforeEach(() => {
+  home = realpathSync(mkdtempSync(join(tmpdir(), "jubarteai-zed-")));
+  savedHome = process.env.HOME;
+  process.env.HOME = home;
+  vi.spyOn(process, "cwd").mockReturnValue(home);
+});
+
+afterEach(() => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  vi.restoreAllMocks();
+  rmSync(home, { recursive: true, force: true });
+});
+
+const ctx = (over: Partial<InitCtx> = {}): InitCtx => ({ home, env: {}, platform: "linux", which: () => null, projectRoot: null, cliCommand: "jubarteai", ...over });
+const settings = (): string => join(home, ".config", "zed", "settings.json");
+const put = (file: string, text: string): void => {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, text, { mode: 0o600 });
+};
+const read = (file: string): string => readFileSync(file, "utf8");
+const readJson = (file: string): Record<string, unknown> => JSON.parse(read(file)) as Record<string, unknown>;
+const isManual = (v: unknown): v is ManualInstructions => typeof v === "object" && v !== null && "kind" in v && v.kind === "manual";
+const isStep = (v: unknown): v is PlanStep => typeof v === "object" && v !== null && "apply" in v;
+
+async function applyAll(steps: Array<PlanStep | ManualInstructions>): Promise<StepResult[]> {
+  const results: StepResult[] = [];
+  for (const step of steps) if (!isManual(step)) results.push(await step.apply());
+  return results;
+}
+
+describe("zed adapter facts", () => {
+  it("declares the verified cells", () => {
+    expect(zedAdapter.id).toBe("zed");
+    expect(zedAdapter.skillAgent).toBe("zed");
+    expect(zedAdapter.sessionVar).toBeNull();
+    expect(zedAdapter.promptInjection).toBe(false);
+  });
+
+  it("detects ~/.config/zed, $XDG_CONFIG_HOME/zed on Linux and the zed binary, and nothing else", async () => {
+    expect(await zedAdapter.detect(ctx())).toBe(false);
+    expect(await zedAdapter.detect(ctx({ which: (c) => (c === "zed" ? "/usr/bin/zed" : null) }))).toBe(true);
+    mkdirSync(join(home, ".config", "zed"), { recursive: true });
+    expect(await zedAdapter.detect(ctx())).toBe(true);
+    const xdg = join(home, "xdg");
+    expect(await zedAdapter.detect(ctx({ env: { XDG_CONFIG_HOME: xdg } }))).toBe(false);
+    mkdirSync(join(xdg, "zed"), { recursive: true });
+    expect(await zedAdapter.detect(ctx({ env: { XDG_CONFIG_HOME: xdg } }))).toBe(true);
+    // macOS ignores XDG_CONFIG_HOME, as install.sh's zed_config_dir does.
+    expect(await zedAdapter.detect(ctx({ platform: "darwin", env: { XDG_CONFIG_HOME: join(home, "nowhere") } }))).toBe(true);
+  });
+});
+
+describe("zed permission", () => {
+  it("adds the terminal always_allow pattern, keeping other settings and rules, and a second run changes nothing", async () => {
+    put(
+      settings(),
+      JSON.stringify({ theme: "One Dark", agent: { default_model: { provider: "x" }, tool_permissions: { default: "confirm", tools: { terminal: { always_allow: [{ pattern: "^git\\b" }], always_deny: [{ pattern: "rm" }] }, edit_file: { default: "allow" } } } } }, null, 2) + "\n",
+    );
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect(step.sensitive).toBe(true);
+    expect((await step.apply()).status).toBe("configured");
+    expect(readJson(settings())).toEqual({
+      theme: "One Dark",
+      agent: {
+        default_model: { provider: "x" },
+        tool_permissions: {
+          default: "confirm",
+          tools: { terminal: { always_allow: [{ pattern: "^git\\b" }, { pattern: "^jubarteai\\b" }], always_deny: [{ pattern: "rm" }] }, edit_file: { default: "allow" } },
+        },
+      },
+    });
+    const before = read(settings());
+    expect((await step.apply()).status).toBe("already configured");
+    expect(read(settings())).toBe(before);
+  });
+
+  it("builds the nested path when the settings file is new", async () => {
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    await step.apply();
+    expect(readJson(settings())).toEqual({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: "^jubarteai\\b" }] } } } } });
+  });
+
+  it("refuses a settings.json with comments: prints the exact entry and leaves the file as it was", async () => {
+    const text = '{\n  // zed\n  "theme": "One Dark",\n}\n';
+    put(settings(), text);
+    const result = await zedAdapter.permission(ctx());
+    expect(isManual(result)).toBe(true);
+    expect(isManual(result) && result.lines.join("\n")).toContain('"pattern": "^jubarteai\\\\b"');
+    expect(read(settings())).toBe(text);
+  });
+
+  it("does not merge into an always_allow that is not a list", async () => {
+    const text = JSON.stringify({ agent: { tool_permissions: { tools: { terminal: { always_allow: "all" } } } } });
+    put(settings(), text);
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect((await step.apply()).status).toBe("skipped");
+    expect(read(settings())).toBe(text);
+  });
+});
+
+describe("zed hooks and inspect", () => {
+  it("prints instructions naming the missing hook API (D25)", async () => {
+    const hooks = await zedAdapter.hooks(ctx());
+    expect(isManual(hooks) && hooks.reason).toContain("no hook API");
+    expect(isManual(hooks) && hooks.lines.join("\n")).toContain("--agent");
+  });
+
+  it("reports missing, then configured, and the MCP entries that remain", async () => {
+    put(settings(), JSON.stringify({ context_servers: { jubarteai: {} } }));
+    const before = await zedAdapter.inspect(ctx());
+    expect(before).toMatchObject({ permission: "missing", hooks: "manual", mcpEntries: [settings()] });
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    await step.apply();
+    expect((await zedAdapter.inspect(ctx())).permission).toBe("configured");
+  });
+
+  it("reports a JSONC settings file as manual", async () => {
+    put(settings(), "{ // c\n}");
+    expect((await zedAdapter.inspect(ctx())).permission).toBe("manual");
+  });
+});
+
+describe("zed MCP cleanup", () => {
+  const scope = (over: Record<string, unknown> = {}) => ({ home, projectRoot: null, platform: "linux" as const, env: {}, startDir: home, ...over });
+
+  it("removes only context_servers.jubarteai from the user and the project settings", async () => {
+    const project = join(home, "work", "app");
+    put(settings(), JSON.stringify({ theme: "x", context_servers: { jubarteai: { url: "u" }, other: { command: "c" } } }, null, 2) + "\n");
+    put(join(project, ".zed", "settings.json"), JSON.stringify({ context_servers: { jubarteai: {} }, tab_size: 2 }, null, 2) + "\n");
+    const steps = await zedAdapter.mcpCleanup(scope({ projectRoot: project, startDir: project }));
+    expect((await applyAll(steps)).map((r) => r.status)).toEqual(["configured", "configured"]);
+    expect(readJson(settings())).toEqual({ theme: "x", context_servers: { other: { command: "c" } } });
+    expect(readJson(join(project, ".zed", "settings.json"))).toEqual({ context_servers: {}, tab_size: 2 });
+    expect(await zedAdapter.mcpCleanup(scope({ projectRoot: project, startDir: project }))).toEqual([]);
+  });
+
+  it("reports a settings.json with comments and leaves it byte-identical", async () => {
+    const text = '{\n  // zed\n  "context_servers": { "jubarteai": {} }\n}\n';
+    put(settings(), text);
+    const steps = await zedAdapter.mcpCleanup(scope());
+    expect(steps).toHaveLength(1);
+    expect(isManual(steps[0]) && steps[0].lines[0]).toContain("remove it by hand");
+    expect(read(settings())).toBe(text);
+  });
+
+  it("only reports .zed/settings.json when run from the home directory", async () => {
+    const sub = join(home, "scratch");
+    const file = join(sub, ".zed", "settings.json");
+    const text = JSON.stringify({ context_servers: { jubarteai: {} } });
+    put(file, text);
+    const steps = await zedAdapter.mcpCleanup(scope({ startDir: sub }));
+    expect(steps).toHaveLength(1);
+    expect(isManual(steps[0])).toBe(true);
+    expect(read(file)).toBe(text);
+  });
+});
