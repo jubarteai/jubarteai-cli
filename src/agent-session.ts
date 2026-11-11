@@ -4,12 +4,19 @@ import { UsageError } from "./errors.js";
 // person at the keyboard. A coding agent's shell commands are often pre-approved (`Bash(jubarteai *)`), so an agent —
 // or a prompt-injected one — can type `--yes` or pipe a key just as well as a person can. When the CLI runs inside an
 // agent's shell, those flags therefore stop counting as consent: the commands that change the account or the binding
-// refuse, and applyPlan asks (or skips) every sensitive step instead of applying it on `--yes` (review R-M1).
+// refuse, and applyPlan skips every sensitive step instead of applying it on `--yes` (review R-M1).
+//
+// A terminal on standard input proves nothing: VS Code, Zed and the Cursor IDE run an agent's commands in a real
+// pseudo-terminal, and an agent that can type a command can answer a prompt there too. So an agent variable always marks
+// an agent session, whatever stdin is. The cost is that a person who types `!jubarteai login` inside Claude Code or
+// Gemini CLI is refused too; the refusal tells them to use their own terminal (review round 2, R-M1). VS Code and Zed
+// set no variable the CLI can tell from a person's own terminal in the same editor, so there the protection is the
+// allowlist itself: init never pre-approves login, logout, link, init or update (src/harness/agent-commands.ts).
 
 /**
- * Variables a coding agent sets in the environment of the shell commands it runs. Any one of them, with a standard
- * input that is not a terminal, marks an agent session. A person who sees a false positive runs the command in their
- * own terminal, which is what the refusal asks for anyway.
+ * Variables a coding agent sets in the environment of the shell commands it runs. Any one of them marks an agent
+ * session. A person who sees a false positive runs the command in their own terminal, which is what the refusal asks
+ * for anyway.
  */
 export const AGENT_SESSION_VARS = [
   "CLAUDECODE",
@@ -22,14 +29,8 @@ export const AGENT_SESSION_VARS = [
   "AI_AGENT",
 ] as const;
 
-type Stdin = { isTTY?: boolean };
-
-/**
- * The variable that marks this process as running inside a coding agent's shell, or null. A terminal on standard input
- * means a person typed the command (an agent's shell never has one), so it never counts as an agent session.
- */
-export function agentSessionVar(env: NodeJS.ProcessEnv = process.env, stdin: Stdin = process.stdin): string | null {
-  if (stdin.isTTY === true) return null;
+/** The variable that marks this process as running inside a coding agent's shell, or null. */
+export function agentSessionVar(env: NodeJS.ProcessEnv = process.env): string | null {
   for (const name of AGENT_SESSION_VARS) {
     const value = env[name]?.trim();
     if (value !== undefined && value !== "" && value !== "0" && value.toLowerCase() !== "false") return name;
@@ -45,6 +46,6 @@ export function agentSessionRefusal(command: string): UsageError {
 }
 
 /** Throws the refusal when this process runs inside an agent's shell. */
-export function refuseInAgentSession(command: string, env: NodeJS.ProcessEnv = process.env, stdin: Stdin = process.stdin): void {
-  if (agentSessionVar(env, stdin) !== null) throw agentSessionRefusal(command);
+export function refuseInAgentSession(command: string, env: NodeJS.ProcessEnv = process.env): void {
+  if (agentSessionVar(env) !== null) throw agentSessionRefusal(command);
 }

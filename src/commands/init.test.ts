@@ -499,6 +499,58 @@ describe("init: the binding", () => {
   });
 });
 
+describe("init: moving a bound repo to another workspace (R-S9)", () => {
+  function bindToBeta(): void {
+    storeSeats();
+    mkdirSync(join(sb.repo, ".jubarteai"));
+    writeFileSync(join(sb.repo, ".jubarteai", "config.json"), JSON.stringify({ version: 1, workspace: { id: BETA.id, slug: "beta" } }));
+    writeFileSync(join(sb.repo, ".jubarteai", "config.local.json"), JSON.stringify({ version: 1, user: { email: "ada@example.com" } }));
+  }
+  const MOVE = /Move this repo from workspace beta to workspace acme/;
+  const ARGS = ["init", "--workspace", "acme", "--no-permissions", "--no-hooks", "--keep-mcp"];
+
+  it("inside an agent's shell, --yes leaves the binding where it is and offers no flag", async () => {
+    bindToBeta();
+    vi.stubEnv("CODEX_THREAD_ID", "thread-1");
+    try {
+      const result = await run([...ARGS, "--yes"]);
+      expect(result.code, result.err).toBe(0);
+      expect(summaryLine(result.err, MOVE)).toContain("needs your approval");
+      expect(summaryLine(result.err, MOVE)).not.toContain("rerun with");
+      expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ workspace: { id: BETA.id, slug: "beta" } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("with no terminal and no --yes it is skipped with the flag that applies it", async () => {
+    bindToBeta();
+    const result = await run(ARGS);
+    expect(summaryLine(result.err, MOVE)).toContain("rerun with --yes");
+    expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ workspace: { slug: "beta" } });
+  });
+
+  it("a person's --yes moves it", async () => {
+    bindToBeta();
+    const result = await run([...ARGS, "--yes"]);
+    expect(result.code, result.err).toBe(0);
+    expect(summaryLine(result.err, MOVE)).toMatch(/: configured$/);
+    expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ workspace: { id: ACME.id, slug: "acme" } });
+  });
+
+  it("a first binding stays a plain step, applied under an agent's --yes", async () => {
+    storeSeats();
+    vi.stubEnv("CODEX_THREAD_ID", "thread-1");
+    try {
+      const result = await run([...ARGS, "--yes"]);
+      expect(result.code, result.err).toBe(0);
+      expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ workspace: { slug: "acme" } });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("init: sensitive steps", () => {
   it("with no terminal, lists them as skipped with the flag that applies them and writes nothing", async () => {
     withEnvKey();

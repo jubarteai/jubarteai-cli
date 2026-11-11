@@ -9,6 +9,7 @@ import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { findMcpEntries, isUnderHome, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
 import type { HarnessId } from "../session/harness-env.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
+import { PERSON_COMMANDS } from "./agent-commands.js";
 
 const ID = "claude-code";
 
@@ -226,7 +227,7 @@ export function editResult(id: string, label: string, result: ReturnType<typeof 
  * them too, letting an agent pass `--yes` or pipe a key on its own (spec I6, review R-M1), so each gets an ask rule:
  * in Claude Code ask beats allow, and the person sees the command before it runs. The tool commands stay pre-approved.
  */
-export const ASK_SUBCOMMANDS = ["login", "logout", "link", "init", "update"] as const;
+export const ASK_SUBCOMMANDS = PERSON_COMMANDS;
 
 type PermissionRules = { allow: string[]; ask: string[] };
 
@@ -234,10 +235,9 @@ function permissionRules(ctx: { cliCommand: string; platform: NodeJS.Platform })
   const tools = ctx.platform === "win32" ? ["Bash", "PowerShell"] : ["Bash"];
   const allow = tools.map((tool) => `${tool}(${ctx.cliCommand} *)`);
   const ask = tools.flatMap((tool) => [
+    // The router refuses a flag before the command name (`jubarteai --yes init` exits 2), so these cover every way to
+    // run one of them; no rule for a leading flag is needed, and `jubarteai --help` stays pre-approved (review R-S8).
     ...ASK_SUBCOMMANDS.flatMap((sub) => [`${tool}(${ctx.cliCommand} ${sub})`, `${tool}(${ctx.cliCommand} ${sub} *)`]),
-    // A global flag may come before the subcommand (`jubarteai --yes init`): nothing documented starts with one, so any
-    // command that does asks first rather than slipping past the rules above.
-    `${tool}(${ctx.cliCommand} -*)`,
   ]);
   return { allow, ask };
 }

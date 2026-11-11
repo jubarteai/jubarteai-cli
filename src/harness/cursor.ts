@@ -1,6 +1,8 @@
 // Cursor adapter (spec §9). Verified cells only:
-//   - permission: the Agent CLI's ~/.cursor/cli-config.json `permissions.allow` `Shell(jubarteai)` (merged, never replaced:
-//     the CLI manages that file). The IDE's shell allowlist is unverified, so it is printed instead (D25).
+//   - permission: none written. Cursor's `Shell(<commandBase>)` rule (CLI: ~/.cursor/cli-config.json permissions.allow) matches
+//     only the program name, so `Shell(jubarteai)` would also pre-approve login, logout, link, init and update, and no
+//     entry can exclude them (spec I6, review R-M1). The person gets printed instructions that say so and approves
+//     jubarteai commands as Cursor asks; the IDE's shell allowlist is unverified anyway (D25).
 //   - hooks: ~/.cursor/hooks.json `sessionStart` / `sessionEnd` only. `beforeSubmitPrompt` has no context output,
 //     so there is no per-prompt hook (promptInjection false).
 //   - MCP cleanup: ~/.cursor/mcp.json and .cursor/mcp.json (`mcpServers.jubarteai`), install.sh's two paths, through
@@ -156,7 +158,9 @@ export function hooksStateOf(states: ReadonlyArray<"exact" | "stale" | "none">):
 
 const HARNESS = "cursor" as const;
 const LABEL = "Cursor";
+/** The one rule Cursor's syntax offers for this program. Never written: it also covers the person commands. */
 const SHELL_ENTRY = "Shell(jubarteai)";
+const PERSON_COMMAND_LIST = "login, logout, link, init and update";
 /** Cursor's hook timeout is in seconds. sessionEnd is fire-and-forget, so it only needs to be quick. */
 const START_TIMEOUT_S = HOOK_REGISTERED_TIMEOUT_S;
 const END_TIMEOUT_S = 3;
@@ -177,12 +181,17 @@ function cliPresent(ctx: DetectEnv): boolean {
   return existsSync(cliConfigPath(ctx.home)) || hasCli(ctx);
 }
 
-function ideAllowlistInstructions(): ManualInstructions {
+/** Printed, never written: what Cursor's program-wide rule would approve, and the two ways forward. */
+function permissionInstructions(): ManualInstructions {
   return manual(
     HARNESS,
-    "Cursor IDE: allow the jubarteai command",
-    ["Open Cursor Settings, find the agent terminal command allowlist and add: jubarteai", "(Cursor documents no settings file for it, so the CLI does not write one)"],
-    "the IDE's shell allowlist is not verified (D25)",
+    "Cursor: approve jubarteai commands as Cursor asks",
+    [
+      `Cursor's allow rule names only the program, so \`${SHELL_ENTRY}\` would also pre-approve ${PERSON_COMMAND_LIST}: the commands that change your saved account, the repo binding and your harness files.`,
+      "The CLI therefore writes no Cursor allow rule. Approve jubarteai commands when Cursor asks (in the IDE and in the Agent CLI).",
+      `If you accept that trade-off, add "${SHELL_ENTRY}" to permissions.allow in ~/.cursor/cli-config.json yourself (the CLI refuses those five commands inside a Cursor agent shell only when CURSOR_AGENT is set).`,
+    ],
+    "Cursor's shell rule cannot exclude subcommands; the person commands stay behind a prompt (spec I6, review R-M1)",
   );
 }
 
@@ -193,20 +202,6 @@ function allowList(doc: Obj): unknown[] | "absent" | "bad" {
   const allow = permissions["allow"];
   if (allow === undefined) return "absent";
   return Array.isArray(allow) ? allow : "bad";
-}
-
-function addPermission(doc: Obj): EditOutcome {
-  const list = allowList(doc);
-  if (list === "bad") return { blocked: "permissions.allow in cli-config.json is not a list; add the entry by hand" };
-  if (list !== "absent") {
-    if (list.includes(SHELL_ENTRY)) return "same";
-    list.push(SHELL_ENTRY);
-    return "changed";
-  }
-  const permissions = isObject(doc["permissions"]) ? doc["permissions"] : {};
-  permissions["allow"] = [SHELL_ENTRY];
-  doc["permissions"] = permissions;
-  return "changed";
 }
 
 function wantedHook(program: string, event: HookEvent, timeoutS: number): Obj {
@@ -252,25 +247,8 @@ export const cursorAdapter: HarnessAdapter = {
     return existsSync(cursorDir(env.home)) || hasCli(env);
   },
 
-  async permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions | null> {
-    if (!cliPresent(ctx)) return ideAllowlistInstructions();
-    const file = cliConfigPath(ctx.home);
-    if (readable(file).status === "unwritable") {
-      return manual(
-        HARNESS,
-        "Cursor CLI: allow the jubarteai command",
-        [`Open ${file} and add "${SHELL_ENTRY}" to permissions.allow:`, `  "permissions": { "allow": ["${SHELL_ENTRY}"] }`, "(merge it into the existing list)"],
-        "cli-config.json has comments or is not plain JSON, so it is not rewritten",
-      );
-    }
-    return jsonEditStep({
-      id: `${HARNESS}:permission`,
-      label: "Cursor CLI: allow the jubarteai command",
-      file,
-      preview: `  permissions.allow += "${SHELL_ENTRY}"`,
-      createIfMissing: true,
-      edit: addPermission,
-    });
+  async permission(): Promise<PlanStep | ManualInstructions | null> {
+    return permissionInstructions();
   },
 
   async hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | null> {
@@ -297,14 +275,14 @@ export const cursorAdapter: HarnessAdapter = {
   },
 
   async inspect(ctx: InitCtx): Promise<AdapterState> {
-    const notes = ["the Cursor IDE's shell allowlist is not verified; add jubarteai to it in Cursor Settings by hand"];
-    let permission: AdapterState["permission"] = "manual";
+    const notes = [`the CLI writes no Cursor allow rule (it would also pre-approve ${PERSON_COMMAND_LIST}); approve jubarteai commands when Cursor asks`];
     if (cliPresent(ctx)) {
       const cli = readable(cliConfigPath(ctx.home));
-      if (cli.status === "missing") permission = "missing";
-      else if (cli.status === "ok") {
+      if (cli.status === "ok") {
         const list = allowList(cli.doc);
-        permission = Array.isArray(list) && list.includes(SHELL_ENTRY) ? "configured" : "missing";
+        if (Array.isArray(list) && list.includes(SHELL_ENTRY)) {
+          notes.push(`${SHELL_ENTRY} is in permissions.allow in cli-config.json, which also pre-approves ${PERSON_COMMAND_LIST} (the CLI refuses them inside a Cursor agent shell only when CURSOR_AGENT is set)`);
+        }
       }
     }
     const hooksFile = readable(hooksPath(ctx.home));
@@ -316,15 +294,10 @@ export const cursorAdapter: HarnessAdapter = {
       hooks = hooksStateOf(EVENTS.map(({ cursor, event, timeoutS }) => flatHookState(isObject(section) ? section[cursor] : undefined, wantedHook(program, event, timeoutS), event, HARNESS)));
     }
     notes.push("Cursor has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill");
-    return { permission, hooks, mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };
+    return { permission: "manual", hooks, mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };
   },
 
   async mcpCleanup(scope: CleanupScope): Promise<Array<PlanStep | ManualInstructions>> {
     return mcpCleanupFor(HARNESS, scope);
-  },
-
-  // The IDE half of the permission cell: the CLI's rule is the step above, the IDE's allowlist can only be printed.
-  async extras(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
-    return cliPresent(ctx) ? [ideAllowlistInstructions()] : [];
   },
 };

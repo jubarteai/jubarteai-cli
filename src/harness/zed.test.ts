@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
+import { agentCommandPattern } from "./agent-commands.js";
 import { zedAdapter } from "./zed.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -40,6 +41,17 @@ async function applyAll(steps: Array<PlanStep | ManualInstructions>): Promise<St
   for (const step of steps) if (!isManual(step)) results.push(await step.apply());
   return results;
 }
+
+const PATTERN = agentCommandPattern();
+const LEGACY = "^jubarteai\\b";
+const AGENT_LINES = ["jubarteai search-knowledge --query x", "jubarteai connect", "jubarteai inbox", "jubarteai --help"];
+const PERSON_LINES = ["jubarteai login --with-token", "jubarteai link --workspace x", "jubarteai init --yes", "jubarteai update", "jubarteai logout", "jubarteai --yes init"];
+const allowList = (): Array<{ pattern: string }> => {
+  const agent = readJson(settings())["agent"] as { tool_permissions: { tools: { terminal: { always_allow: Array<{ pattern: string }> } } } };
+  return agent.tool_permissions.tools.terminal.always_allow;
+};
+/** Zed approves a command when any always_allow pattern matches it. */
+const zedApproves = (line: string): boolean => allowList().some((entry) => new RegExp(entry.pattern).test(line));
 
 describe("zed adapter facts", () => {
   it("declares the verified cells", () => {
@@ -79,7 +91,7 @@ describe("zed permission", () => {
         default_model: { provider: "x" },
         tool_permissions: {
           default: "confirm",
-          tools: { terminal: { always_allow: [{ pattern: "^git\\b" }, { pattern: "^jubarteai\\b" }], always_deny: [{ pattern: "rm" }] }, edit_file: { default: "allow" } },
+          tools: { terminal: { always_allow: [{ pattern: "^git\\b" }, { pattern: PATTERN }], always_deny: [{ pattern: "rm" }] }, edit_file: { default: "allow" } },
         },
       },
     });
@@ -92,7 +104,40 @@ describe("zed permission", () => {
     const step = await zedAdapter.permission(ctx());
     if (!isStep(step)) throw new Error("expected a step");
     await step.apply();
-    expect(readJson(settings())).toEqual({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: "^jubarteai\\b" }] } } } } });
+    expect(readJson(settings())).toEqual({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: PATTERN }] } } } } });
+  });
+
+  it("approves the agent commands and not the person commands, judged from the written pattern, with no lookahead (Rust regex)", async () => {
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    await step.apply();
+    for (const line of AGENT_LINES) expect(zedApproves(line), line).toBe(true);
+    for (const line of PERSON_LINES) expect(zedApproves(line), line).toBe(false);
+    for (const entry of allowList()) {
+      expect(entry.pattern).not.toContain("(?=");
+      expect(entry.pattern).not.toContain("(?!");
+    }
+  });
+
+  it("replaces an earlier ^jubarteai\\b entry in place, keeps every other entry, and a second run changes nothing", async () => {
+    put(settings(), JSON.stringify({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: "^git\\b" }, { pattern: LEGACY }, { pattern: "^ls\\b" }] } } } } }, null, 2) + "\n");
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect(step.preview).toContain("replaced");
+    expect((await step.apply()).status).toBe("configured");
+    expect(allowList()).toEqual([{ pattern: "^git\\b" }, { pattern: PATTERN }, { pattern: "^ls\\b" }]);
+    for (const line of PERSON_LINES) expect(zedApproves(line), line).toBe(false);
+    const before = read(settings());
+    expect((await step.apply()).status).toBe("already configured");
+    expect(read(settings())).toBe(before);
+  });
+
+  it("drops a leftover legacy entry when the new pattern is already there", async () => {
+    put(settings(), JSON.stringify({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: PATTERN }, { pattern: LEGACY }] } } } } }));
+    const step = await zedAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect((await step.apply()).status).toBe("configured");
+    expect(allowList()).toEqual([{ pattern: PATTERN }]);
   });
 
   it("refuses a settings.json with comments: prints the exact entry and leaves the file as it was", async () => {
@@ -100,7 +145,7 @@ describe("zed permission", () => {
     put(settings(), text);
     const result = await zedAdapter.permission(ctx());
     expect(isManual(result)).toBe(true);
-    expect(isManual(result) && result.lines.join("\n")).toContain('"pattern": "^jubarteai\\\\b"');
+    expect(isManual(result) && result.lines.join("\n")).toContain(`"pattern": ${JSON.stringify(PATTERN)}`);
     expect(read(settings())).toBe(text);
   });
 
@@ -129,6 +174,13 @@ describe("zed hooks and inspect", () => {
     if (!isStep(step)) throw new Error("expected a step");
     await step.apply();
     expect((await zedAdapter.inspect(ctx())).permission).toBe("configured");
+  });
+
+  it("is not configured with only the legacy pattern, and says so", async () => {
+    put(settings(), JSON.stringify({ agent: { tool_permissions: { tools: { terminal: { always_allow: [{ pattern: LEGACY }] } } } } }));
+    const state = await zedAdapter.inspect(ctx());
+    expect(state.permission).toBe("missing");
+    expect(state.notes.join("\n")).toContain("login, link, init and update");
   });
 
   it("reports a JSONC settings file as manual", async () => {

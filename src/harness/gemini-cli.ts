@@ -1,5 +1,8 @@
-// Gemini CLI adapter (spec §9). Verified cells only: the `run_shell_command(jubarteai)` allow entry and the
-// SessionStart / BeforeAgent / SessionEnd hooks, both in ~/.gemini/settings.json. The Windows hook shell is
+// Gemini CLI adapter (spec §9). Verified cells only: the `run_shell_command(jubarteai <command>)` allow entries and the
+// SessionStart / BeforeAgent / SessionEnd hooks, both in ~/.gemini/settings.json. The allow list names the agent
+// commands one by one (Gemini matches a shell command by prefix on word boundaries) and never the person commands
+// (login, logout, link, init, update), so an agent can't run those without a prompt (spec I6, review R-M1); the exact
+// bare entry `run_shell_command(jubarteai)` an earlier version wrote is removed. The Windows hook shell is
 // unverified, so there the hooks are printed instructions (D25). install.sh never wrote a Gemini MCP entry,
 // so there is nothing to clean. Every write goes through editJsonFile (I6); the reads here are read-only.
 import { existsSync } from "node:fs";
@@ -7,12 +10,17 @@ import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { AGENT_COMMANDS } from "./agent-commands.js";
 import { hookCommand as commandFor, hooksPreview, inspectCommandHooks, mergeCommandHooks, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "gemini-cli" as const;
 const SETTINGS_FILE = "settings.json";
-const SHELL_TOOL_ENTRY = "run_shell_command(jubarteai)";
+/** One allow entry per agent command; a person command is never listed. */
+const SHELL_TOOL_ENTRIES: readonly string[] = AGENT_COMMANDS.map((command) => `run_shell_command(jubarteai ${command})`);
+/** Written by an earlier unreleased version: it pre-approves every jubarteai command, the person commands included. */
+const LEGACY_SHELL_TOOL_ENTRY = "run_shell_command(jubarteai)";
+const PERMISSION_LABEL = "Gemini CLI: allow the jubarteai agent commands";
 const HOOK_NAME = "jubarteai";
 /** Gemini's `timeout` is in milliseconds. session-end is not awaited by Gemini, so it only needs to be quick. */
 const REGISTERED_TIMEOUT_MS = HOOK_REGISTERED_TIMEOUT_S * 1000;
@@ -94,20 +102,38 @@ function allowedList(doc: Obj): unknown[] | "absent" | "bad" {
   return Array.isArray(allowed) ? allowed : "bad";
 }
 
-/** Add the allow entry. Returns true when the document changed; sets `blocked` when its shape is not one we can merge into. */
+/** Whether `list` holds every allow entry we write. */
+function hasAllEntries(list: unknown[]): boolean {
+  return SHELL_TOOL_ENTRIES.every((entry) => list.includes(entry));
+}
+
+/**
+ * Add the missing allow entries (never removing a user's own) and drop the legacy bare entry. Returns true when the
+ * document changed; sets `blocked` when its shape is not one we can merge into.
+ */
 function addPermission(doc: Obj, blocked: { reason: string | null }): boolean {
   const list = allowedList(doc);
   if (list === "bad") {
-    blocked.reason = "tools.allowed in settings.json is not a list; add the entry by hand";
+    blocked.reason = "tools.allowed in settings.json is not a list; add the entries by hand";
     return false;
   }
   if (list !== "absent") {
-    if (list.includes(SHELL_TOOL_ENTRY)) return false;
-    list.push(SHELL_TOOL_ENTRY);
-    return true;
+    let changed = false;
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i] === LEGACY_SHELL_TOOL_ENTRY) {
+        list.splice(i, 1);
+        changed = true;
+      }
+    }
+    for (const entry of SHELL_TOOL_ENTRIES) {
+      if (list.includes(entry)) continue;
+      list.push(entry);
+      changed = true;
+    }
+    return changed;
   }
   const tools = isObject(doc["tools"]) ? doc["tools"] : {};
-  tools["allowed"] = [SHELL_TOOL_ENTRY];
+  tools["allowed"] = [...SHELL_TOOL_ENTRIES];
   doc["tools"] = tools;
   return true;
 }
@@ -126,15 +152,20 @@ function hooksJson(spec: HooksEditSpec): string[] {
   return hooksPreview(spec).split("\n");
 }
 
-function permissionStep(file: string, done: boolean): PlanStep {
+function permissionStep(file: string, done: boolean, legacy: boolean): PlanStep {
   const id = `${HARNESS}:permission`;
-  const label = "Gemini CLI: allow the jubarteai command";
+  const label = PERMISSION_LABEL;
   return {
     id,
     label,
     files: [file],
     sensitive: !done,
-    preview: `${file}\n  tools.allowed += "${SHELL_TOOL_ENTRY}"`,
+    preview: [
+      file,
+      `  tools.allowed += ${SHELL_TOOL_ENTRIES.map((e) => `"${e}"`).join(", ")}`,
+      "  (login, logout, link, init and update are left out: they ask first)",
+      ...(legacy ? [`  tools.allowed -= "${LEGACY_SHELL_TOOL_ENTRY}" (it also pre-approves those five)`] : []),
+    ].join("\n"),
     flag: "--yes",
     async apply(): Promise<StepResult> {
       const blocked: { reason: string | null } = { reason: null };
@@ -177,12 +208,18 @@ export const geminiCliAdapter: HarnessAdapter = {
   async permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions | null> {
     const file = settingsPath(ctx.home);
     const settings = readSettings(file);
-    if (settings.status === "unreadable") return manualUnreadable(file, "Gemini CLI: allow the jubarteai command");
+    if (settings.status === "unreadable") return manualUnreadable(file, PERMISSION_LABEL);
     if (settings.status === "unwritable") {
-      return manualSettings(file, "Gemini CLI: allow the jubarteai command", ['  "tools": { "allowed": ["' + SHELL_TOOL_ENTRY + '"] }', "(merge it into the existing tools.allowed list)"], UNWRITABLE);
+      return manualSettings(
+        file,
+        PERMISSION_LABEL,
+        [...JSON.stringify({ tools: { allowed: SHELL_TOOL_ENTRIES } }, null, 2).split("\n"), "(merge it into the existing tools.allowed list)", `(and remove "${LEGACY_SHELL_TOOL_ENTRY}" if it is there: it also pre-approves login, logout, link, init and update)`],
+        UNWRITABLE,
+      );
     }
     const list = settings.status === "ok" ? allowedList(settings.doc) : "absent";
-    return permissionStep(file, Array.isArray(list) && list.includes(SHELL_TOOL_ENTRY));
+    const legacy = Array.isArray(list) && list.includes(LEGACY_SHELL_TOOL_ENTRY);
+    return permissionStep(file, Array.isArray(list) && hasAllEntries(list) && !legacy, legacy);
   },
 
   async hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | null> {
@@ -209,9 +246,12 @@ export const geminiCliAdapter: HarnessAdapter = {
     }
     const doc: Obj = read.status === "ok" ? read.doc : {};
     const list = allowedList(doc);
-    const permission = Array.isArray(list) && list.includes(SHELL_TOOL_ENTRY) ? "configured" : "missing";
+    const permission = Array.isArray(list) && hasAllEntries(list) ? "configured" : "missing";
     const hooks = inspectCommandHooks(doc, hooksSpec(ctx));
     const notes: string[] = [];
+    if (Array.isArray(list) && list.includes(LEGACY_SHELL_TOOL_ENTRY)) {
+      notes.push(`tools.allowed holds "${LEGACY_SHELL_TOOL_ENTRY}", which also pre-approves login, logout, link, init and update; run init again to replace it`);
+    }
     const config = doc["hooksConfig"];
     if (isObject(config) && config["enabled"] === false) notes.push("hooksConfig.enabled is false in settings.json, so Gemini CLI skips every hook");
     return { permission, hooks, mcpEntries: [], notes };

@@ -31,6 +31,21 @@ function splitAtCommand(argv: readonly string[]): { head: string[]; command: str
   return { head: [...argv], command: undefined, tail: [] };
 }
 
+/**
+ * The flags allowed before the command name: they print help or the version and run nothing, so a harness rule that
+ * names a command by its second word (`Bash(jubarteai init *)`, a regex on `jubarteai <command>`) can't be slipped past
+ * with `jubarteai --yes init` (review R-S8).
+ */
+const HEAD_INFO_FLAGS: ReadonlySet<string> = new Set(["--help", "-h", "--version", "-v", "--all"]);
+const HEAD_RUNS_NOTHING: ReadonlySet<string> = new Set(["--help", "-h", "--version", "-v"]);
+
+/** Throws unless `head` is empty or only info flags, with one that prints help or the version. */
+function checkHead(head: readonly string[], command: string): void {
+  if (head.length === 0) return;
+  if (head.every((token) => HEAD_INFO_FLAGS.has(token)) && head.some((token) => HEAD_RUNS_NOTHING.has(token))) return;
+  throw new UsageError(`Put flags after the command name: ${CLI_NAME} ${safeForDisplay(command)} [options].`);
+}
+
 function hasHelpToken(args: readonly string[]): boolean {
   for (const token of args) {
     if (token === "--") return false;
@@ -72,8 +87,9 @@ export async function routeWith(commands: readonly CommandDef[], argv: string[],
 
     if (split.command === undefined) {
       const top = parseArgs(argv, [...GLOBAL_FLAGS, HELP_ALL_FLAG]);
-      pretty = top.flags.pretty === true;
       if (top.positionals.length > 0) throw new UsageError(`Unknown command "${safeForDisplay(top.positionals[0] as string)}".`);
+      const extra = argv.find((token) => token !== "--" && !HEAD_INFO_FLAGS.has(token));
+      if (extra !== undefined) throw new UsageError(`${safeForDisplay(extra)} needs a command: ${CLI_NAME} <command> [options].`);
       if (top.flags.version === true) {
         ctx.stdout.write(`${cliVersion()}\n`);
         return ExitCode.OK;
@@ -82,8 +98,8 @@ export async function routeWith(commands: readonly CommandDef[], argv: string[],
       return ExitCode.OK;
     }
 
-    const headFlags = parseArgs(split.head, GLOBAL_FLAGS).flags;
-    pretty = headFlags.pretty === true;
+    checkHead(split.head, split.command);
+    const headFlags = parseArgs(split.head, [...GLOBAL_FLAGS, HELP_ALL_FLAG]).flags;
     command = commands.find((candidate) => candidate.name === split.command);
     if (command === undefined) throw new UsageError(`Unknown command "${safeForDisplay(split.command)}".`);
 

@@ -214,7 +214,7 @@ describe("status", () => {
     expect(report.session).toMatchObject({ harness: "claude-code", agent_id: AGENT });
     expect(compact.out).not.toContain(TOKEN_A);
 
-    const pretty = await run(["--pretty", "status", "--json"]);
+    const pretty = await run(["status", "--json", "--pretty"]);
     expect(pretty.out.split("\n").length).toBeGreaterThan(5);
     expect(JSON.parse(pretty.out)).toEqual(report);
   });

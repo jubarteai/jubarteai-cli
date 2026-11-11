@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
+import { agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { COPILOT_HOOKS_STEP_ID, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -44,6 +45,21 @@ async function applyAll(steps: Array<PlanStep | ManualInstructions>): Promise<St
   return results;
 }
 
+const AGENT_KEY = `/${agentCommandPattern()}/`;
+const PERSON_KEY = `/${personCommandPattern()}/`;
+const AUTO_APPROVE = "chat.tools.terminal.autoApprove";
+const autoApprove = (): Record<string, boolean> => readJson(settings())[AUTO_APPROVE] as Record<string, boolean>;
+
+/** VS Code's rule: a `/regex/` key is a regular expression, any other key matches the command word; a false match wins over a true one. */
+function approved(rules: Record<string, boolean>, line: string): boolean {
+  const matches = (key: string): boolean => (key.length > 2 && key.startsWith("/") && key.endsWith("/") ? new RegExp(key.slice(1, -1)).test(line) : line === key || line.startsWith(`${key} `));
+  const keys = Object.keys(rules).filter(matches);
+  return keys.some((k) => rules[k] === true) && !keys.some((k) => rules[k] === false);
+}
+
+const AGENT_LINES = ["jubarteai search-knowledge --query x", "jubarteai connect", "jubarteai inbox", "jubarteai --help"];
+const PERSON_LINES = ["jubarteai login --with-token", "jubarteai link --workspace x", "jubarteai init --yes", "jubarteai update", "jubarteai logout", "jubarteai --yes init"];
+
 describe("vscode adapter facts", () => {
   it("declares the verified cells", () => {
     expect(vscodeAdapter.id).toBe("vscode");
@@ -72,14 +88,14 @@ describe("vscode adapter facts", () => {
 });
 
 describe("vscode permission", () => {
-  it("adds jubarteai: true to chat.tools.terminal.autoApprove, keeping other settings, and a second run changes nothing", async () => {
+  it("adds the agent-commands rule (true) and the person-commands rule (false) to chat.tools.terminal.autoApprove, keeping other settings, and a second run changes nothing", async () => {
     put(settings(), JSON.stringify({ "editor.fontSize": 14, "chat.tools.terminal.autoApprove": { git: true, "/^rm\\b/": false } }, null, 4) + "\n");
     const step = await vscodeAdapter.permission(ctx());
     if (!isStep(step)) throw new Error("expected a step");
     expect(step.sensitive).toBe(true);
     expect(step.files).toEqual([settings()]);
     expect((await step.apply()).status).toBe("configured");
-    expect(readJson(settings())).toEqual({ "editor.fontSize": 14, "chat.tools.terminal.autoApprove": { git: true, "/^rm\\b/": false, jubarteai: true } });
+    expect(readJson(settings())).toEqual({ "editor.fontSize": 14, "chat.tools.terminal.autoApprove": { git: true, "/^rm\\b/": false, [AGENT_KEY]: true, [PERSON_KEY]: false } });
     const before = read(settings());
     expect((await step.apply()).status).toBe("already configured");
     expect(read(settings())).toBe(before);
@@ -90,7 +106,58 @@ describe("vscode permission", () => {
     const step = await vscodeAdapter.permission(ctx());
     if (!isStep(step)) throw new Error("expected a step");
     await step.apply();
-    expect(readJson(settings())).toEqual({ "chat.tools.terminal.autoApprove": { jubarteai: true } });
+    expect(readJson(settings())).toEqual({ "chat.tools.terminal.autoApprove": { [AGENT_KEY]: true, [PERSON_KEY]: false } });
+  });
+
+  it("approves the agent commands and not the person commands, judged from the written keys (a false match wins)", async () => {
+    mkdirSync(userDir(), { recursive: true });
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    await step.apply();
+    const rules = autoApprove();
+    for (const line of AGENT_LINES) expect(approved(rules, line), line).toBe(true);
+    for (const line of PERSON_LINES) expect(approved(rules, line), line).toBe(false);
+    expect(Object.keys(rules).some((k) => k === "jubarteai")).toBe(false);
+    expect(JSON.stringify(rules)).not.toContain("(?=");
+    expect(JSON.stringify(rules)).not.toContain("(?!");
+  });
+
+  it("keeps the person commands asking next to a broad jubarteai: true entry, which is left alone", async () => {
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: true } }));
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect((await step.apply()).status).toBe("configured");
+    const rules = autoApprove();
+    expect(rules["jubarteai"]).toBe(true);
+    for (const line of AGENT_LINES) expect(approved(rules, line), line).toBe(true);
+    // `jubarteai --yes init` is the router's to refuse (no flag before the command name); the broad key the user kept does match it.
+    for (const line of PERSON_LINES.filter((l) => !l.startsWith("jubarteai --yes"))) expect(approved(rules, line), line).toBe(false);
+  });
+
+  it("adds only the missing key when one of the two is already there", async () => {
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { [AGENT_KEY]: true } }));
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect((await step.apply()).status).toBe("configured");
+    expect(autoApprove()).toEqual({ [AGENT_KEY]: true, [PERSON_KEY]: false });
+  });
+
+  it("leaves a person-commands key the user set to true alone", async () => {
+    const text = JSON.stringify({ [AUTO_APPROVE]: { [PERSON_KEY]: true } });
+    put(settings(), text);
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect((await step.apply()).status).toBe("skipped");
+    expect(read(settings())).toBe(text);
+  });
+
+  it("does not merge into an autoApprove that is not an object", async () => {
+    const text = JSON.stringify({ [AUTO_APPROVE]: ["jubarteai"] });
+    put(settings(), text);
+    const step = await vscodeAdapter.permission(ctx());
+    if (!isStep(step)) throw new Error("expected a step");
+    expect((await step.apply()).status).toBe("skipped");
+    expect(read(settings())).toBe(text);
   });
 
   it("refuses a settings.json with comments: prints the exact entry and leaves the file as it was", async () => {
@@ -99,12 +166,14 @@ describe("vscode permission", () => {
     const result = await vscodeAdapter.permission(ctx());
     expect(isManual(result)).toBe(true);
     expect(isManual(result) && result.lines.join("\n")).toContain('"chat.tools.terminal.autoApprove"');
-    expect(isManual(result) && result.lines.join("\n")).toContain('"jubarteai": true');
+    const printed = isManual(result) ? result.lines.join("\n") : "";
+    expect(printed).toContain(JSON.stringify(AGENT_KEY) + ": true");
+    expect(printed).toContain(JSON.stringify(PERSON_KEY) + ": false");
     expect(read(settings())).toBe(text);
   });
 
-  it("leaves a jubarteai rule the user set to false alone", async () => {
-    const text = JSON.stringify({ "chat.tools.terminal.autoApprove": { jubarteai: false } });
+  it("leaves an agent-commands rule the user set to false alone", async () => {
+    const text = JSON.stringify({ "chat.tools.terminal.autoApprove": { [AGENT_KEY]: false } });
     put(settings(), text);
     const step = await vscodeAdapter.permission(ctx());
     if (!isStep(step)) throw new Error("expected a step");
@@ -149,13 +218,13 @@ describe("vscode hooks (the shared Copilot file)", () => {
     expect(copilotHooksState(ctx())).toBe("configured");
   });
 
-  it("runs ctx.hookCommand while the auto-approve rule keeps the bare name, and a re-run with another program path updates in place", async () => {
+  it("runs ctx.hookCommand while the auto-approve rules keep the bare name, and a re-run with another program path updates in place", async () => {
     mkdirSync(userDir(), { recursive: true });
     const program = (node: string): string => `"${node}" "/opt/jubarteai/bin/jubarteai.js"`;
     const permission = await vscodeAdapter.permission(ctx({ hookCommand: program("/old/node") }));
     if (!isStep(permission)) throw new Error("expected a step");
     await permission.apply();
-    expect(readJson(settings())["chat.tools.terminal.autoApprove"]).toEqual({ jubarteai: true });
+    expect(readJson(settings())["chat.tools.terminal.autoApprove"]).toEqual({ [AGENT_KEY]: true, [PERSON_KEY]: false });
     await copilotHooksStep(ctx({ hookCommand: program("/old/node") })).apply();
     expect(copilotHooksState(ctx({ hookCommand: program("/old/node") }))).toBe("configured");
     expect(copilotHooksState(ctx({ hookCommand: program("/new/node") }))).toBe("partial");
@@ -197,6 +266,21 @@ describe("vscode inspect", () => {
     await permission.apply();
     await hooks[0]!.apply();
     expect(await vscodeAdapter.inspect(ctx())).toMatchObject({ permission: "configured", hooks: "configured" });
+  });
+
+  it("is configured only when the agent key is true and the person key is false, and notes a broad jubarteai: true", async () => {
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: true, [AGENT_KEY]: true } }));
+    const half = await vscodeAdapter.inspect(ctx());
+    expect(half.permission).toBe("missing");
+    expect(half.notes.join("\n")).toContain('"jubarteai": true');
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { jubarteai: true } }));
+    expect((await vscodeAdapter.inspect(ctx())).permission).toBe("missing");
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { [AGENT_KEY]: true, [PERSON_KEY]: false } }));
+    const done = await vscodeAdapter.inspect(ctx());
+    expect(done.permission).toBe("configured");
+    expect(done.notes.join("\n")).not.toContain('"jubarteai": true');
+    put(settings(), JSON.stringify({ [AUTO_APPROVE]: { [AGENT_KEY]: true, [PERSON_KEY]: true } }));
+    expect((await vscodeAdapter.inspect(ctx())).permission).toBe("missing");
   });
 
   it("lists user-profile and project mcp.json files that still hold the entry", async () => {

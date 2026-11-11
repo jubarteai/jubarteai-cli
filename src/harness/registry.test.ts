@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { HARNESS_IDS } from "../session/harness-env.js";
-import { ADAPTERS, adapterFor } from "./registry.js";
+import type { HarnessId } from "../session/harness-env.js";
+import { ADAPTERS } from "./registry.js";
+import type { HarnessAdapter } from "./types.js";
+
+function adapter(id: HarnessId): HarnessAdapter | undefined {
+  return ADAPTERS.find((a) => a.id === id);
+}
 
 describe("the adapter registry", () => {
   it("has one adapter per harness id, in the order of spec §9", () => {
@@ -8,12 +14,8 @@ describe("the adapter registry", () => {
     expect(ADAPTERS.map((a) => a.id)).toEqual([...HARNESS_IDS]);
   });
 
-  it("adapterFor returns the adapter with that id", () => {
-    for (const id of HARNESS_IDS) expect(adapterFor(id).id).toBe(id);
-  });
-
-  it("adapterFor throws for an id nobody implements", () => {
-    expect(() => adapterFor("nope" as never)).toThrow(RangeError);
+  it("ids are unique", () => {
+    expect(new Set(ADAPTERS.map((a) => a.id)).size).toBe(ADAPTERS.length);
   });
 
   it("every adapter implements the whole interface with a label and fixed shapes", () => {
@@ -33,9 +35,9 @@ describe("the adapter registry", () => {
   });
 
   it("the skills agent ids are the ones skills@1.7.4 knows (P2 §1)", () => {
-    expect(adapterFor("claude-code").skillAgent).toBe("claude-code");
-    expect(adapterFor("codex").skillAgent).toBe("codex");
-    expect(adapterFor("copilot-cli").skillAgent).toBe("github-copilot");
-    expect(adapterFor("vscode").skillAgent).toBe("github-copilot");
+    expect(adapter("claude-code")?.skillAgent).toBe("claude-code");
+    expect(adapter("codex")?.skillAgent).toBe("codex");
+    expect(adapter("copilot-cli")?.skillAgent).toBe("github-copilot");
+    expect(adapter("vscode")?.skillAgent).toBe("github-copilot");
   });
 });

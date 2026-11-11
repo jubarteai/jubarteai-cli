@@ -87,14 +87,17 @@ describe("inside an agent session", () => {
     expect(result.err + result.out).not.toContain(OTHER_KEY);
   });
 
-  it("link refuses, with --yes and with a global flag before the command too", async () => {
+  it("link refuses, with --yes too; a flag before the command is refused by the router before link runs (R-S8)", async () => {
     const repo = join(sandbox, "repo");
     mkdirSync(repo);
-    for (const argv of [["link"], ["link", "--workspace", "acme", "--share-binding"], ["--yes", "link"]]) {
+    for (const argv of [["link"], ["link", "--workspace", "acme", "--share-binding"], ["link", "--yes"]]) {
       const result = await run(argv, repo);
       expect(result.code).toBe(2);
       expect(result.err).toMatch(REFUSAL);
     }
+    const leading = await run(["--yes", "link"], repo);
+    expect(leading.code).toBe(2);
+    expect(leading.err).toContain("Put flags after the command name: jubarteai link [options].");
     expect(() => readFileSync(join(repo, ".jubarteai"), "utf8")).toThrow();
   });
 

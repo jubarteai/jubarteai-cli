@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PlanStep } from "../safe-edit/plan.js";
+import { AGENT_COMMANDS } from "./agent-commands.js";
 import { geminiCliAdapter } from "./gemini-cli.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -40,6 +41,21 @@ function isStep(value: unknown): value is PlanStep {
 function isManual(value: unknown): value is ManualInstructions {
   return typeof value === "object" && value !== null && "kind" in value && value.kind === "manual";
 }
+
+const ENTRIES = AGENT_COMMANDS.map((command) => `run_shell_command(jubarteai ${command})`);
+const LEGACY = "run_shell_command(jubarteai)";
+
+/** Gemini's matcher as documented: a command is approved when some entry's prefix equals it or ends at a word boundary. */
+function approves(allowed: unknown, line: string): boolean {
+  if (!Array.isArray(allowed)) return false;
+  return allowed.some((entry) => {
+    const m = /^run_shell_command\((.*)\)$/.exec(String(entry));
+    const prefix = m?.[1];
+    return prefix !== undefined && (line === prefix || line.startsWith(`${prefix} `));
+  });
+}
+
+const allowedOf = (): unknown => (readSettings()["tools"] as Record<string, unknown>)["allowed"];
 
 async function permissionStep(over: Partial<InitCtx> = {}): Promise<PlanStep> {
   const step = await geminiCliAdapter.permission(ctx(over));
@@ -89,7 +105,7 @@ describe("permission", () => {
     expect(step.sensitive).toBe(true);
     expect(step.files).toEqual([settings()]);
     expect((await step.apply()).status).toBe("configured");
-    expect(readSettings()).toEqual({ tools: { allowed: ["run_shell_command(jubarteai)"] } });
+    expect(readSettings()).toEqual({ tools: { allowed: ENTRIES } });
     expect(statSync(settings()).mode & 0o777).toBe(0o600);
     const before = readFileSync(settings(), "utf8");
     expect((await step.apply()).status).toBe("already configured");
@@ -101,7 +117,7 @@ describe("permission", () => {
     expect((await (await permissionStep()).apply()).status).toBe("configured");
     expect(readSettings()).toEqual({
       theme: "dark",
-      tools: { allowed: ["run_shell_command(git)", "run_shell_command(jubarteai)"], exclude: ["x"] },
+      tools: { allowed: ["run_shell_command(git)", ...ENTRIES], exclude: ["x"] },
       mcpServers: { a: { command: "x" } },
     });
   });
@@ -109,7 +125,7 @@ describe("permission", () => {
   it("adds `allowed` to an existing tools object", async () => {
     put(JSON.stringify({ tools: { sandbox: true } }));
     expect((await (await permissionStep()).apply()).status).toBe("configured");
-    expect(readSettings()).toEqual({ tools: { sandbox: true, allowed: ["run_shell_command(jubarteai)"] } });
+    expect(readSettings()).toEqual({ tools: { sandbox: true, allowed: ENTRIES } });
   });
 
   it("skips, leaving the file alone, when tools.allowed is not a list", async () => {
@@ -128,9 +144,76 @@ describe("permission", () => {
     expect(isManual(out)).toBe(true);
     if (!isManual(out)) return;
     expect(out.harness).toBe("gemini-cli");
-    expect(out.lines.join("\n")).toContain("run_shell_command(jubarteai)");
-    expect(out.lines.join("\n")).toContain(settings());
+    const printed = out.lines.join("\n");
+    for (const entry of ENTRIES) expect(printed).toContain(entry);
+    expect(printed).not.toContain('"run_shell_command(jubarteai)",');
+    expect(printed).toContain(settings());
     expect(readFileSync(settings(), "utf8")).toBe(text);
+  });
+});
+
+describe("permission: agent commands only (review R-M1)", () => {
+  it("names every agent command and no person command", () => {
+    for (const command of ["connect", "search-knowledge", "inbox", "call", "status", "doctor"]) expect(ENTRIES).toContain(`run_shell_command(jubarteai ${command})`);
+    for (const person of ["login", "logout", "link", "init", "update"]) expect(ENTRIES).not.toContain(`run_shell_command(jubarteai ${person})`);
+    expect(ENTRIES).not.toContain(LEGACY);
+  });
+
+  it("approves the agent commands and none of the person commands, with the matcher simulated", async () => {
+    await (await permissionStep()).apply();
+    const allowed = allowedOf();
+    for (const line of ["jubarteai search-knowledge --query x", "jubarteai connect", "jubarteai inbox --wait 30", "jubarteai status", "jubarteai doctor"]) {
+      expect(approves(allowed, line), line).toBe(true);
+    }
+    for (const line of [
+      "jubarteai login --with-token",
+      "jubarteai link --workspace x",
+      "jubarteai init --yes",
+      "jubarteai update",
+      "jubarteai logout",
+      "jubarteai --yes init",
+      "jubarteai",
+      "jubarteai connectx",
+    ]) {
+      expect(approves(allowed, line), line).toBe(false);
+    }
+  });
+
+  it("removes the legacy bare entry, keeps the user's own, and is idempotent", async () => {
+    put(JSON.stringify({ tools: { allowed: ["run_shell_command(git)", LEGACY] } }));
+    const step = await permissionStep();
+    expect(step.sensitive).toBe(true);
+    expect(step.preview).toContain(`tools.allowed -= "${LEGACY}"`);
+    expect((await step.apply()).status).toBe("configured");
+    expect(allowedOf()).toEqual(["run_shell_command(git)", ...ENTRIES]);
+    expect(approves(allowedOf(), "jubarteai login --with-token")).toBe(false);
+    const again = await permissionStep();
+    expect(again.sensitive).toBe(false);
+    expect(again.preview).not.toContain("-=");
+    expect((await again.apply()).status).toBe("already configured");
+  });
+
+  it("adds only the missing entries and never removes a user's entry", async () => {
+    put(JSON.stringify({ tools: { allowed: [ENTRIES[0], "run_shell_command(jubarteai login)", "run_shell_command(ls)"] } }));
+    expect((await (await permissionStep()).apply()).status).toBe("configured");
+    const allowed = allowedOf() as string[];
+    expect(allowed).toContain("run_shell_command(jubarteai login)");
+    expect(allowed).toContain("run_shell_command(ls)");
+    expect(allowed.filter((e) => e === ENTRIES[0])).toHaveLength(1);
+    for (const entry of ENTRIES) expect(allowed).toContain(entry);
+  });
+
+  it("inspect: configured only with every entry, and notes a legacy entry", async () => {
+    put(JSON.stringify({ tools: { allowed: [ENTRIES[0]] } }));
+    expect((await geminiCliAdapter.inspect(ctx())).permission).toBe("missing");
+    put(JSON.stringify({ tools: { allowed: [LEGACY] } }));
+    const legacy = await geminiCliAdapter.inspect(ctx());
+    expect(legacy.permission).toBe("missing");
+    expect(legacy.notes.join(" ")).toContain("login, logout, link, init and update");
+    put(JSON.stringify({ tools: { allowed: [LEGACY, ...ENTRIES] } }));
+    const both = await geminiCliAdapter.inspect(ctx());
+    expect(both.permission).toBe("configured");
+    expect(both.notes.join(" ")).toContain(LEGACY);
   });
 });
 
@@ -205,7 +288,7 @@ describe("hooks", () => {
     const permission = await geminiCliAdapter.permission(ctx({ hookCommand: program("/old/node") }));
     if (permission === null || !("apply" in permission)) throw new Error("expected a step");
     await permission.apply();
-    expect((readSettings()["tools"] as Record<string, unknown>)["allowed"]).toEqual(["run_shell_command(jubarteai)"]);
+    expect(allowedOf()).toEqual(ENTRIES);
     expect((await geminiCliAdapter.inspect(ctx({ hookCommand: program("/new/node") }))).hooks).toBe("partial");
     const step = await hookStep({ hookCommand: program("/new/node") });
     expect(step.sensitive).toBe(true);

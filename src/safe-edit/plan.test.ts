@@ -267,13 +267,17 @@ describe("applyPlan: inside an agent's shell (R-M1)", () => {
     expect(res[0]).toEqual({ id: "s", label: "Step s", status: "skipped", detail: NEEDS_PERSON });
   });
 
-  it("--yes with a terminal still asks before each sensitive step, but not for the whole plan", async () => {
+  it("with a terminal the sensitive step is skipped too, never prompted: an IDE agent's terminal is a real PTY (R-M1 round 2)", async () => {
+    const a = step("a");
     const s = step("s", { sensitive: true, preview: "entry" });
-    const { fn, asked } = answers(false);
-    const res = await applyPlan([step("a"), s], { tty: true, yes: true, out: collector().out, confirmFn: fn, agentSession: "CLAUDECODE" });
-    expect(asked.map((q) => q.question)).toEqual(['Apply "Step s"?']);
+    for (const yes of [true, false]) {
+      const { fn, asked } = answers(true);
+      const res = await applyPlan([a, s], { tty: true, yes, out: collector().out, confirmFn: fn, agentSession: "CURSOR_AGENT" });
+      expect(asked.map((q) => q.question)).toEqual(yes ? [] : ["Proceed?"]);
+      expect(res[1]).toEqual({ id: "s", label: "Step s", status: "skipped", detail: NEEDS_PERSON });
+    }
+    expect(a.ran()).toBe(2);
     expect(s.ran()).toBe(0);
-    expect(res[1]?.status).toBe("skipped");
   });
 
   it("detects the session from the environment when the caller doesn't say", async () => {

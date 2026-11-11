@@ -1,6 +1,11 @@
 // VS Code (Copilot agent) adapter (spec §9). Verified cells only:
-//   - permission: user settings.json `chat.tools.terminal.autoApprove` `{"jubarteai": true}`. VS Code's settings.json is
-//     often JSONC; a file with comments is never rewritten, the exact entry is printed instead.
+//   - permission: user settings.json `chat.tools.terminal.autoApprove` gets two regex keys (VS Code reads a key wrapped in
+//     slashes as a regular expression): the agent commands (connect, search-knowledge, inbox, ...) are approved by name,
+//     and the person commands (login, logout, link, init, update) get an explicit `false`, which VS Code lets win over
+//     any `true`. So the allowlist never pre-approves a command that changes the saved account, the repo binding or
+//     harness files (spec I6, review R-M1), even next to a broad `"jubarteai": true` an older version or the person
+//     added. VS Code sets no environment variable the CLI could detect, so the rule itself is the guard.
+//     VS Code's settings.json is often JSONC; a file with comments is never rewritten, the exact entries are printed instead.
 //   - hooks: session start and end only, in ~/.copilot/hooks/jubarteai.json. That one file serves VS Code and Copilot CLI,
 //     so the writer is exported (copilotHooksStep) for the Copilot CLI adapter, which runs it under the same step id.
 //     There is no per-prompt hook that can add context (`userPromptSubmitted` output is dropped): promptInjection false.
@@ -26,13 +31,19 @@ import {
   type EditOutcome,
   type Obj,
 } from "./cursor.js";
+import { agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "vscode" as const;
 const LABEL = "VS Code";
 const AUTO_APPROVE_KEY = "chat.tools.terminal.autoApprove";
-const COMMAND_RULE = "jubarteai";
+/** The key an older version (and some people) wrote: it approves every jubarteai command, the person commands included. */
+const LEGACY_RULE = "jubarteai";
+const PERMISSION_LABEL = "VS Code: allow the jubarteai agent commands";
+/** VS Code reads an autoApprove key wrapped in slashes as a regular expression. */
+const AGENT_RULE = `/${agentCommandPattern()}/`;
+const PERSON_RULE = `/${personCommandPattern()}/`;
 /** `timeoutSec` in the shared hook file; session end only needs to be quick. */
 const START_TIMEOUT_S = HOOK_REGISTERED_TIMEOUT_S;
 const END_TIMEOUT_S = 3;
@@ -84,19 +95,22 @@ function copilotHooksFile(ctx: Pick<InitCtx, "home" | "env">): string {
 function addAutoApprove(doc: Obj): EditOutcome {
   const current = doc[AUTO_APPROVE_KEY];
   if (current === undefined) {
-    doc[AUTO_APPROVE_KEY] = { [COMMAND_RULE]: true };
+    doc[AUTO_APPROVE_KEY] = { [AGENT_RULE]: true, [PERSON_RULE]: false };
     return "changed";
   }
-  if (!isObject(current)) return { blocked: `${AUTO_APPROVE_KEY} in settings.json is not an object; add the entry by hand` };
-  const rule = current[COMMAND_RULE];
-  if (rule === true) return "same";
-  if (rule !== undefined) return { blocked: `${AUTO_APPROVE_KEY} already has a ${COMMAND_RULE} rule that is not true; left as you set it` };
-  current[COMMAND_RULE] = true;
+  if (!isObject(current)) return { blocked: `${AUTO_APPROVE_KEY} in settings.json is not an object; add the entries by hand` };
+  const agent = current[AGENT_RULE];
+  const person = current[PERSON_RULE];
+  if (agent !== undefined && agent !== true) return { blocked: `${AUTO_APPROVE_KEY} already has the jubarteai agent-commands rule set to something other than true; left as you set it` };
+  if (person !== undefined && person !== false) return { blocked: `${AUTO_APPROVE_KEY} already has the jubarteai person-commands rule set to something other than false; left as you set it` };
+  if (agent === true && person === false) return "same";
+  current[AGENT_RULE] = true;
+  current[PERSON_RULE] = false;
   return "changed";
 }
 
 function autoApproveJson(): string[] {
-  return JSON.stringify({ [AUTO_APPROVE_KEY]: { [COMMAND_RULE]: true } }, null, 2).split("\n");
+  return JSON.stringify({ [AUTO_APPROVE_KEY]: { [AGENT_RULE]: true, [PERSON_RULE]: false } }, null, 2).split("\n");
 }
 
 // ---- shared Copilot hooks (VS Code + Copilot CLI) ----------------------------------------------------------------
@@ -197,14 +211,19 @@ export const vscodeAdapter: HarnessAdapter = {
     // Detected only through ~/.copilot (Copilot CLI): there is no VS Code to configure.
     if (!hasVsCode) return null;
     const printed = (reason: string): ManualInstructions =>
-      manual(HARNESS, "VS Code: allow the jubarteai command", [`Open ${file} (Command Palette: Preferences: Open User Settings (JSON)) and add:`, ...autoApproveJson(), "(merge it into the existing setting)"], reason);
+      manual(
+        HARNESS,
+        PERMISSION_LABEL,
+        [`Open ${file} (Command Palette: Preferences: Open User Settings (JSON)) and add:`, ...autoApproveJson(), "(merge it into the existing setting; the false entry keeps login, logout, link, init and update asking)"],
+        reason,
+      );
     if (!existsSync(dir)) return printed("VS Code's user settings directory was not found");
     if (readable(file).status === "unwritable") return printed("settings.json has comments or is not plain JSON, so it is not rewritten");
     return jsonEditStep({
       id: `${HARNESS}:permission`,
-      label: "VS Code: allow the jubarteai command",
+      label: PERMISSION_LABEL,
       file,
-      preview: `  ${AUTO_APPROVE_KEY}: { "${COMMAND_RULE}": true }`,
+      preview: [`  ${AUTO_APPROVE_KEY}["${AGENT_RULE}"]: true   (agent commands: connect, search-knowledge, inbox, ...)`, `  ${AUTO_APPROVE_KEY}["${PERSON_RULE}"]: false  (login, logout, link, init, update keep asking)`].join("\n"),
       createIfMissing: true,
       edit: addAutoApprove,
     });
@@ -218,12 +237,17 @@ export const vscodeAdapter: HarnessAdapter = {
     const file = join(userDirs(ctx.home, ctx.env, ctx.platform)[0] ?? "", "settings.json");
     const settings = readable(file);
     let permission: AdapterState["permission"] = "missing";
+    const notes = ["VS Code has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill"];
     if (settings.status === "unwritable") permission = "manual";
     else if (settings.status === "ok") {
       const rules = settings.doc[AUTO_APPROVE_KEY];
-      if (isObject(rules) && rules[COMMAND_RULE] === true) permission = "configured";
+      if (isObject(rules)) {
+        if (rules[AGENT_RULE] === true && rules[PERSON_RULE] === false) permission = "configured";
+        if (rules[LEGACY_RULE] === true) {
+          notes.push(`${AUTO_APPROVE_KEY} has a broad "${LEGACY_RULE}": true entry; the false entry for login/logout/link/init/update still keeps those asking, but you can remove the broad one`);
+        }
+      }
     }
-    const notes = ["VS Code has no per-prompt hook that can add context; the per-turn check_inbox stays a duty in the skill"];
     return { permission, hooks: copilotHooksState(ctx), mcpEntries: await findMcpEntries(HARNESS, cleanupScopeOf(ctx)), notes };
   },
 

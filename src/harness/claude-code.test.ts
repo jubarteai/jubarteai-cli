@@ -50,10 +50,9 @@ async function applyAll(c: InitCtx): Promise<StepResult[]> {
   return applyPlan(steps, { tty: false, yes: true, out: sink });
 }
 
-const ASK_BASH = [
-  ...["login", "logout", "link", "init", "update"].flatMap((sub) => [`Bash(jubarteai ${sub})`, `Bash(jubarteai ${sub} *)`]),
-  "Bash(jubarteai -*)",
-];
+// No rule for a leading flag: the router refuses one before the command name, and `jubarteai --help` must stay
+// pre-approved (review R-S8).
+const ASK_BASH = ["login", "logout", "link", "init", "update"].flatMap((sub) => [`Bash(jubarteai ${sub})`, `Bash(jubarteai ${sub} *)`]);
 const ASK_POWERSHELL = ASK_BASH.map((rule) => rule.replace(/^Bash/, "PowerShell"));
 
 const COMMANDS = {

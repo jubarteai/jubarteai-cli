@@ -83,6 +83,11 @@ export function bindingStepLabel(workspace: string): string {
   return `Bind this repo to workspace ${workspace}`;
 }
 
+/** The label of the binding step when the repo is already bound to another workspace. */
+export function rebindStepLabel(from: string, to: string): string {
+  return `Move this repo from workspace ${from} to workspace ${to}`;
+}
+
 /** The detail of a step that a flag turned off. */
 export function flagSkipDetail(flag: string): string {
   return `turned off by ${flag}`;

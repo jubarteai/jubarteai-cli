@@ -47,7 +47,8 @@ describe.skipIf(IS_WINDOWS)(`inside an agent session (POSIX only: ${WINDOWS_STUB
     const settings = box.readJson(join(box.home, ".claude", "settings.json")) as { permissions: { allow: string[]; ask: string[] } };
     expect(settings.permissions.allow).toEqual(["Bash(jubarteai *)"]);
     for (const sub of ["login", "logout", "link", "init", "update"]) expect(settings.permissions.ask).toContain(`Bash(jubarteai ${sub} *)`);
-    expect(settings.permissions.ask).toContain("Bash(jubarteai -*)");
+    // No leading-flag rule: the router refuses `jubarteai --yes init`, and `jubarteai --help` stays pre-approved (R-S8).
+    expect(settings.permissions.ask.some((rule) => rule.includes(" -*"))).toBe(false);
   });
 
   test("login --with-token refuses and keeps the saved login; the piped key is never echoed", async () => {

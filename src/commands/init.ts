@@ -23,6 +23,7 @@ import {
   INIT_COPY,
   accountChoiceLabel,
   bindingStepLabel,
+  rebindStepLabel,
   codexForeignLines,
   codexOtherWorkspaceLines,
   codexUnreadableLines,
@@ -261,13 +262,19 @@ function bindingStep(
   notes: string[],
 ): PlanStep {
   const slug = safeForDisplay(seat.company.slug, DISPLAY_MAX);
-  const label = bindingStepLabel(slug);
   const existing = bindingAt(root);
+  // Moving a bound repo to another workspace decides where every hook and command from it writes, the same change
+  // `link` refuses from an agent's shell: it asks first, and an agent's --yes doesn't apply it (I6, review R-S9).
+  // A first binding, or re-binding to the same workspace, stays a plain step.
+  const moves = existing !== null && existing.workspace.id !== seat.company.id;
+  const label = moves ? rebindStepLabel(safeForDisplay(existing.workspace.slug, DISPLAY_MAX), slug) : bindingStepLabel(slug);
   return {
     id: BINDING_STEP_ID,
     label,
     files: [join(root, ".jubarteai"), join(root, ".gitignore")],
-    sensitive: false,
+    sensitive: moves,
+    ...(moves ? { preview: `${join(root, ".jubarteai", "config.json")}
+  workspace: ${safeForDisplay(existing.workspace.slug, DISPLAY_MAX)} → ${slug}`, flag: "--yes" } : {}),
     async apply(): Promise<StepResult> {
       let shared: boolean;
       if (form.share !== undefined) shared = form.share;

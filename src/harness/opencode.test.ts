@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PlanStep } from "../safe-edit/plan.js";
+import { AGENT_COMMANDS } from "./agent-commands.js";
 import { opencodeAdapter } from "./opencode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
 
@@ -77,7 +78,41 @@ async function manual(): Promise<ManualInstructions> {
   return out;
 }
 
-const V2_RULE = { action: "shell", resource: "jubarteai *", effect: "allow" };
+const PATTERNS = AGENT_COMMANDS.map((command) => `jubarteai ${command}*`);
+const V2_RULES = PATTERNS.map((resource) => ({ action: "shell", resource, effect: "allow" }));
+const V1_BASH = Object.fromEntries(PATTERNS.map((pattern) => [pattern, "allow"]));
+const LEGACY_V2 = { action: "shell", resource: "jubarteai *", effect: "allow" };
+
+const globToRegex = (glob: string): RegExp => new RegExp(`^${glob.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+
+/** OpenCode's matcher as documented: `*` matches any characters, none included; the last matching rule wins. */
+function approves(doc: Record<string, unknown>, line: string): boolean {
+  let verdict = false;
+  const rules: Array<[string, string]> = [];
+  if (Array.isArray(doc["permissions"])) {
+    for (const r of doc["permissions"] as Array<Record<string, string>>) if (r["action"] === "shell") rules.push([r["resource"] ?? "", r["effect"] ?? ""]);
+  }
+  const bash = (doc["permission"] as { bash?: Record<string, string> } | undefined)?.bash;
+  if (bash !== undefined) rules.push(...Object.entries(bash));
+  for (const [glob, effect] of rules) if (globToRegex(glob).test(line)) verdict = effect === "allow";
+  return verdict;
+}
+
+const AGENT_LINES = ["jubarteai search-knowledge --query x", "jubarteai connect", "jubarteai inbox --wait 30", "jubarteai status", "jubarteai echo-current-task --title t"];
+const PERSON_LINES = [
+  "jubarteai login --with-token",
+  "jubarteai link --workspace x",
+  "jubarteai init --yes",
+  "jubarteai update",
+  "jubarteai logout",
+  "jubarteai --yes init",
+  "jubarteai",
+];
+
+function expectAgentOnly(doc: Record<string, unknown>): void {
+  for (const line of AGENT_LINES) expect(approves(doc, line), line).toBe(true);
+  for (const line of PERSON_LINES) expect(approves(doc, line), line).toBe(false);
+}
 
 describe.skipIf(!POSIX)("version parsing", () => {
   it.each([
@@ -116,13 +151,14 @@ describe("opencodeAdapter facts", () => {
 });
 
 describe.skipIf(!POSIX)("permission, OpenCode 2.x", () => {
-  it("writes the V2 rule to opencode.jsonc, then is a no-op", async () => {
+  it("writes one V2 allow rule per agent command to opencode.jsonc, then is a no-op", async () => {
     stubOpencode("2.1.3\n");
     const s = await step();
     expect(s.sensitive).toBe(true);
     expect(s.files).toEqual([jsonc()]);
     expect((await s.apply()).status).toBe("configured");
-    expect(read(jsonc())).toEqual({ permissions: [V2_RULE] });
+    expect(read(jsonc())).toEqual({ permissions: V2_RULES });
+    expectAgentOnly(read(jsonc()));
     const before = readFileSync(jsonc(), "utf8");
     expect((await s.apply()).status).toBe("already configured");
     expect(readFileSync(jsonc(), "utf8")).toBe(before);
@@ -132,7 +168,7 @@ describe.skipIf(!POSIX)("permission, OpenCode 2.x", () => {
     stubOpencode("v2.0.0");
     put(jsonc(), JSON.stringify({ model: "m", permissions: [{ action: "shell", resource: "rm *", effect: "deny" }] }, null, 2));
     expect((await (await step()).apply()).status).toBe("configured");
-    expect(read(jsonc())).toEqual({ model: "m", permissions: [{ action: "shell", resource: "rm *", effect: "deny" }, V2_RULE] });
+    expect(read(jsonc())).toEqual({ model: "m", permissions: [{ action: "shell", resource: "rm *", effect: "deny" }, ...V2_RULES] });
   });
 
   it("uses an existing opencode.json when there is no opencode.jsonc", async () => {
@@ -141,13 +177,47 @@ describe.skipIf(!POSIX)("permission, OpenCode 2.x", () => {
     expect((await step()).files).toEqual([json()]);
   });
 
-  it("never overrides a user rule for the same command that does not allow it", async () => {
+  it("never overrides a user rule for the same pattern that does not allow it, and still adds the others", async () => {
     stubOpencode("2.1.3");
-    const text = JSON.stringify({ permissions: [{ action: "shell", resource: "jubarteai *", effect: "deny" }] });
-    put(jsonc(), text);
+    const deny = { action: "shell", resource: "jubarteai connect*", effect: "deny" };
+    put(jsonc(), JSON.stringify({ permissions: [deny] }));
     const result = await (await step()).apply();
-    expect(result.status).toBe("skipped");
+    expect(result.status).toBe("configured");
+    expect(result.detail).toContain("jubarteai connect*");
+    const rules = read(jsonc())["permissions"] as Array<Record<string, string>>;
+    expect(rules.filter((r) => r["resource"] === "jubarteai connect*")).toEqual([deny]);
+    expect(rules).toHaveLength(V2_RULES.length);
+    // Nothing left to add: the step is skipped, file untouched.
+    const text = readFileSync(jsonc(), "utf8");
+    const again = await (await step()).apply();
+    expect(again.status).toBe("skipped");
     expect(readFileSync(jsonc(), "utf8")).toBe(text);
+  });
+
+  it("removes the legacy `jubarteai *` allow rule, keeps the user's rules, and is idempotent", async () => {
+    stubOpencode("2.1.3");
+    const mine = { action: "shell", resource: "git *", effect: "allow" };
+    put(jsonc(), JSON.stringify({ permissions: [mine, LEGACY_V2] }));
+    expect((await opencodeAdapter.inspect(ctx())).notes.join(" ")).toContain("login, logout, link, init and update");
+    const s = await step();
+    expect(s.sensitive).toBe(true);
+    expect(s.preview).toContain('removes the "jubarteai *" allow rule');
+    expect((await s.apply()).status).toBe("configured");
+    expect(read(jsonc())).toEqual({ permissions: [mine, ...V2_RULES] });
+    expectAgentOnly(read(jsonc()));
+    const again = await step();
+    expect(again.sensitive).toBe(false);
+    expect(again.preview).not.toContain("removes");
+    expect((await again.apply()).status).toBe("already configured");
+    expect((await opencodeAdapter.inspect(ctx())).notes).toEqual([]);
+  });
+
+  it("leaves a legacy-pattern rule that denies alone", async () => {
+    stubOpencode("2.1.3");
+    const deny = { ...LEGACY_V2, effect: "deny" };
+    put(jsonc(), JSON.stringify({ permissions: [deny] }));
+    await (await step()).apply();
+    expect((read(jsonc())["permissions"] as unknown[])[0]).toEqual(deny);
   });
 
   it("skips when permissions is not a list", async () => {
@@ -163,7 +233,10 @@ describe.skipIf(!POSIX)("permission, OpenCode 2.x", () => {
     const text = '{\n  // mine\n  "model": "m"\n}\n';
     put(jsonc(), text);
     const out = await manual();
-    expect(out.lines.join("\n")).toContain('"resource": "jubarteai *"');
+    for (const pattern of PATTERNS) expect(out.lines.join("\n")).toContain(`"resource": "${pattern}"`);
+    // The last line is the hint to remove the legacy rule; the rules themselves never include it.
+    expect(out.lines.slice(0, -1).join("\n")).not.toContain('"resource": "jubarteai *"');
+    expect(out.lines.at(-1)).toContain("remove the rule");
     expect(out.lines.join("\n")).toContain(jsonc());
     expect(readFileSync(jsonc(), "utf8")).toBe(text);
   });
@@ -175,7 +248,8 @@ describe.skipIf(!POSIX)("permission, OpenCode 1.x", () => {
     const s = await step();
     expect(s.files).toEqual([json()]);
     expect((await s.apply()).status).toBe("configured");
-    expect(read(json())).toEqual({ permission: { bash: { "jubarteai *": "allow" } } });
+    expect(read(json())).toEqual({ permission: { bash: V1_BASH } });
+    expectAgentOnly(read(json()));
     expect((await s.apply()).status).toBe("already configured");
   });
 
@@ -187,7 +261,7 @@ describe.skipIf(!POSIX)("permission, OpenCode 1.x", () => {
     expect(doc["$schema"]).toBe("s");
     const permission = doc["permission"] as { edit: string; bash: Record<string, string> };
     expect(permission.edit).toBe("ask");
-    expect(Object.keys(permission.bash)).toEqual(["*", "git *", "jubarteai *"]);
+    expect(Object.keys(permission.bash)).toEqual(["*", "git *", ...PATTERNS]);
   });
 
   it("treats a blanket `allow` as already configured and any other single value as the user's choice", async () => {
@@ -199,11 +273,31 @@ describe.skipIf(!POSIX)("permission, OpenCode 1.x", () => {
     expect(read(json())).toEqual({ permission: { bash: "ask" } });
   });
 
-  it("never overrides a different value for the key", async () => {
+  it("never overrides a different value for a key, and still adds the others", async () => {
     stubOpencode("1.19.5");
-    put(json(), JSON.stringify({ permission: { bash: { "jubarteai *": "deny" } } }));
+    put(json(), JSON.stringify({ permission: { bash: { "jubarteai connect*": "ask" } } }));
+    const result = await (await step()).apply();
+    expect(result.status).toBe("configured");
+    expect(result.detail).toContain("jubarteai connect*");
+    const bash = (read(json())["permission"] as { bash: Record<string, string> }).bash;
+    expect(bash["jubarteai connect*"]).toBe("ask");
+    expect(Object.keys(bash)).toHaveLength(PATTERNS.length);
     expect((await (await step()).apply()).status).toBe("skipped");
-    expect(read(json())).toEqual({ permission: { bash: { "jubarteai *": "deny" } } });
+  });
+
+  it("removes the legacy `jubarteai *` key, keeps the user's keys, and is idempotent", async () => {
+    stubOpencode("1.19.5");
+    put(json(), JSON.stringify({ permission: { bash: { "git *": "allow", "jubarteai *": "allow" } } }));
+    expect((await opencodeAdapter.inspect(ctx())).notes.join(" ")).toContain("login, logout, link, init and update");
+    const s = await step();
+    expect(s.sensitive).toBe(true);
+    expect(s.preview).toContain('removes the "jubarteai *" allow rule');
+    expect((await s.apply()).status).toBe("configured");
+    expect(read(json())).toEqual({ permission: { bash: { "git *": "allow", ...V1_BASH } } });
+    expectAgentOnly(read(json()));
+    const again = await step();
+    expect(again.sensitive).toBe(false);
+    expect((await again.apply()).status).toBe("already configured");
   });
 
   it("prints the V1 rule for a config with comments", async () => {
@@ -211,6 +305,7 @@ describe.skipIf(!POSIX)("permission, OpenCode 1.x", () => {
     put(json(), '{ /* c */ }');
     const out = await manual();
     expect(out.lines.join("\n")).toContain('"bash"');
+    expect(out.lines.join("\n")).toContain('"jubarteai connect*": "allow"');
   });
 });
 
@@ -221,6 +316,8 @@ describe.skipIf(!POSIX)("permission, unknown version", () => {
     const text = out.lines.join("\n");
     expect(text).toContain('"permissions"');
     expect(text).toContain('"permission"');
+    expect(text).toContain('"jubarteai connect*"');
+    expect(text).not.toContain('"jubarteai *": "allow"');
     expect(out.reason).toContain("version");
     expect(() => readFileSync(jsonc())).toThrow();
     expect(() => readFileSync(json())).toThrow();
@@ -249,10 +346,10 @@ describe.skipIf(!POSIX)("already configured", () => {
 
   it("is a non-sensitive step in V1 once the key is there, and a V1 rule does not satisfy V2", async () => {
     stubOpencode("1.19.5");
-    put(json(), JSON.stringify({ permission: { bash: { "jubarteai *": "allow" } } }));
+    put(json(), JSON.stringify({ permission: { bash: V1_BASH } }));
     expect((await step()).sensitive).toBe(false);
     stubOpencode("2.1.3");
-    put(jsonc(), JSON.stringify({ permission: { bash: { "jubarteai *": "allow" } } }));
+    put(jsonc(), JSON.stringify({ permission: { bash: V1_BASH } }));
     expect((await step()).sensitive).toBe(true);
   });
 });
@@ -305,12 +402,19 @@ describe.skipIf(!POSIX)("inspect", () => {
     await (await step()).apply();
     expect((await opencodeAdapter.inspect(ctx())).permission).toBe("configured");
     rmSync(jsonc());
-    put(json(), JSON.stringify({ permission: { bash: { "jubarteai *": "allow" } } }));
+    put(json(), JSON.stringify({ permission: { bash: V1_BASH } }));
     expect((await opencodeAdapter.inspect(ctx())).permission).toBe("configured");
   });
 
+  it("needs every per-command rule: a partial set, or only the legacy rule, is missing", async () => {
+    put(jsonc(), JSON.stringify({ permissions: V2_RULES.slice(1) }));
+    expect((await opencodeAdapter.inspect(ctx())).permission).toBe("missing");
+    put(jsonc(), JSON.stringify({ permissions: [LEGACY_V2] }));
+    expect((await opencodeAdapter.inspect(ctx())).permission).toBe("missing");
+  });
+
   it("does not count a deny as configured", async () => {
-    put(jsonc(), JSON.stringify({ permissions: [{ action: "shell", resource: "jubarteai *", effect: "deny" }] }));
+    put(jsonc(), JSON.stringify({ permissions: V2_RULES.map((r) => ({ ...r, effect: "deny" })) }));
     expect((await opencodeAdapter.inspect(ctx())).permission).toBe("missing");
   });
 

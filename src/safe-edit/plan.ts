@@ -89,8 +89,9 @@ async function runStep(step: PlanStep): Promise<StepResult> {
  * Show the plan, then run it. On a TTY (without `yes`) one "Proceed? [Y/n]" covers the whole plan and each sensitive
  * step asks again with its exact entry. Without a TTY the non-sensitive steps run and the sensitive ones are skipped
  * (they need confirmation; their flag says how to apply them) unless `yes`. `yes` runs everything without a prompt.
- * Inside a coding agent's shell (`agentSession`, detected by default) `yes` covers only the non-sensitive steps: a
- * sensitive one still asks on a TTY and is skipped without one, because the agent can pass the flag itself (I6, R-M1).
+ * Inside a coding agent's shell (`agentSession`, detected by default) `yes` covers only the non-sensitive steps and every
+ * sensitive one is skipped as "needs your approval", TTY or not: the agent can pass the flag itself, and an IDE agent's
+ * terminal is a real pseudo-terminal it can answer a prompt in (I6, R-M1).
  * Steps sharing an id are one step (the first wins). A step that throws is "failed" with a fixed detail and the others still run. A cancelled prompt (Ctrl-C) rejects.
  */
 export async function applyPlan(
@@ -115,9 +116,14 @@ export async function applyPlan(
   const results: StepResult[] = [];
   for (const step of steps) {
     if (step.sensitive && !sensitiveYes) {
+      // From an agent's shell no flag applies it, so none is offered (an agent would just add it and try again), and
+      // no prompt is shown either: whoever answers it there may be the agent.
+      if (agent !== null) {
+        results.push(skipped(step, NEEDS_PERSON));
+        continue;
+      }
       if (!opts.tty) {
-        // From an agent's shell no flag applies it, so none is offered (an agent would just add it and try again).
-        results.push(agent !== null ? skipped(step, NEEDS_PERSON) : skipped(step, NEEDS_CONFIRMATION, step.flag ?? DEFAULT_FLAG));
+        results.push(skipped(step, NEEDS_CONFIRMATION, step.flag ?? DEFAULT_FLAG));
         continue;
       }
       opts.out.write(`${safeForDisplay(step.label, LABEL_LIMIT)}\n`);
