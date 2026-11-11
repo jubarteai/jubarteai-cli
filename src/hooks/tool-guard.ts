@@ -15,9 +15,12 @@
 // query of the agent's own `jubarteai create-knowledge`/`search-knowledge`, a directory named jubarteai followed by
 // `init`) is refused as well, and the reason says to reword it.
 //
-// The matcher is linear in the input (review R-S13): no group can match the same text two ways, and a flag or version
-// token stops at every character a new match could start at, so one long command can't keep the hook busy until the
-// harness's timeout lets the call through (GitHub fails a timed-out `preToolUse` hook open).
+// The matcher is linear in the input (review R-S13, R-S17): no group can match the same text two ways, and a flag or
+// version token never runs over another `jubarteai`, so the text one attempt walks over holds no other attempt's start
+// and one long command can't keep the hook busy until the harness's timeout lets the call through (GitHub fails a
+// timed-out `preToolUse` hook open). The tokens still take `=`, `/`, `<` and `>`, because `npm exec`/`npm x` parse flags
+// after the package name themselves: `npm exec jubarteai --loglevel=silent login` and `npx "jubarteai@>=1" init` run
+// the person command.
 //
 // Pure: no network, no file reads, no binding lookup. It runs in every repo, bound or not, because login and logout
 // change user-level credentials (the stated exception to I7's bound-repo rule).
@@ -42,8 +45,16 @@ export const SHELL_TOOL_MATCHER = "bash|powershell";
 /** The commands the guard refuses, as a regex alternation. */
 const PERSON_ALTERNATION = PERSON_COMMANDS.join("|");
 
-/** Characters a program name can follow (a match may start after any of them); flag and version tokens stop at them. */
+/** Characters a program name can follow (a match may start after any of them). */
 const BOUNDARY = "\\s;&|()<>{}`$=/\\\\";
+
+/**
+ * A flag or `@version` token: any run of characters up to the next whitespace, shell separator, parenthesis or
+ * backtick that never runs over another `jubarteai` (a tempered token). It takes `=`, `/`, `<`, `>` and `$`, so
+ * `--loglevel=silent`, `--registry=https://…` and `@>=1.0.0` are one token each; because it stops before any
+ * `jubarteai`, the text it covers can't hold the start of a second match attempt (review R-S17).
+ */
+const TOKEN = "(?:(?!jubarteai)[^\\s;&|()`])*";
 
 /**
  * `jubarteai` as a program (after the start, whitespace or a shell separator, or a `/`/`\` path separator), with an
@@ -51,12 +62,12 @@ const BOUNDARY = "\\s;&|()<>{}`$=/\\\\";
  * a backtick), then any flags, then a person command as a whole word. Case-insensitive: macOS and Windows file systems
  * run `JubarteAI` as well.
  *
- * Linear (review R-S13): a flag is `-` then non-boundary characters, so `--x` has one parse (the old `-{1,2}` gave it
- * two, and a failing run of n flags took 2^n steps); the version and flag tokens exclude every BOUNDARY character, so
- * the text one attempt walks over never holds the start of another attempt.
+ * Linear (review R-S13, R-S17): a flag is `-` then one TOKEN, so `--x` has one parse (the old `-{1,2}` gave it two, and
+ * a failing run of n flags took 2^n steps), and no TOKEN covers another `jubarteai`, so no attempt walks over the
+ * start of another.
  */
 const PERSON_CALL = new RegExp(
-  `(?:^|[${BOUNDARY}])jubarteai(?:\\.(?:cmd|exe|ps1|js|mjs))?(?:@[^${BOUNDARY}]*)?(?:\\s*[)\`])?(?:\\s+-[^${BOUNDARY}]*)*\\s+(${PERSON_ALTERNATION})(?=$|[\\s;&|()<>{}\`])`,
+  `(?:^|[${BOUNDARY}])jubarteai(?:\\.(?:cmd|exe|ps1|js|mjs))?(?:@${TOKEN})?(?:\\s*[)\`])?(?:\\s+-${TOKEN})*\\s+(${PERSON_ALTERNATION})(?=$|[\\s;&|()<>{}\`])`,
   "i",
 );
 

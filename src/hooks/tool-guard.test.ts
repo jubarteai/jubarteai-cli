@@ -46,6 +46,14 @@ const PERSON_FORMS: ReadonlyArray<string | ((command: string) => string)> = [
   (command) => `jubarteai ${command.slice(0, 1)}\`${command.slice(1)}`,
   (command) => `& jub\`arteai ${command}`,
   "npm exec jubarteai -- %s",
+  // npm exec / npm x parse flags after the package name themselves, so a flag with a value or a version range still
+  // runs the person command (review R-S17).
+  "npm exec jubarteai --loglevel=silent %s",
+  "npm exec --yes jubarteai --registry=https://registry.npmjs.org %s",
+  "npm x jubarteai --prefer-online=true %s",
+  'npx "jubarteai@>=1" %s',
+  "npx 'jubarteai@<2' %s",
+  "npm exec jubarteai@https://x/y.tgz %s",
 ];
 
 const render = (form: string | ((command: string) => string), command: string): string => (typeof form === "string" ? form.replace("%s", command) : form(command));
@@ -99,8 +107,16 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     }
   });
 
+  it("a long run of flags with values, then a person command: a deny, quickly (review R-S17)", () => {
+    const line = `echo jubarteai ${"--a=b ".repeat(60_000)}x; jubarteai ${"--a=b ".repeat(60_000)}login`;
+    let out: unknown;
+    expect(time(() => (out = toolGuardDecision(camel(line))))).toBeLessThan(2_000);
+    expect(out).toMatchObject({ permissionDecision: "deny" });
+  });
+
   it("one long token holding many program names (paths, versions, lookups) stays linear", () => {
-    for (const unit of ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t"]) {
+    const units = ["--x/jubarteai ", "jubarteai@x/", "/jubarteai/", "--x=jubarteai ", "$(jubarteai)", " jubarteai \t", "--x=/jubarteai ", "jubarteai@>=", "jubarteai --a=b ", "-->jubarteai ", "jubarteai@jubarteai@"];
+    for (const unit of units) {
       const line = unit.repeat(Math.ceil(400_000 / unit.length));
       expect(time(() => toolGuardDecision(camel(line))), unit).toBeLessThan(2_000);
     }

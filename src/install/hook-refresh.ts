@@ -74,7 +74,7 @@ export async function planHookRefresh(adapters: HarnessAdapter[], ctx: InitCtx):
       seenFiles.add(key);
       const label =
         step.id === COPILOT_HOOKS_STEP_ID && copilotRefreshAddsGuardOnly(ctx)
-          ? `Add the preToolUse guard that denies an agent's ${PERSON_COMMAND_LIST} to ${step.files.join(", ")}`
+          ? `Add the preToolUse guard to ${step.files.join(", ")} (denies an agent's ${PERSON_COMMAND_LIST})`
           : `Refresh the hook command in ${adapter.label} (${step.files.join(", ")})`;
       plan.steps.push({
         ...step,

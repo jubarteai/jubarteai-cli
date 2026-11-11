@@ -210,19 +210,6 @@ export async function confirm(question: string, opts: { defaultYes: boolean }): 
   });
 }
 
-/** One visible line. Empty answer → the default (or "" without one). Without a TTY → `default ?? null`. */
-export async function promptLine(question: string, opts: { default?: string; signal?: AbortSignal } = {}): Promise<string | null> {
-  if (opts.signal?.aborted === true) return null;
-  return withTerminal<string | null>(opts.default ?? null, async (handle) => {
-    const suffix = opts.default !== undefined ? ` (${opts.default})` : "";
-    handle.output.write(`${question}${suffix} `);
-    const answer = await readLine(handle, false, opts.signal);
-    if (answer === null) return opts.default ?? null;
-    const trimmed = answer.trim();
-    return trimmed === "" ? (opts.default ?? "") : trimmed;
-  });
-}
-
 /** One line without echo, for secrets (ends trimmed). Without a TTY, or once `signal` aborts → null. */
 export async function promptHidden(question: string, opts: { signal?: AbortSignal } = {}): Promise<string | null> {
   if (opts.signal?.aborted === true) return null;

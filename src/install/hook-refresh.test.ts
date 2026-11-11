@@ -115,8 +115,8 @@ describe("planHookRefresh", () => {
       const step = plan.steps[0];
       expect(step).toMatchObject({ sensitive: true, files: [copilotFile()] });
       expect(step?.preview).toContain("hooks.preToolUse: jubarteai hook pre-tool-use --harness vscode");
-      expect(step?.label).toContain("Add the preToolUse guard");
-      expect(step?.label).toContain(copilotFile());
+      // The file comes right after "guard to", so the commands listed after it can't read as "update to <file>" (review R-N19).
+      expect(step?.label).toBe(`Add the preToolUse guard to ${copilotFile()} (denies an agent's login, logout, link, init and update)`);
 
       const results = await apply(plan.steps);
       expect(results.map((r) => r.status)).toEqual(["configured"]);
