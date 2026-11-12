@@ -13,8 +13,7 @@
     "skipLibCheck": true,
     "declaration": false,
     "sourceMap": false,
-    "outDir": "dist",
-    "rootDir": "src"
+    "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }
