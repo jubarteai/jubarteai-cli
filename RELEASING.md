@@ -117,6 +117,10 @@ An unused trusted-publisher configuration expires 2 days after it is created. Do
 6. **First release only:** on npmjs.com, package **Settings**, **Publishing access**, choose **Require two-factor authentication and disallow tokens**. It only affects token authentication, so the trusted publisher keeps working.
 7. Anything outside this repository that tells people to run the CLI through npm (the skills README, install pages, the app's install and update scripts) waits until step 5 passes on production.
 
+## Windows in CI
+
+The CI matrix runs on Windows too, but those jobs are `continue-on-error` (see `.github/workflows/ci.yml`): a Windows failure is visible on the run and does not block a pull request or the release job. The test suite still assumes POSIX in places, so Windows support is unverified until it passes there. When it does, delete the `continue-on-error` line.
+
 ## Rollback
 
 Never `npm unpublish`: it breaks everyone who already installed or pinned the version, and npm will not let the same version number be reused.
