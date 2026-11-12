@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeBinding } from "../binding/binding.js";
+import { credentialsPath } from "../paths.js";
 import { saveSeat } from "./credentials.js";
 import type { StoredSeat } from "./credentials.js";
 import type { ResolveError, ResolvedSeat } from "./resolve-seat.js";
 
-const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "TMPDIR", "JUBARTEAI_TOKEN", "JUBARTEAI_URL"] as const;
+const ENV_KEYS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "TMPDIR", "TEMP", "TMP", "JUBARTEAI_TOKEN", "JUBARTEAI_URL"] as const;
 const ENV_TOKEN = "jba_ENVENVENVENVENVENVENVENVENVENV";
 const FAKE = "jba_FAKEFAKEFAKEFAKEFAKEFAKEFAKE";
 
@@ -27,6 +28,8 @@ beforeEach(() => {
   process.env.XDG_CONFIG_HOME = join(sandbox, ".config");
   process.env.APPDATA = join(sandbox, "AppData");
   process.env.TMPDIR = join(sandbox, "tmp");
+  process.env.TEMP = join(sandbox, "tmp");
+  process.env.TMP = join(sandbox, "tmp");
   delete process.env.JUBARTEAI_TOKEN;
   delete process.env.JUBARTEAI_URL;
   repo = join(sandbox, "repo");
@@ -116,7 +119,7 @@ describe("default seat and no seat", () => {
 describe("an unreadable seat entry", () => {
   it("does not stop the readable seats from resolving", async () => {
     saveSeat("good", seat("alice@example.com", ACME, 1), { makeDefault: true });
-    const path = join(sandbox, ".config", "jubarteai", "credentials.json");
+    const path = credentialsPath();
     const doc = JSON.parse(readFileSync(path, "utf8"));
     doc.seats.bad = { ...doc.seats.good, token: "" };
     writeFileSync(path, JSON.stringify(doc));

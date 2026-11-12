@@ -47,7 +47,7 @@ describe("install constants", () => {
   });
 
   it("raises the skills Node minimum to the CLI's own floor on the 22 line (D33)", () => {
-    expect(SKILLS_CLI_MIN_NODE).toBe("22.23.4");
+    expect(SKILLS_CLI_MIN_NODE).toBe("22.23.5");
     expect(SKILLS_CLI_MIN_NODE).toBe(NODE_FLOORS[22]);
   });
 

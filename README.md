@@ -22,7 +22,7 @@ irm https://jubarte.ai/install.ps1 | iex
 
 Both scripts install the same npm package. To skip the browser sign-in, set `JUBARTEAI_TOKEN` to a key from the dashboard before running them; it is passed to `init` for that one command and never as an argument. `init` saves that key as a login on this machine (see Security). If `npm install -g` is not allowed, the script retries with `--prefix "$HOME/.local"` and tells you the `PATH` line to add; it never edits a shell profile.
 
-Requires Node `^22.23.4 || ^24.22.1 || >=26.12.1`: 22.23.4 or newer on the 22 line, 24.22.1 or newer on the 24 line, or 26.12.1 or newer. Odd-numbered Node releases are not supported. The package has no runtime dependencies.
+Requires Node `^22.23.5 || ^24.22.3 || >=26.13.1`: 22.23.5 or newer on the 22 line, 24.22.3 or newer on the 24 line, or 26.13.1 or newer. Odd-numbered Node releases are not supported. The package has no runtime dependencies.
 
 ## Set up a repo
 

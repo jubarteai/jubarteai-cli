@@ -11,7 +11,7 @@ import { LOGIN_TIMEOUT_MS } from "../constants.js";
 import { CliError, UsageError } from "../errors.js";
 import { setTtyOpenerForTests } from "../prompt.js";
 import type { TtyHandle } from "../prompt.js";
-import { credentialsPath } from "../paths.js";
+import { configDir, credentialsPath } from "../paths.js";
 import { readCredentials, saveSeat } from "./credentials.js";
 import { keyDigest } from "./key-digest.js";
 import type { StoredSeat } from "./credentials.js";
@@ -264,7 +264,7 @@ describe("loginFlow: browser callback", () => {
   });
 
   it("fails before opening anything when the credential file is unreadable", async () => {
-    mkdirSync(join(sandbox, ".config", "jubarteai"), { recursive: true });
+    mkdirSync(configDir(), { recursive: true });
     writeFileSync(credentialsPath(), "{ not json");
     const opener = vi.fn(async () => true);
     const { ctx } = context();

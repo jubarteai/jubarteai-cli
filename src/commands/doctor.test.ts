@@ -50,6 +50,11 @@ let registry: { mode: "current" | "newer" | "offline" | "garbage" };
 let realFetch: typeof fetch;
 
 function gitDir(): string {
+  if (process.platform === "win32") {
+    // No sh, and a symlink needs a privilege: the folder holding git.exe is already free of harness binaries.
+    const found = execFileSync("where", ["git"], { encoding: "utf8" }).split(/\r?\n/)[0]?.trim() ?? "";
+    return dirname(found);
+  }
   const git = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const bin = join(sandbox, "bin");
   mkdirSync(bin);

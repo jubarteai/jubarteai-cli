@@ -35,7 +35,7 @@ describe("node floor", () => {
   });
 
   const refused = ["12.0.0", "20.20.2", "21.9.0", "22.23.3", "23.5.0", "24.22.0", "25.1.0", "26.12.0", "27.0.0"];
-  const accepted = ["22.23.4", "22.99.0", "24.22.1", "26.12.1", "28.0.0"];
+  const accepted = ["22.23.5", "22.99.0", "24.22.3", "26.13.1", "28.0.0"];
 
   it.each(refused)("refuses %s", (version) => {
     expect(meetsNodeFloor(version)).toBe(false);
@@ -104,15 +104,15 @@ describe("node floor", () => {
       for (const argv of [["node", "jubarteai", "status"], ["node", "jubarteai"], ["node", "jubarteai", "--help", "hook"]]) {
         const { exits, stderr } = await runBin("20.20.2", argv);
         expect(exits[0]).toBe(1);
-        expect(stderr).toContain("needs Node 22.23.4");
+        expect(stderr).toContain("needs Node 22.23.5");
       }
     });
 
     it("under a supported Node a hook whose CLI cannot load exits 0 silently, other commands report it", async () => {
-      const hook = await runBin("24.22.1", ["node", "jubarteai", "hook", "session-end"]);
+      const hook = await runBin("24.22.3", ["node", "jubarteai", "hook", "session-end"]);
       expect(hook.exits[0]).toBe(0);
       expect(hook.stderr).toBe("");
-      const other = await runBin("24.22.1", ["node", "jubarteai", "status"]);
+      const other = await runBin("24.22.3", ["node", "jubarteai", "status"]);
       expect(other.exits[0]).toBe(1);
       expect(other.stderr).toContain("failed to start");
     });
@@ -120,8 +120,8 @@ describe("node floor", () => {
 
   describe("release metadata (CREL)", () => {
     const full = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as Record<string, unknown>;
-    const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-    const release = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const release = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
     it("the CI matrix names every floor and the latest of each line", () => {
       const line = /^\s+node: \[(.*)\]\s*$/m.exec(ci);
@@ -130,9 +130,9 @@ describe("node floor", () => {
       expect(versions).toEqual([...Object.values(NODE_FLOORS), ...Object.keys(NODE_FLOORS).map((major) => `${major}.x`)]);
     });
 
-    it("ships exactly bin, dist, assets, README.md and LICENSE, at 0.1.0, with no runtime dependencies", () => {
+    it("ships exactly bin, dist, assets, README.md and LICENSE, at 0.1.1, with no runtime dependencies", () => {
       expect(full.files).toEqual(["bin", "dist", "assets", "README.md", "LICENSE"]);
-      expect(full.version).toBe("0.1.0");
+      expect(full.version).toBe("0.1.1");
       expect(full.dependencies).toBeUndefined();
       expect(full.publishConfig).toEqual({ access: "public", provenance: true });
       expect((full.scripts as Record<string, string>).prepack).toContain("npm run build");

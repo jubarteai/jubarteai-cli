@@ -44,7 +44,7 @@ Do not configure the trusted publisher yet.
 
 ## Before every tag: re-check the Node floor
 
-The floor is the security-patched Node release of each LTS line (grill D33). On 2026-11-10 it was `22.23.4` / `24.22.1` / `26.12.1`; the 2026-11-11 Node security release (High severity on all three lines) was announced but not out (`docs/plans/jubarteai-cli-proofs/p4-node-npm.md` in the app repo).
+The floor is the security-patched Node release of each LTS line (grill D33). On 2026-11-10 it was `22.23.4` / `24.22.1` / `26.12.1`; since the 2026-11-10/11 Node security releases it is `22.23.5` / `24.22.3` / `26.13.1` (released as 0.1.1). `docs/plans/jubarteai-cli-proofs/p4-node-npm.md` in the app repo has the background.
 
 **On or after 2026-11-11, before the first tag**, and again before each later release:
 
@@ -116,6 +116,10 @@ An unused trusted-publisher configuration expires 2 days after it is created. Do
    For a prerelease, `npm view jubarteai dist-tags` must show `next: X.Y.Z-...` and `latest` unchanged, and the install command is `npx --yes jubarteai@next --version`.
 6. **First release only:** on npmjs.com, package **Settings**, **Publishing access**, choose **Require two-factor authentication and disallow tokens**. It only affects token authentication, so the trusted publisher keeps working.
 7. Anything outside this repository that tells people to run the CLI through npm (the skills README, install pages, the app's install and update scripts) waits until step 5 passes on production.
+
+## Windows in CI
+
+The CI matrix runs on Windows too, but those jobs are `continue-on-error` (see `.github/workflows/ci.yml`): a Windows failure is visible on the run and does not block a pull request or the release job. The test suite still assumes POSIX in places, so Windows support is unverified until it passes there. When it does, delete the `continue-on-error` line.
 
 ## Rollback
 

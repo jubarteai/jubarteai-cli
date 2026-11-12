@@ -3,9 +3,9 @@
 // Node >= 12: no optional chaining, no nullish coalescing, no top-level await.
 //
 // FLOORS must match src/node-floor.ts and package.json "engines.node"
-// ("^22.23.4 || ^24.22.1 || >=26.12.1"). Odd majors are refused.
+// ("^22.23.5 || ^24.22.3 || >=26.13.1"). Odd majors are refused.
 
-var FLOORS = { 22: "22.23.4", 24: "24.22.1", 26: "26.12.1" };
+var FLOORS = { 22: "22.23.5", 24: "24.22.3", 26: "26.13.1" };
 var LAST_LINE = 26;
 var DOWNLOAD = "https://nodejs.org/en/download";
 

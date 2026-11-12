@@ -12,11 +12,11 @@ export const SKILLS_CLI_VERSION = "1.7.4";
 
 /**
  * The oldest Node the skill-install step runs on. skills@1.7.4 declares `engines.node >=22.20.0`, but D33 raised
- * the floor to the patched release of each LTS line (22.23.4 on the 22 line), and the CLI refuses to start below
+ * the floor to the patched release of each LTS line (22.23.5 on the 22 line), and the CLI refuses to start below
  * it. This is raised to match (D33), and the skill step compares the running Node against it.
  * Must stay equal to NODE_FLOORS[22] in ../node-floor.ts (constants.test.ts checks).
  */
-export const SKILLS_CLI_MIN_NODE = "22.23.4";
+export const SKILLS_CLI_MIN_NODE = "22.23.5";
 
 export const SKILL_REPO = "jubarteai/jubarteai-skills";
 export const SKILL_NAME = "jubarteai";
