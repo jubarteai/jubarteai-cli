@@ -42,7 +42,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Pack
-        run: npm pack --pack-destination "$RUNNER_TEMP/package"
+        run: |
+          # npm pack does not create its destination: without the folder it fails with ENOENT (exit 254).
+          mkdir -p "$RUNNER_TEMP/package"
+          npm pack --pack-destination "$RUNNER_TEMP/package"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: package
