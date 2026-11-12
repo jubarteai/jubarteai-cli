@@ -1,4 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -553,6 +554,56 @@ describe("the connect description's repo slug", () => {
     bind(odd);
     rmSync(join(odd, ".git"), { recursive: true });
     expect(await descriptionFor(odd, odd)).toBe("claude-code");
+  });
+});
+
+describe("a linked worktree", () => {
+  const posix = process.platform === "win32" ? it.skip : it;
+  const git = (cwd: string, ...args: string[]): void => {
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "ignore" });
+  };
+  function mainWithWorktree(origin: string | null): { main: string; tree: string } {
+    const main = join(sandbox.dir, "main-checkout");
+    mkdirSync(main, { recursive: true });
+    git(main, "init", "-q");
+    writeFileSync(join(main, "a.txt"), "a");
+    git(main, "add", ".");
+    git(main, "commit", "-q", "-m", "init");
+    if (origin !== null) git(main, "remote", "add", "origin", origin);
+    mkdirSync(join(main, ".jubarteai"), { recursive: true });
+    writeFileSync(
+      join(main, ".jubarteai", "config.json"),
+      JSON.stringify({ version: 1, workspace: { id: COMPANY_ID, slug: "acme" }, user: { email: "alice@example.com" } }),
+    );
+    const tree = join(sandbox.dir, "4f6a6395-feature");
+    git(main, "worktree", "add", "-q", tree);
+    return { main, tree };
+  }
+  async function startedIn(cwd: string): Promise<string> {
+    const s = await connectingServer();
+    sandbox.signIn(s.origin);
+    const out = await runHookEvent(input("session-start", { cwd }), runtime());
+    expect(out).not.toBe("");
+    return String(s.toolCalls()[0]?.arguments?.["description"]);
+  }
+
+  posix("connects under the main checkout's private binding and names the agent after the origin repo", async () => {
+    const { tree } = mainWithWorktree("git@github.com:org/JubarteAI.git");
+    expect(await startedIn(tree)).toBe("claude-code on jubarteai");
+  });
+
+  posix("without an origin remote it uses the main checkout's folder name", async () => {
+    const { tree } = mainWithWorktree(null);
+    expect(await startedIn(tree)).toBe("claude-code on main-checkout");
+  });
+
+  posix("stays silent when the main checkout has no binding either", async () => {
+    const { main, tree } = mainWithWorktree(null);
+    rmSync(join(main, ".jubarteai"), { recursive: true });
+    const s = await connectingServer();
+    sandbox.signIn(s.origin);
+    expect(await runHookEvent(input("session-start", { cwd: tree }), runtime())).toBe("");
+    expect(s.toolCalls()).toEqual([]);
   });
 });
 

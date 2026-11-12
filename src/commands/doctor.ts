@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, isAbsolute } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { Writable } from "node:stream";
 
 import type { ParsedArgs } from "../cli/args.js";
@@ -7,6 +7,7 @@ import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentialsReport } from "../auth/credentials.js";
 import type { StoredSeat } from "../auth/credentials.js";
 import { whoami } from "../auth/whoami.js";
+import { findBinding, mainCheckoutBinding } from "../binding/binding.js";
 import { CLI_NAME, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
 import { codexUserFile, readCodexEntry, seatForBearer } from "../harness/codex-entry.js";
@@ -315,6 +316,40 @@ function codexEntryCheck(home: string, env: NodeJS.ProcessEnv): Check | null {
   return { id, level: "ok", label, detail: `uses your saved login for ${workspace}`, data: { matched: true, workspace } };
 }
 
+/** Where this folder's binding comes from, and whether a worktree's own binding hides the main checkout's. */
+function bindingCheck(cwd: string): Check | null {
+  const id = "binding";
+  const label = "Repo binding";
+  try {
+    const found = findBinding(cwd);
+    if (found === null) return null;
+    const slug = text(found.workspace.slug);
+    if (found.inheritedFrom !== undefined) {
+      return {
+        id,
+        level: "ok",
+        label,
+        detail: `workspace ${slug}, from the main checkout ${text(found.root)}`,
+        data: { workspace: slug, inherited_from: found.inheritedFrom },
+      };
+    }
+    const main = mainCheckoutBinding(cwd);
+    if (main !== null && resolve(main.root) !== resolve(found.root)) {
+      const differs = main.workspace.id !== found.workspace.id;
+      return {
+        id,
+        level: differs ? "warn" : "ok",
+        label,
+        detail: `workspace ${slug}; this worktree has its own binding, and the main checkout's is ${text(main.workspace.slug)}${differs ? " (a different workspace; run jubarteai link here to share the main checkout's)" : ""}`,
+        data: { workspace: slug, main_checkout_workspace: text(main.workspace.slug) },
+      };
+    }
+    return { id, level: "ok", label, detail: `workspace ${slug}`, data: { workspace: slug } };
+  } catch {
+    return { id, level: "warn", label, detail: "the binding file can't be read; run: jubarteai link", data: { workspace: null } };
+  }
+}
+
 type HarnessResult = { detected: HarnessAdapter[]; checks: Check[] };
 
 async function harnessChecks(projectRoot: string | null): Promise<HarnessResult> {
@@ -431,6 +466,7 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   const harness = withDeadline<HarnessResult | null>(harnessChecks(project.root).catch(() => null), LOCAL_DEADLINE_MS, null);
   const skill = skillCheck(project.root, ctx.cwd);
   const statusText = captureStatus(ctx, json);
+  const binding = bindingCheck(ctx.cwd);
 
   const [accountResult, versionResult, harnessResult, skillResult, status] = await Promise.all([account, version, harness, skill, statusText]);
   const harnessFallback: Check = { id: "harnesses", level: "warn", label: "Harnesses", detail: "couldn't check in time", data: { detected: null } };
@@ -439,6 +475,7 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
     versionResult,
     accountResult.credentials,
     ...accountResult.seats,
+    ...(binding === null ? [] : [binding]),
     ...(harnessResult === null ? [harnessFallback] : harnessResult.checks),
     skillResult,
     instructionsCheck(project),

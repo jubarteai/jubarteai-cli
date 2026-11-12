@@ -8,7 +8,7 @@ import type { Credentials, StoredSeat } from "../auth/credentials.js";
 import { loginFlow, loginWithToken } from "../auth/login-flow.js";
 import { isResolveError, resolveSeat } from "../auth/resolve-seat.js";
 import { API_KEY_RE } from "../auth/token-exchange.js";
-import { findBinding, writeBinding } from "../binding/binding.js";
+import { bindingRootFor, findBinding, writeBinding } from "../binding/binding.js";
 import type { Binding } from "../binding/binding.js";
 import { CLI_NAME, MCP_PATH } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
@@ -143,7 +143,7 @@ type Proposal = { kind: "seat"; entry: SeatEntry } | { kind: "bound-elsewhere"; 
 /** The login init offers first: the one the repo is bound to, else the default. A repo bound to a workspace nobody here has logged into gets a sign-in to it. */
 function proposalFor(credentials: Credentials, root: string | null): Proposal {
   const entries = seatEntries(credentials);
-  const binding = root === null ? null : bindingAt(root);
+  const binding = root === null ? null : bindingAt(bindingRootFor(root));
   if (binding !== null) {
     const bound = seatForBinding(entries, binding, credentials);
     return bound === null ? { kind: "bound-elsewhere", slug: binding.workspace.slug } : { kind: "seat", entry: bound };
@@ -386,7 +386,7 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
   const detected = await detectHarnesses(detectEnv);
 
   // 4. Binding.
-  if (root !== null) plan.step(bindingStep(root, seat, { share: inputs.share, ask: inputs.tty && !inputs.yes }, inputs.notes));
+  if (root !== null) plan.step(bindingStep(bindingRootFor(root), seat, { share: inputs.share, ask: inputs.tty && !inputs.yes }, inputs.notes));
 
   // 5. Skill, for every detected harness (deduped by skills agent id).
   const agents = [...new Set(detected.flatMap((adapter) => (adapter.skillAgent === null ? [] : [adapter.skillAgent])))];

@@ -91,6 +91,10 @@ jubarteai link --private-binding     # convert it back to the private form
 
 `link` (re)writes the repo's binding without running the rest of `init`. With only `--share-binding` or `--private-binding` it just converts the current binding.
 
+### Git worktrees
+
+All worktrees of a repo share one binding. A linked worktree (`git worktree add`) with no `.jubarteai/` of its own reads the main checkout's binding (read-only, and only when git's own back-link confirms the worktree), so hooks and commands there use the same workspace. `init` and `link` run in a worktree write the binding to the main checkout; `AGENTS.md`, the skill and `CLAUDE.md` are still written in the worktree itself. `jubarteai status` and `jubarteai doctor` say when a binding came from the main checkout, and `doctor` notes a worktree that has its own binding hiding the main checkout's (a binding from 0.1.x wins). A worktree of a bare repository has no main checkout, so its binding stays in the worktree.
+
 ## Check your setup
 
 ```sh
@@ -197,6 +201,7 @@ jubarteai inbox --watch --minutes 90
 `init` registers `jubarteai hook <session-start|user-prompt-submit|session-end>` with your harnesses. You do not run it yourself, and it is listed only by `jubarteai --help --all`.
 
 - At session start in a bound repo it registers the session's agent and hands the harness the agent id, plus any waiting messages. Before each prompt it adds your unread messages, and says nothing when there are none. At session end it marks the agent finished (best effort).
+- In a linked worktree the agent is named after the repo's `origin` remote (not the worktree's folder, which is often a generated id), and the main checkout's binding is used.
 - Outside a repo bound with `init` or `link` it does nothing and prints nothing. It never prompts and always exits 0, so it cannot break your harness.
 
 ## Output and exit codes

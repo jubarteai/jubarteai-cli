@@ -1,11 +1,11 @@
 // What each hook event does (spec §6.3). Every path ends in a string to print ("" for nothing) and none
 // throws for a server, network or file problem: a hook must never fail the harness (I7).
-import { existsSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 
 import { isResolveError, resolveSeat } from "../auth/resolve-seat.js";
 import type { ResolvedSeat } from "../auth/resolve-seat.js";
 import { findBinding } from "../binding/binding.js";
+import { gitTop, linkedWorktree, originSlug } from "../git/layout.js";
 import type { Binding } from "../binding/binding.js";
 import { isOurHookCommand, settingsPath as claudeSettingsPath } from "../harness/claude-code.js";
 import { codexHome } from "../harness/mcp-cleanup.js";
@@ -140,26 +140,29 @@ function bindingFor(cwd: string): Binding | null {
   }
 }
 
-/** The nearest folder at or above `start` holding `.git` (a directory, or a file for worktrees and submodules). */
-function gitTopLevel(start: string): string | null {
-  let current = resolve(start);
-  for (;;) {
-    if (existsSync(join(current, ".git"))) return current;
-    const parent = dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
-}
-
-/** The repo slug of the spec's connect description: the git top level's folder name, in the repo-slug form. */
-function repoSlug(cwd: string, fallbackRoot: string): string {
-  const root = gitTopLevel(cwd) ?? fallbackRoot;
-  return basename(root)
+function slugOfName(name: string): string {
+  return name
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^[^a-z0-9]+/, "")
     .replace(/[^a-z0-9]+$/, "")
     .slice(0, MAX_SLUG_CHARS);
+}
+
+/**
+ * The repo slug of the spec's connect description. In a linked worktree it is the origin remote's repo name
+ * (the worktree folder is often a generated id), else the main checkout's folder name; elsewhere the git top
+ * level's folder name, in the repo-slug form.
+ */
+function repoSlug(cwd: string, fallbackRoot: string): string {
+  const top = gitTop(cwd);
+  const worktree = top === null ? null : linkedWorktree(top);
+  if (worktree !== null) {
+    const origin = originSlug(worktree.commonDir);
+    if (origin !== null) return slugOfName(origin);
+    if (worktree.mainCheckout !== null) return slugOfName(basename(worktree.mainCheckout));
+  }
+  return slugOfName(basename(top ?? fallbackRoot));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

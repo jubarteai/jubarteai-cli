@@ -499,6 +499,50 @@ describe("init: the binding", () => {
   });
 });
 
+describe("init and link in a linked worktree (one binding per repo)", () => {
+  const worktreeIt = posix ? it : it.skip;
+  /** The sandbox repo with one commit and a linked worktree of it. */
+  function addWorktree(): string {
+    sb.git(["commit", "--allow-empty", "-q", "-m", "init"]);
+    const tree = join(sb.root, "wt");
+    sb.git(["worktree", "add", "-q", tree]);
+    return realpathSync(tree);
+  }
+
+  worktreeIt("init writes the binding and .gitignore in the main checkout and AGENTS.md in the worktree", async () => {
+    withEnvKey();
+    const tree = addWorktree();
+    const result = await run(["init", "--yes"], tree);
+    expect(result.code, result.err).toBe(0);
+    expect(existsSync(join(sb.repo, ".jubarteai", "config.json"))).toBe(true);
+    expect(read(join(sb.repo, ".gitignore"))).toContain("# jubarteai: private workspace binding");
+    expect(existsSync(join(tree, ".jubarteai"))).toBe(false);
+    expect(existsSync(join(tree, "AGENTS.md"))).toBe(true);
+    expect(existsSync(join(sb.repo, "AGENTS.md"))).toBe(false);
+    expect(result.err).toContain(join(sb.repo, ".jubarteai"));
+  });
+
+  worktreeIt("a second worktree finds the binding already configured", async () => {
+    withEnvKey();
+    const first = addWorktree();
+    const second = join(sb.root, "wt2");
+    sb.git(["worktree", "add", "-q", second]);
+    await run(["init", "--yes"], first);
+    const again = await run(["init", "--yes"], realpathSync(second));
+    expect(again.code, again.err).toBe(0);
+    expect(again.err).toContain(`Bind this repo to workspace acme: ${INIT_COPY.statusAlreadyConfigured}`);
+  });
+
+  worktreeIt("link run in a worktree binds the main checkout", async () => {
+    storeSeats();
+    const tree = addWorktree();
+    const result = await run(["link", "--workspace", "acme"], tree);
+    expect(result.code, result.err).toBe(0);
+    expect(json(join(sb.repo, ".jubarteai", "config.json"))["workspace"]).toMatchObject({ slug: "acme" });
+    expect(existsSync(join(tree, ".jubarteai"))).toBe(false);
+  });
+});
+
 describe("init: moving a bound repo to another workspace (R-S9)", () => {
   function bindToBeta(): void {
     storeSeats();

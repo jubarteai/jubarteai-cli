@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { BINDING_VERSION } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { gitTop, linkedWorktree } from "../git/layout.js";
 import { homeDir } from "../paths.js";
 import { childEnv } from "../process-env.js";
 import { SafeEditError, writeFileAtomic } from "../safe-edit/atomic-write.js";
@@ -22,6 +23,11 @@ export type Binding = {
   workspace: { id: string; slug: string };
   email: string | null;
   shared: boolean;
+  /**
+   * Set when this binding was read from the main checkout because the linked worktree the command ran in
+   * has none of its own: the worktree's top level. `root` and `dir` then name the main checkout.
+   */
+  inheritedFrom?: string;
 };
 
 const BINDING_DIR = ".jubarteai";
@@ -126,16 +132,7 @@ function readBindingAt(root: string): Binding | null {
   return { dir, root, workspace, email, shared: true };
 }
 
-/** The nearest folder at or above `start` that holds `.git` (a directory, or a file for worktrees and submodules). */
-function gitTopLevel(start: string): string | null {
-  let current = resolve(start);
-  for (;;) {
-    if (existsSync(join(current, ".git"))) return current;
-    const parent = dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
-}
+const gitTopLevel = gitTop;
 
 function isInsideOrEqual(child: string, parent: string): boolean {
   const rel = relative(parent, child);
@@ -151,10 +148,10 @@ function isInsideOrEqual(child: string, parent: string): boolean {
  */
 export function findBinding(cwd: string): Binding | null {
   const start = resolve(cwd);
-  const gitTop = gitTopLevel(start);
+  const top = gitTopLevel(start);
   let ceiling: string;
-  if (gitTop !== null) {
-    ceiling = gitTop;
+  if (top !== null) {
+    ceiling = top;
   } else {
     const home = resolve(homeDir());
     ceiling = isInsideOrEqual(start, home) ? home : start;
@@ -162,12 +159,67 @@ export function findBinding(cwd: string): Binding | null {
   let current = start;
   for (;;) {
     const found = readBindingAt(current);
-    if (found !== null) return found;
-    if (current === ceiling) return null;
+    if (found !== null) return withMainEmail(found, top);
+    if (current === ceiling) break;
     const parent = dirname(current);
-    if (parent === current) return null;
+    if (parent === current) break;
     current = parent;
   }
+  return top === null ? null : inheritFromMain(top);
+}
+
+/** The main checkout of the linked worktree at `top`, when `top` is one that checks out against git's back-link. */
+function mainCheckoutOf(top: string): string | null {
+  return linkedWorktree(top)?.mainCheckout ?? null;
+}
+
+/**
+ * A linked worktree with no binding of its own uses the main checkout's: read-only, the same file checks
+ * (regular files, this user's, size-capped), and only from a worktree that git's own back-link confirms.
+ */
+function inheritFromMain(top: string): Binding | null {
+  const main = mainCheckoutOf(top);
+  if (main === null || resolve(main) === resolve(top)) return null;
+  const found = readBindingAt(main);
+  return found === null ? null : { ...found, inheritedFrom: top };
+}
+
+/**
+ * The main checkout's own binding for a command run inside a linked worktree (null outside one, or when the
+ * main checkout has none). `doctor` uses it to say that a worktree's own binding shadows the main checkout's.
+ */
+export function mainCheckoutBinding(cwd: string): Binding | null {
+  const top = gitTopLevel(resolve(cwd));
+  if (top === null) return null;
+  const main = mainCheckoutOf(top);
+  if (main === null || resolve(main) === resolve(top)) return null;
+  return readBindingAt(main);
+}
+
+/**
+ * A shared binding committed to the repo has no email in the worktree (it lives in the ignored
+ * `config.local.json` of the checkout that ran `init`). Take it from the main checkout's binding, but
+ * only when that names the same workspace.
+ */
+function withMainEmail(found: Binding, top: string | null): Binding {
+  if (found.email !== null || top === null || resolve(found.root) !== resolve(top)) return found;
+  const main = mainCheckoutOf(top);
+  if (main === null || resolve(main) === resolve(top)) return found;
+  const mainBinding = readBindingAt(main);
+  if (mainBinding === null || mainBinding.workspace.id !== found.workspace.id || mainBinding.email === null) return found;
+  return { ...found, email: mainBinding.email };
+}
+
+/**
+ * The folder a binding is written to for a command run in `cwd`: the main checkout when `cwd` is inside
+ * a linked worktree that has one (so every worktree of a repo shares one binding), else the git top
+ * level, else `cwd` itself.
+ */
+export function bindingRootFor(cwd: string): string {
+  const start = resolve(cwd);
+  const top = gitTopLevel(start);
+  if (top === null) return start;
+  return mainCheckoutOf(top) ?? top;
 }
 
 function writeRepoFile(path: string, data: string): void {

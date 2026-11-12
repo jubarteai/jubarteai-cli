@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,6 +102,31 @@ describe("status", () => {
     const result = await run(["status"]);
     expect(result.out).toContain("Repo binding: workspace beta as b@example.com (private,");
     expect(result.out).toContain("This folder would use: b@example.com — beta (from binding)");
+  });
+
+  const worktreeIt = process.platform === "win32" ? it.skip : it;
+  function worktreeOfRepo(): string {
+    const git = (...args: string[]): void => {
+      execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: repo, stdio: "ignore" });
+    };
+    git("init", "-q");
+    git("commit", "--allow-empty", "-q", "-m", "init");
+    const tree = join(sandbox, "wt");
+    git("worktree", "add", "-q", tree);
+    return realpathSync(tree);
+  }
+
+  worktreeIt("says a worktree's binding comes from the main checkout, and --json adds binding.inherited_from", async () => {
+    saveSeat("s1", seat("beta", "b@example.com", TOKEN_B), { makeDefault: true });
+    const tree = worktreeOfRepo();
+    writeBinding(repo, { workspace: { id: "company-beta", slug: "beta" }, email: "b@example.com", shared: false });
+    const text = await run(["status"], tree);
+    expect(text.out).toContain("Repo binding: workspace beta as b@example.com (private,");
+    expect(text.out).toContain("from the main checkout");
+    const json = JSON.parse((await run(["status", "--json"], tree)).out) as { binding: Record<string, unknown> };
+    expect(json.binding["inherited_from"]).toBe(tree);
+    const own = JSON.parse((await run(["status", "--json"], repo)).out) as { binding: Record<string, unknown> };
+    expect("inherited_from" in own.binding).toBe(false);
   });
 
   it("reports the resolution error text when the binding has no stored seat", async () => {

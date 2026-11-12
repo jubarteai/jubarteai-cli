@@ -40,7 +40,7 @@ type SeatReport = {
 
 type BindingReport =
   | { found: false }
-  | { found: true; dir: string; workspace: { id: string; slug: string }; email: string | null; shared: boolean }
+  | { found: true; dir: string; workspace: { id: string; slug: string }; email: string | null; shared: boolean; inherited_from?: string }
   | { found: false; error: string };
 
 type ResolvedReport =
@@ -88,7 +88,14 @@ function bindingReport(cwd: string): BindingReport {
   try {
     const binding = findBinding(cwd);
     if (binding === null) return { found: false };
-    return { found: true, dir: binding.dir, workspace: binding.workspace, email: binding.email, shared: binding.shared };
+    return {
+      found: true,
+      dir: binding.dir,
+      workspace: binding.workspace,
+      email: binding.email,
+      shared: binding.shared,
+      ...(binding.inheritedFrom === undefined ? {} : { inherited_from: binding.inheritedFrom }),
+    };
   } catch (error) {
     const message = errorText(error);
     if (message === null) throw error;
@@ -187,6 +194,9 @@ function render(report: StatusReport): string {
     lines.push(
       `Repo binding: workspace ${printable(binding.workspace.slug)}${binding.email === null ? "" : ` as ${printable(binding.email)}`} (${binding.shared ? "shared" : "private"}, ${printable(binding.dir)})`,
     );
+    if (binding.inherited_from !== undefined) {
+      lines.push(`  from the main checkout (this worktree, ${printable(binding.inherited_from)}, has none of its own)`);
+    }
   } else if ("error" in binding) {
     lines.push(`Repo binding: unreadable. ${printable(binding.error)}`);
   } else {

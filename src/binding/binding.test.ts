@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "../errors.js";
-import { convertBinding, findBinding, writeBinding } from "./binding.js";
+import { bindingRootFor, convertBinding, findBinding, writeBinding } from "./binding.js";
 
 const MARKER = "# jubarteai: private workspace binding";
 const WORKSPACE = { id: "22222222-0000-4000-8000-000000000001", slug: "acme" };
@@ -211,6 +211,65 @@ describe("findBinding", () => {
   it("stops at the git top level: a binding above the repo is not used", () => {
     writeBinding(sandbox, { workspace: WORKSPACE, email: "a@example.com", shared: false });
     expect(findBinding(repo)).toBeNull();
+  });
+
+  describe("linked worktrees", () => {
+    const worktreeIt = posix ? it : it.skip;
+    function addWorktree(name = "wt"): string {
+      const tree = join(sandbox, name);
+      spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "init"], { cwd: repo, stdio: "ignore" });
+      git(repo, "worktree", "add", "-q", tree);
+      return realpathSync(tree);
+    }
+
+    worktreeIt("a worktree with no binding of its own reads the main checkout's", () => {
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: false });
+      const tree = addWorktree();
+      const found = findBinding(join(tree));
+      expect(found?.workspace.slug).toBe("acme");
+      expect(found?.root).toBe(repo);
+      expect(found?.inheritedFrom).toBe(tree);
+      expect(found?.email).toBe("a@example.com");
+      mkdirSync(join(tree, "sub"));
+      expect(findBinding(join(tree, "sub"))?.inheritedFrom).toBe(tree);
+    });
+
+    worktreeIt("a worktree's own binding wins", () => {
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: false });
+      const tree = addWorktree();
+      const other = { id: "22222222-0000-4000-8000-000000000002", slug: "other" };
+      writeBinding(tree, { workspace: other, email: "b@example.com", shared: false });
+      const found = findBinding(tree);
+      expect(found?.workspace.slug).toBe("other");
+      expect(found?.inheritedFrom).toBeUndefined();
+    });
+
+    worktreeIt("a shared binding in the worktree takes the email from the main checkout's local file for the same workspace", () => {
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: true });
+      const tree = addWorktree();
+      // The committed config.json arrives in the worktree; the ignored local file does not.
+      writeRaw(tree, "config.json", JSON.stringify({ version: 1, workspace: WORKSPACE }));
+      expect(findBinding(tree)?.email).toBe("a@example.com");
+      writeRaw(tree, "config.json", JSON.stringify({ version: 1, workspace: { id: "22222222-0000-4000-8000-000000000002", slug: "other" } }));
+      expect(findBinding(tree)?.email).toBeNull();
+    });
+
+    worktreeIt("a forged .git file inherits nothing", () => {
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: false });
+      const forged = join(sandbox, "forged");
+      mkdirSync(forged);
+      writeFileSync(join(forged, ".git"), `gitdir: ${join(repo, ".git")}\n`);
+      expect(findBinding(forged)).toBeNull();
+    });
+
+    worktreeIt("bindingRootFor is the main checkout from a worktree, else the top level", () => {
+      const tree = addWorktree();
+      expect(bindingRootFor(tree)).toBe(repo);
+      mkdirSync(join(tree, "deep"));
+      expect(bindingRootFor(join(tree, "deep"))).toBe(repo);
+      expect(bindingRootFor(repo)).toBe(repo);
+      expect(bindingRootFor(join(sandbox, "plain-nowhere"))).toBe(join(sandbox, "plain-nowhere"));
+    });
   });
 
   it("treats a .git file (worktree or submodule) as the top level too", () => {
