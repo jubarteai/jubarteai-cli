@@ -7,7 +7,8 @@ import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentialsReport } from "../auth/credentials.js";
 import type { StoredSeat } from "../auth/credentials.js";
 import { whoami } from "../auth/whoami.js";
-import { findBinding, mainCheckoutBinding } from "../binding/binding.js";
+import { InvalidBindingError, findBinding, mainCheckoutBinding, mainCheckoutRoot } from "../binding/binding.js";
+import type { Binding } from "../binding/binding.js";
 import { CLI_NAME, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
 import { codexUserFile, readCodexEntry, seatForBearer } from "../harness/codex-entry.js";
@@ -336,14 +337,34 @@ function bindingCheck(cwd: string): Check | null {
         data: { workspace: slug, inherited_from: found.inheritedFrom },
       };
     }
-    const main = mainCheckoutBinding(cwd);
+    let main: Binding | null;
+    try {
+      main = mainCheckoutBinding(cwd);
+    } catch (error) {
+      // This worktree's own binding is fine; it is the main checkout's file that is not. `jubarteai link` here can't fix that one.
+      // Name the exact file that failed: config.json is read first, so when both are invalid this names config.json.
+      const root = mainCheckoutRoot(cwd);
+      const where =
+        error instanceof InvalidBindingError
+          ? ` (${text(error.path)})`
+          : root === null
+            ? ""
+            : ` (in ${text(root)}/.jubarteai/)`;
+      return {
+        id,
+        level: "warn",
+        label,
+        detail: `workspace ${slug}; this worktree has its own binding, but the main checkout's${where} can't be read: fix that file there`,
+        data: { workspace: slug, main_checkout_workspace: null },
+      };
+    }
     if (main !== null && resolve(main.root) !== resolve(found.root)) {
       const differs = main.workspace.id !== found.workspace.id;
       return {
         id,
         level: differs ? "warn" : "ok",
         label,
-        detail: `workspace ${slug}; this worktree has its own binding, and the main checkout's is ${text(main.workspace.slug)}${differs ? " (a different workspace; run jubarteai link here to share the main checkout's)" : ""}`,
+        detail: `workspace ${slug}; this worktree has its own binding, and the main checkout's is ${text(main.workspace.slug)}${differs ? " (a different workspace; delete this worktree's .jubarteai folder to use the main checkout's)" : ""}`,
         data: { workspace: slug, main_checkout_workspace: text(main.workspace.slug) },
       };
     }

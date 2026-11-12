@@ -12,6 +12,8 @@ export type Glyphs = {
   unchecked: string;
   partial: string;
   pointer: string;
+  up: string;
+  down: string;
   radioOn: string;
   radioOff: string;
   spinner: readonly string[];
@@ -29,6 +31,8 @@ const UNICODE: Glyphs = {
   unchecked: "□",
   partial: "▣",
   pointer: "›",
+  up: "↑",
+  down: "↓",
   radioOn: "●",
   radioOff: "○",
   spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
@@ -46,6 +50,8 @@ const ASCII: Glyphs = {
   unchecked: "[ ]",
   partial: "[-]",
   pointer: ">",
+  up: "^",
+  down: "v",
   radioOn: "(*)",
   radioOff: "( )",
   spinner: ["|", "/", "-", "\\"],

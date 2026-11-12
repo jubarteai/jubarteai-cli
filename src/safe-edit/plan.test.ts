@@ -48,7 +48,8 @@ function step(id: string, over: Partial<PlanStep> = {}, status: StepResult["stat
     },
     ...over,
     ran: () => ran,
-  };
+    // `over` is a Partial of a union (alsoGroups travels with narrow); callers pass them together or not at all.
+  } as PlanStep & { ran: () => number };
 }
 
 type Seen = { groups: ChecklistGroup[]; details: (checked: ReadonlySet<string>) => string[] };
@@ -222,6 +223,32 @@ describe("applyPlan: on a person's terminal", () => {
       { id: "b", label: "Step b", status: "skipped", detail: DECLINED },
     ]);
     expect(h.out.text()).toBe("Aborted.\n");
+  });
+
+  it("a plan of findings only asks nothing, runs them and does not end as Aborted.", async () => {
+    const h = harness();
+    const a = approver();
+    const info = step("note", { kind: "info" });
+    const res = await applyPlan([info], opts(h, { tty: true, approve: a.approve }));
+    expect(a.seen).toHaveLength(0);
+    expect(info.ran()).toBe(1);
+    expect(res).toEqual([{ id: "note", label: "Step note", status: "configured" }]);
+    expect(h.out.text()).not.toContain("Aborted.");
+  });
+
+  it("a worktree's repo steps and the main checkout's binding are two groups, each naming its folder", async () => {
+    const h = harness();
+    const a = approver();
+    await applyPlan(
+      [step("agents-md", { group: repoGroup("/work/wt") }), step("binding", { group: repoGroup("/work/main") })],
+      opts(h, { tty: true, approve: a.approve }),
+    );
+    const groups = a.seen[0]?.groups ?? [];
+    expect(groups.map((g) => [g.title, g.note, g.rows.map((r) => r.label)])).toEqual([
+      ["Repo", "/work/wt", ["Step agents-md"]],
+      ["Repo", "/work/main", ["Step binding"]],
+    ]);
+    expect(new Set(groups.map((g) => g.key)).size).toBe(2);
   });
 
   it("the exact changes behind `d` are the checked steps' previews, redacted, with control characters replaced", async () => {

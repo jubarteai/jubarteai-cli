@@ -519,6 +519,20 @@ export function planInstructionSteps(root: string, opts: InstructionOptions): Pl
   return steps;
 }
 
+/**
+ * Whether `rel` in `root` is a file git has never been told about: not tracked and not ignored. Anything else, including
+ * "can't tell" (no git, not a repository, a timeout), is false, so the caller keeps the file. Exit codes only, never git's
+ * wording: `ls-files --error-unmatch` answers 1 for an untracked path, `check-ignore -q` answers 1 for one no rule ignores.
+ */
+function gitNeverSaw(root: string, rel: string): boolean {
+  const git = ["-c", "core.fsmonitor=false", "-C", root];
+  const tracked = runCommandSync("git", [...git, "ls-files", "--error-unmatch", "--", rel], { timeoutMs: GIT_TIMEOUT_MS });
+  if (tracked.code !== 1) return false;
+  // A gitignored CLAUDE.md is the user's own local file: init would not have left it ignored, so it isn't ours to delete.
+  const ignored = runCommandSync("git", [...git, "check-ignore", "-q", "--", rel], { timeoutMs: GIT_TIMEOUT_MS });
+  return ignored.code === 1;
+}
+
 // --- removing (uninstall) ---------------------------------------------------------------------------------------
 
 /** AGENTS.md without our marked section: the blank line init put before it goes too; null when the markers aren't a clean pair. */
@@ -563,9 +577,16 @@ export function planInstructionRemoval(root: string): Array<PlanStep | ManualIns
   const out: Array<PlanStep | ManualInstructions> = [];
 
   const agents = p.agents;
+  // Whether this plan deletes AGENTS.md outright (it held only our section). The @AGENTS.md import in CLAUDE.md is ours to
+  // take back only then: while AGENTS.md stays, the import points at a real file and may be the user's own line.
+  let deletesAgentsMd = false;
+  let sectionRemovable = false;
   if (agents.exists && agents.state !== "missing" && agents.state !== "linked") {
     const removable = agents.state === "current" || agents.state === "known-old";
-    if (removable && withoutSection(agents.text) !== null) {
+    const stripped = removable ? withoutSection(agents.text) : null;
+    if (stripped !== null) {
+      deletesAgentsMd = stripped.trim() === "";
+      sectionRemovable = true;
       const { id, label } = { id: "uninstall-agents-md", label: "Remove the JubarteAI section from AGENTS.md" };
       out.push({
         id,
@@ -594,29 +615,47 @@ export function planInstructionRemoval(root: string): Array<PlanStep | ManualIns
   }
 
   const claude = p.claude;
-  if (claude.exists && claude.state !== "linked" && claude.state !== "unreadable") {
-    const only = claude.text === "@AGENTS.md\n" || claude.text === "@AGENTS.md\r\n" || claude.text === "@AGENTS.md";
-    const trailing = /\r?\n@AGENTS\.md\r?\n?$/.exec(claude.text);
-    if (only || trailing !== null) {
-      const { id, label } = { id: "uninstall-claude-md", label: only ? "Remove CLAUDE.md (it only imports AGENTS.md)" : "Remove the @AGENTS.md line from CLAUDE.md" };
-      out.push({
-        id,
-        label,
-        group: repoGroup(root),
-        files: [claude.file],
-        sensitive: true,
-        preview: only ? `${claude.file}: delete the file (it holds only @AGENTS.md)` : `${claude.file}: remove the last line, @AGENTS.md`,
-        flag: "--yes",
-        apply: async (): Promise<StepResult> => {
-          const fresh = loadFile(root, "CLAUDE.md", p.texts);
-          if (fresh.state === "unreadable") return { id, label, status: "skipped", detail: "could not read CLAUDE.md, left as it is" };
-          const match = /\r?\n@AGENTS\.md\r?\n?$/.exec(fresh.text);
-          const bare = fresh.text.trim() === "@AGENTS.md";
-          if (!bare && match === null) return { id, label, status: "already configured", detail: "no @AGENTS.md line to remove" };
-          return result(id, label, await rewrite(root, fresh.file, fresh.name, bare ? "" : fresh.text.slice(0, match?.index ?? fresh.text.length)));
-        },
-      });
-    }
+  const claudeUsable = claude.exists && claude.state !== "linked" && claude.state !== "unreadable";
+  const only = claudeUsable && (claude.text === "@AGENTS.md\n" || claude.text === "@AGENTS.md\r\n" || claude.text === "@AGENTS.md");
+  const trailing = claudeUsable ? /\r?\n@AGENTS\.md\r?\n?$/.exec(claude.text) : null;
+  // The @AGENTS.md import is init's to take back when AGENTS.md goes with the section (init made both), or when CLAUDE.md is
+  // nothing but that line and git has never seen it (neither tracked nor ignored): a committed or ignored one is as likely the user's own AGENTS.md-first setup.
+  const initMade = sectionRemovable && only && gitNeverSaw(root, "CLAUDE.md");
+  if (claudeUsable && (deletesAgentsMd || initMade) && (only || trailing !== null)) {
+    const { id, label } = { id: "uninstall-claude-md", label: only ? "Remove CLAUDE.md (it only imports AGENTS.md)" : "Remove the @AGENTS.md line from CLAUDE.md" };
+    out.push({
+      id,
+      label,
+      group: repoGroup(root),
+      files: [claude.file],
+      sensitive: true,
+      preview: only ? `${claude.file}: delete the file (it holds only @AGENTS.md)` : `${claude.file}: remove the last line, @AGENTS.md`,
+      flag: "--yes",
+      apply: async (): Promise<StepResult> => {
+        // The AGENTS.md step runs first. If it was declined or the file changed, AGENTS.md is still there and the import is valid.
+        if (!initMade && nodeFs.existsSync(agents.file)) return { id, label, status: "skipped", detail: "AGENTS.md is still there, so its import stays" };
+        const fresh = loadFile(root, "CLAUDE.md", p.texts);
+        if (fresh.state === "unreadable") return { id, label, status: "skipped", detail: "could not read CLAUDE.md, left as it is" };
+        const match = /\r?\n@AGENTS\.md\r?\n?$/.exec(fresh.text);
+        const bare = fresh.text.trim() === "@AGENTS.md";
+        if (!bare && match === null) return { id, label, status: "already configured", detail: "no @AGENTS.md line to remove" };
+        return result(id, label, await rewrite(root, fresh.file, fresh.name, bare ? "" : fresh.text.slice(0, match?.index ?? fresh.text.length)));
+      },
+    });
+  } else if (sectionRemovable && claudeUsable && /^@AGENTS\.md[ \t]*$/m.test(claude.text)) {
+    // Either AGENTS.md stays (other content) or it goes but the import isn't the last line: in both the CLI can't tell whether
+    // this line is init's or the user's own, so it says so instead of deleting a line it can't prove it wrote.
+    out.push({
+      kind: "manual",
+      harness: "claude-code",
+      title: "CLAUDE.md: the @AGENTS.md line",
+      lines: [
+        deletesAgentsMd
+          ? `${claude.name} still imports AGENTS.md, which was only JubarteAI's section, so AGENTS.md goes unless that row was left out. Delete that line unless you want it for a new AGENTS.md.`
+          : `${claude.name} still imports AGENTS.md. If init added that line, delete it; if you wrote it, keep it.`,
+      ],
+      reason: deletesAgentsMd ? "the import is in the middle of CLAUDE.md, so the CLI doesn't edit around it" : "AGENTS.md still holds your own text, so the import may be yours",
+    });
   }
   return out;
 }

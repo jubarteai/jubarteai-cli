@@ -37,7 +37,7 @@ export type FakeTerminal = {
 };
 
 /** Installs a terminal for prompts: `rawMode: "throws"` models a console that refuses raw mode, "missing" one that has no setRawMode. */
-export function fakeTerminal(opts: { rawMode?: "ok" | "throws" | "missing" } = {}): FakeTerminal {
+export function fakeTerminal(opts: { rawMode?: "ok" | "throws" | "missing"; rows?: number } = {}): FakeTerminal {
   const input = new PassThrough() as PassThrough & { isTTY: boolean; setRawMode?: (mode: boolean) => unknown };
   input.isTTY = true;
   const rawModes: boolean[] = [];
@@ -56,6 +56,7 @@ export function fakeTerminal(opts: { rawMode?: "ok" | "throws" | "missing" } = {
       callback();
     },
   });
+  if (opts.rows !== undefined) (output as Writable & { rows?: number }).rows = opts.rows;
   const handle: TtyHandle = {
     input,
     output,

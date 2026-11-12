@@ -1,15 +1,17 @@
 // The terminal experience through the built binary on a real pseudo-terminal: the banner, the one checklist, a key
 // press at a time, plain and NO_COLOR modes, a narrow window, `update`'s question, and declining. Stub `claude` and
 // `codex` are on the sandbox PATH so two harnesses are detected; no real editor is ever touched.
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { loadPty, spawnPty } from "../helpers/pty.js";
 import type { PtySession } from "../helpers/pty.js";
 import { startFakeServer } from "./fake-server.js";
 import type { FakeServer } from "./fake-server.js";
-import { BIN, IS_WINDOWS, createSandbox } from "./harness.js";
+import { BIN, CLI_ROOT, IS_WINDOWS, createSandbox } from "./harness.js";
 import type { Sandbox } from "./harness.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 60_000 });
@@ -172,5 +174,66 @@ describe("update on a terminal", () => {
     session.send(ENTER);
     expect((await session.exit).exitCode).toBe(0);
     expect(session.text()).toMatch(/Done in \S+ — \d+ ok/);
+  });
+});
+
+describe("uninstall on a terminal", () => {
+  posixPty("shows the uninstaller banner and one checklist; unchecking sign-out keeps the login while the rest is removed", async () => {
+    expect((await box.run(["init", "--yes", "--keep-mcp"], { env: { JUBARTEAI_URL: fake.origin } })).code).toBe(0);
+    expect(existsSync(codexHooks())).toBe(true);
+    const login = box.read(box.credentialsFile);
+    expect(login).toContain('"seats"');
+
+    const session = start(["uninstall"]);
+    const at = await session.waitFor("Choose what to remove");
+    expect(session.raw()).toContain("38;2;0;136;136"); // the banner's gradient
+    expect(session.text()).toContain("Agentic Connection Platform · uninstaller");
+    await session.waitFor("Sign out of every saved login on this machine", { after: at });
+    // This machine is the last group and sign-out its only row: up from the first row, through the first header, round to it.
+    session.send(UP + UP);
+    await session.waitFor(/› +■ Sign out of every saved login/, { after: at });
+    session.send(" ");
+    await session.waitFor(/› +□ Sign out of every saved login/, { after: at });
+    session.send(ENTER);
+    const done = await session.exit;
+    expect(done.exitCode, session.text()).toBe(0);
+    expect(session.text()).toMatch(/Done in \S+ — \d+ ok/);
+    expect(session.text()).toContain("npm uninstall -g jubarteai");
+    // Nobody was signed out, so there is no "key still works" line, and the saved login is byte for byte what it was.
+    expect(session.text()).not.toContain("This key still works");
+    expect(box.read(box.credentialsFile)).toBe(login);
+    // The rows that stayed checked were applied.
+    expect(existsSync(codexHooks())).toBe(false);
+    expect(existsSync(join(box.repo, ".jubarteai"))).toBe(false);
+  });
+});
+
+describe("the spinner on a terminal", () => {
+  posixPty("Ctrl-C while a spinner is live shows the cursor again, then ends the process on the signal", async () => {
+    // A child that spins forever: SIGINT ends a Node process without emitting 'exit', so only the spinner's own signal
+    // handling can restore the cursor.
+    const dir = mkdtempSync(join(tmpdir(), "jba-spin-"));
+    try {
+      const script = join(dir, "spin.mjs");
+      const ui = pathToFileURL(join(CLI_ROOT, "dist", "ui", "index.js")).href;
+      writeFileSync(
+        script,
+        `import { createUi } from ${JSON.stringify(ui)};\nconst ui = createUi(process.stdout);\nsetInterval(() => {}, 1000);\nawait ui.spin("Working on it", () => new Promise(() => {}));\n`,
+      );
+      const session = spawnPty(pty as NonNullable<typeof pty>, process.execPath, [script], {
+        cwd: dir,
+        env: box.env({ TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8" }),
+      });
+      sessions.push(session);
+      await session.waitFor("Working on it");
+      expect(session.raw()).toContain("\u001b[?25l");
+      session.send("\u0003");
+      const done = await session.exit;
+      expect(done.exitCode === 0 && done.signal === undefined).toBe(false);
+      const raw = session.raw();
+      expect(raw.lastIndexOf("\u001b[?25h")).toBeGreaterThan(raw.lastIndexOf("\u001b[?25l"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

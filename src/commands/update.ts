@@ -131,7 +131,16 @@ const defaultDeps: UpdateDeps = {
   detect: () => detectHarnesses(),
 };
 
-type Options = { check: boolean; selfUpdate: boolean; keepMcp: boolean; yes: boolean };
+type Options = {
+  check: boolean;
+  selfUpdate: boolean;
+  keepMcp: boolean;
+  yes: boolean;
+  /** Output choices the re-run must keep: the new CLI starts from a fresh command line, not from ours. */
+  plain: boolean;
+  verbose: boolean;
+  showChanges: boolean;
+};
 
 /** The rows `update` finds, as timeline lines; counts the warnings for the closing tally. */
 class Printer {
@@ -158,8 +167,16 @@ class Printer {
 }
 
 /** The arguments the newly installed CLI is run with: never --check (a check never installs), never a key. */
-export function reexecArgs(opts: Pick<Options, "yes" | "keepMcp">): string[] {
-  return ["update", "--no-self-update", ...(opts.yes ? ["--yes"] : []), ...(opts.keepMcp ? ["--keep-mcp"] : [])];
+export function reexecArgs(opts: Pick<Options, "yes" | "keepMcp"> & Partial<Pick<Options, "plain" | "verbose" | "showChanges">>): string[] {
+  return [
+    "update",
+    "--no-self-update",
+    ...(opts.yes ? ["--yes"] : []),
+    ...(opts.keepMcp ? ["--keep-mcp"] : []),
+    ...(opts.plain === true ? ["--plain"] : []),
+    ...(opts.verbose === true ? ["--verbose"] : []),
+    ...(opts.showChanges === true ? ["--show-changes"] : []),
+  ];
 }
 
 type SelfUpdate = { done: false; pending: number; failed: number } | { done: true; code: number };
@@ -300,9 +317,12 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
     selfUpdate: args.flags["self-update"] !== false,
     keepMcp: args.flags["keep-mcp"] === true,
     yes: ctx.globals.yes,
+    plain: ctx.globals.plain === true,
+    verbose: ctx.globals.verbose === true,
+    showChanges: args.flags["show-changes"] === true,
   };
   const tty = deps.isTty();
-  const ui = createUi(ctx.stderr, { ...(ctx.globals.plain === true ? { plain: true } : {}), ...(ctx.globals.verbose === true ? { verbose: true } : {}) });
+  const ui = createUi(ctx.stderr, { ...(opts.plain ? { plain: true } : {}), ...(opts.verbose ? { verbose: true } : {}) });
   const timeline = ui.timeline();
   const p = new Printer(ui, timeline);
   const started = Date.now();
@@ -407,7 +427,7 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
       timeline,
       approval: "confirm",
       title: UPDATE_COPY.applyQuestion,
-      showChanges: args.flags["show-changes"] === true,
+      showChanges: opts.showChanges,
       ...(deps.approve === undefined ? {} : { approve: deps.approve }),
     });
     if (results.length > 0 && results.every((r) => r.status === "skipped" && r.detail === DECLINED)) return updateExitCode({ check: false, pending: 0, failed: self.failed });
@@ -433,7 +453,12 @@ export function createUpdateCommand(overrides: Partial<UpdateDeps> = {}): Comman
     usage: "update [--check] [--yes] [--no-self-update] [--keep-mcp] [--show-changes]",
     flags: [
       { name: "check", type: "boolean", description: "Report what would change and change nothing (exit 2 when something would)" },
-      { name: "self-update", type: "boolean", description: "Check npm for a newer CLI first (default; --no-self-update skips it)" },
+      {
+        name: "self-update",
+        type: "boolean",
+        description: "Check npm for a newer CLI first (default; --no-self-update skips it)",
+        negation: "Skip the npm check for a newer CLI",
+      },
       { name: "keep-mcp", type: "boolean", description: "Keep the jubarteai MCP entries in your editors' configs" },
       { name: "show-changes", type: "boolean", description: "Print the exact entries to be written before asking" },
     ],

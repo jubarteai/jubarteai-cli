@@ -542,6 +542,47 @@ describe("doctor: worktree bindings", () => {
     expect(found.detail).toContain("acme");
   });
 
+  worktreeIt("warns, naming the main checkout's file, when only that binding is unreadable", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    writeFileSync(join(repo, ".jubarteai", "config.json"), JSON.stringify({ version: 2 }));
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain("workspace other");
+    expect(found.detail).toContain("the main checkout's");
+    expect(found.detail).toContain(join(repo, ".jubarteai", "config.json"));
+    expect(found.detail).not.toContain("jubarteai link");
+  });
+
+  worktreeIt("does not tell the user to delete the valid config.json when the main checkout's config.local.json is the broken one", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: true });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    writeFileSync(join(repo, ".jubarteai", "config.local.json"), "{ not json");
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain(join(repo, ".jubarteai", "config.local.json"));
+    expect(found.detail).not.toContain(join(repo, ".jubarteai", "config.json"));
+    expect(found.detail).not.toContain("delete that file");
+  });
+
+  worktreeIt("names config.json, the file read first, when both of the main checkout's files are invalid", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: true });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    writeFileSync(join(repo, ".jubarteai", "config.json"), "{ not json");
+    writeFileSync(join(repo, ".jubarteai", "config.local.json"), "{ not json");
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain(join(repo, ".jubarteai", "config.json"));
+    expect(found.detail).not.toContain("config.local.json");
+    expect(found.detail).not.toContain("leave the other one alone");
+  });
+
   it("has no binding check without a binding", async () => {
     const { report } = await runJson();
     expect(report.checks.some((c) => c.id === "binding")).toBe(false);

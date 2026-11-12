@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fakeStream, fakeTerminal } from "../../test/helpers/ui-streams.js";
 import type { FakeTerminal } from "../../test/helpers/ui-streams.js";
@@ -37,6 +37,109 @@ const input = (over: { details?: (checked: ReadonlySet<string>) => string[] } = 
   hint: "↑/↓ move · space toggle · d show the exact changes · enter apply",
   groups: groups(),
   details: over.details ?? (() => ["EXACT"]),
+});
+
+describe("checklist: a list taller than the terminal", () => {
+  const tall = (): ChecklistGroup[] => [
+    { key: "g", title: "Everything", rows: Array.from({ length: 30 }, (_v, i) => ({ key: `r${i}`, label: `Row number ${i}`, checked: true })) },
+  ];
+  const tallInput = () => ({ title: "Choose", hint: "hint", groups: tall(), details: () => [] });
+  /** The last frame: what the cursor-up/erase sequence of the final redraw left on screen. */
+  const lastFrame = (shown: string): string[] => stripAnsi(shown.split("\u001b[J").pop() ?? "").split("\n").filter((l) => l !== "");
+
+  it("draws a window that fits, scrolls it with the cursor, and applies every row on Enter", async () => {
+    term = fakeTerminal({ rows: 12 });
+    const pending = checklist(richUi(), tallInput());
+    await tick();
+    let frame = lastFrame(term.shown());
+    expect(frame.length).toBeLessThanOrEqual(11);
+    expect(frame.join("\n")).toContain("Row number 0");
+    expect(frame.join("\n")).not.toContain("Row number 29");
+    expect(frame.join("\n")).toMatch(/↓ \d+ more/);
+    term.type("\u001b[A"); // wraps from the first row up through the header to the last row
+    term.type("\u001b[A");
+    await tick();
+    frame = lastFrame(term.shown());
+    expect(frame.length).toBeLessThanOrEqual(11);
+    expect(frame.join("\n")).toContain("Row number 29");
+    expect(frame.join("\n")).toMatch(/↑ \d+ more/);
+    term.type("\r");
+    const result = await pending;
+    expect(result.kind).toBe("apply");
+    expect(result.kind === "apply" && result.checked.size).toBe(30);
+  });
+
+  it("Space toggles the row the cursor is on after the window scrolled, and every frame keeps the same height", async () => {
+    term = fakeTerminal({ rows: 12 });
+    const pending = checklist(richUi(), tallInput());
+    await vi.waitFor(() => expect(term?.shown()).toContain("Row number 0"));
+    // From the first row down 15: the cursor is on row 15, far below the first window.
+    for (let i = 0; i < 15; i += 1) term.type("\u001b[B");
+    await vi.waitFor(() => expect(lastFrame(term?.shown() ?? "").join("\n")).toMatch(/› +■ Row number 15/));
+    const frame = lastFrame(term.shown());
+    expect(frame.join("\n")).toMatch(/↑ \d+ more/);
+    expect(frame.join("\n")).toMatch(/↓ \d+ more/);
+    expect(frame.join("\n")).not.toContain("Row number 0");
+    term.type(" ");
+    await vi.waitFor(() => expect(lastFrame(term?.shown() ?? "").join("\n")).toMatch(/› +□ Row number 15/));
+    // The window doesn't grow or shrink as the cursor moves: every redraw is the same height.
+    const heights = new Set(
+      term
+        .shown()
+        .split("\u001b[J")
+        .slice(1)
+        .map((chunk) => chunk.split("\n").length),
+    );
+    expect(heights.size).toBe(1);
+    term.type("\r");
+    const result = await pending;
+    expect(result.kind === "apply" && [...result.checked].sort()).toEqual(
+      Array.from({ length: 30 }, (_v, i) => `r${i}`)
+        .filter((k) => k !== "r15")
+        .sort(),
+    );
+  });
+
+  it("uses ASCII arrows for the more lines off a UTF-8 locale", async () => {
+    term = fakeTerminal({ rows: 12 });
+    const pending = checklist(createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { env: { LANG: "C" } }), tallInput());
+    await vi.waitFor(() => expect(lastFrame(term?.shown() ?? "").join("\n")).toMatch(/v \d+ more/));
+    expect(term.shown()).not.toMatch(/[↑↓]/);
+    term.type("\u001b[A");
+    term.type("\u001b[A");
+    await vi.waitFor(() => expect(lastFrame(term?.shown() ?? "").join("\n")).toMatch(/\^ \d+ more/));
+    term.type("\r");
+    expect((await pending).kind).toBe("apply");
+  });
+
+  it("assumes 24 rows when the terminal doesn't say how tall it is", async () => {
+    term = fakeTerminal();
+    const pending = checklist(richUi(), tallInput());
+    await vi.waitFor(() => expect(lastFrame(term?.shown() ?? "").join("\n")).toMatch(/↓ \d+ more/));
+    expect(lastFrame(term.shown()).length).toBeLessThanOrEqual(23);
+    term.type("\r");
+    await pending;
+  });
+
+  it("the line form lists every row, however short the terminal", async () => {
+    term = fakeTerminal({ rows: 12 });
+    const pending = checklist(plainUi(), tallInput());
+    await vi.waitFor(() => expect(term?.shown()).toContain("press Enter for all"));
+    expect(term.shown()).toContain("    1. Row number 0\n");
+    expect(term.shown()).toContain("    30. Row number 29\n");
+    expect(term.shown()).not.toMatch(/more/);
+    term.type("1-29\n");
+    expect(await pending).toEqual({ kind: "apply", checked: new Set(["r29"]) });
+  });
+
+  it("draws everything when the list fits", async () => {
+    term = fakeTerminal({ rows: 40 });
+    const pending = checklist(richUi(), input());
+    await tick();
+    expect(stripAnsi(term.shown())).not.toMatch(/more/);
+    term.type("\r");
+    await pending;
+  });
 });
 
 describe("checklist: rich form", () => {

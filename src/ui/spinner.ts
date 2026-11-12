@@ -19,6 +19,7 @@ export type SpinnerOptions = {
 
 let exitHooked = false;
 const active = new Set<NodeJS.WritableStream>();
+const signalHandlers = new Map<NodeJS.Signals, () => void>();
 
 function restoreAll(): void {
   for (const stream of active) {
@@ -31,9 +32,32 @@ function restoreAll(): void {
   active.clear();
 }
 
+function unhookSignals(): void {
+  for (const [signal, handler] of signalHandlers) process.off(signal, handler);
+  signalHandlers.clear();
+}
+
+/**
+ * Node doesn't emit 'exit' when a signal ends the process, so Ctrl-C on a live spinner would leave the cursor hidden.
+ * While a frame is live, SIGINT and SIGTERM restore the terminal first; if nobody else listens for the signal, it is then
+ * re-raised so the process ends the way it would have without us (and a listener elsewhere keeps deciding for itself).
+ */
+function hookSignals(): void {
+  if (signalHandlers.size > 0) return;
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const handler = (): void => {
+      restoreAll();
+      unhookSignals();
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    };
+    signalHandlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+}
+
 /**
  * Runs `work` and, while it takes longer than a moment on an animating terminal, shows a one-line spinner with
- * `label`. The cursor is hidden only while a frame is live and is restored on resolve, reject and process exit.
+ * `label`. The cursor is hidden only while a frame is live and is restored on resolve, reject, process exit and a terminating signal.
  * Prints nothing at all when not animating, so a pipe or a plain run is unchanged.
  */
 export async function spinner<T>(label: string, work: () => Promise<T>, opts: SpinnerOptions): Promise<T> {
@@ -52,6 +76,7 @@ export async function spinner<T>(label: string, work: () => Promise<T>, opts: Sp
   };
   const delay = setTimeout(() => {
     active.add(opts.out);
+    hookSignals();
     opts.out.write(HIDE);
     draw();
     timer = setInterval(draw, FRAME_MS);
@@ -66,6 +91,7 @@ export async function spinner<T>(label: string, work: () => Promise<T>, opts: Sp
       clearInterval(timer);
       opts.out.write(`${CLEAR_LINE}${SHOW}`);
       active.delete(opts.out);
+      if (active.size === 0) unhookSignals();
     }
   }
 }

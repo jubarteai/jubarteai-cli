@@ -450,6 +450,36 @@ describe.skipIf(!posix)("update: self-update", () => {
     expect(reexecArgs({ yes: false, keepMcp: false })).toEqual(["update", "--no-self-update"]);
     expect(reexecArgs({ yes: true, keepMcp: true })).toEqual(["update", "--no-self-update", "--yes", "--keep-mcp"]);
   });
+
+  it("the re-executed CLI gets --plain, --verbose and --show-changes from update's own command line", async () => {
+    stub("npm", { globalPrefix: sb.prefix });
+    stubEntry({ exitCode: 0 });
+    const r = await update(["--yes", "--plain", "--verbose", "--show-changes"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI) } });
+
+    expect(r.code, r.out).toBe(0);
+    expect(npmInstalls()).toHaveLength(1);
+    expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes", "--plain", "--verbose", "--show-changes"]]);
+  });
+
+  it("the re-executed CLI gets no output flag the command line didn't give", async () => {
+    stub("npm", { globalPrefix: sb.prefix });
+    stubEntry({ exitCode: 0 });
+    const r = await update(["--yes"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI) } });
+
+    expect(r.code, r.out).toBe(0);
+    expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes"]]);
+  });
+
+  it("re-exec arguments keep the output choices: --plain, --verbose and --show-changes", () => {
+    expect(reexecArgs({ yes: false, keepMcp: false, plain: true, verbose: true, showChanges: true })).toEqual([
+      "update",
+      "--no-self-update",
+      "--plain",
+      "--verbose",
+      "--show-changes",
+    ]);
+    expect(reexecArgs({ yes: false, keepMcp: false, plain: false, verbose: false, showChanges: false })).toEqual(["update", "--no-self-update"]);
+  });
 });
 
 describe.skipIf(!posix)("update: --check (D28, D29)", () => {

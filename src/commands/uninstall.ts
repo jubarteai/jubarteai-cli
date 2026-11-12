@@ -5,7 +5,7 @@
 // Signing out is local (D13): there is no server-side revoke, so the key keeps working until it is revoked in the
 // dashboard, and the command says so. Because it removes the saved logins of every repo on the machine, that row is
 // labelled as such and can be unchecked; `--keep-login` leaves the logins out of the plan.
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 
 import { refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
@@ -13,7 +13,7 @@ import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { suggest } from "../cli/suggest.js";
 import { readCredentials, removeSeat } from "../auth/credentials.js";
 import type { StoredSeat } from "../auth/credentials.js";
-import { bindingIsTracked, bindingRootFor, hasBindingFiles, removeBinding } from "../binding/binding.js";
+import { bindingIsTracked, bindingRootFor, hasBindingFiles, mainCheckoutBinding, mainCheckoutRoot, removeBinding } from "../binding/binding.js";
 import { CLI_NAME } from "../constants.js";
 import { ExitCode, UsageError } from "../errors.js";
 import { defaultDetectEnv } from "../harness/detect.js";
@@ -182,7 +182,25 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
       const bound = bindingRootFor(root);
       await guarded("uninstall-binding", "workspace binding", async () => {
         const step = bindingRemoval(bound);
-        return step === null ? [] : [step];
+        if (step === null) return [];
+        // A linked worktree with its own binding: once it goes, the worktree reads the main checkout's. Say so, and where it is.
+        // That note is only advice: a main-checkout binding that can't be read must not cost this worktree its own removal row.
+        let mainRoot = mainCheckoutRoot(bound);
+        if (mainRoot === null) return [step];
+        try {
+          mainRoot = mainCheckoutBinding(bound)?.root ?? null;
+        } catch {
+          // Unreadable or invalid: the file is still there, so the same advice holds; the doctor names the problem.
+        }
+        if (mainRoot === null || resolve(mainRoot) === resolve(bound)) return [step];
+        const note: ManualInstructions = {
+          kind: "manual",
+          harness: "claude-code",
+          title: "The main checkout keeps its own binding",
+          lines: [`${mainRoot}/.jubarteai still binds this repo, so every worktree of it without a binding of its own, this one included once its binding is gone, reads that one. To remove it too, run: jubarteai uninstall in ${mainRoot}.`],
+          reason: "removing a worktree's binding leaves the main checkout's in force",
+        };
+        return [step, note];
       });
     }
     await guarded("uninstall-skill", "skill", () => planSkillRemoval({ root, cwd: ctx.cwd }));

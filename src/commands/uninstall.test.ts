@@ -1,7 +1,7 @@
 // `jubarteai uninstall` through the router, after a real `init --yes` on the same throwaway machine: every file init wrote
 // is taken back to what it was (or removed when init made it), other tools' entries survive, and the approval rules of
 // init apply (a person's checklist, --yes, no terminal, never an agent).
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -86,6 +86,7 @@ describe.skipIf(!posix)("uninstall after init", () => {
     // Files init created are gone; the one it appended to is back to its text.
     expect(existsSync(join(sb.home, ".codex", "hooks.json"))).toBe(false);
     expect(read(join(sb.repo, "AGENTS.md"))).toBe("# Demo\n\nHello.\n");
+    // init made CLAUDE.md (git never saw it) and it holds only the import: it goes, though AGENTS.md keeps the user's text.
     expect(existsSync(join(sb.repo, "CLAUDE.md"))).toBe(false);
     expect(existsSync(join(sb.repo, ".jubarteai"))).toBe(false);
     expect(existsSync(join(sb.repo, ".gitignore")) ? read(join(sb.repo, ".gitignore")) : "").not.toContain("jubarteai");
@@ -125,6 +126,56 @@ describe.skipIf(!posix)("uninstall after init", () => {
     expect(existsSync(join(sb.repo, ".gitignore")) ? read(join(sb.repo, ".gitignore")) : "").not.toContain(".codex");
     // The person's own trust setting is theirs and stays.
     expect(read(join(sb.home, ".codex", "config.toml"))).toContain('trust_level = "trusted"');
+  });
+
+  it("in a worktree with its own binding it removes that one and names the main checkout's, which stays", async () => {
+    await initAll();
+    sb.git(["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "base"]);
+    const tree = join(sb.root, "wt");
+    sb.git(["worktree", "add", "-q", tree]);
+    const main = JSON.parse(read(join(sb.repo, ".jubarteai", "config.json"))) as Record<string, unknown>;
+    mkdirSync(join(tree, ".jubarteai"));
+    writeFileSync(join(tree, ".jubarteai", "config.json"), JSON.stringify(main));
+    const result = await run(["uninstall", "--yes", "--keep-login", "--skip-harness", "claude-code", "--skip-harness", "codex"], realpathSync(tree));
+    expect(result.code, result.err).toBe(0);
+    expect(existsSync(join(tree, ".jubarteai", "config.json"))).toBe(false);
+    expect(existsSync(join(sb.repo, ".jubarteai", "config.json"))).toBe(true);
+    expect(result.err).toContain("The main checkout keeps its own binding");
+    expect(result.err).toContain(`${realpathSync(sb.repo)}/.jubarteai`);
+  });
+
+  it("in a worktree it still removes its own binding when the main checkout's binding can't be read", async () => {
+    await initAll();
+    sb.git(["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "base"]);
+    const tree = join(sb.root, "wt");
+    sb.git(["worktree", "add", "-q", tree]);
+    const main = JSON.parse(read(join(sb.repo, ".jubarteai", "config.json"))) as Record<string, unknown>;
+    mkdirSync(join(tree, ".jubarteai"));
+    writeFileSync(join(tree, ".jubarteai", "config.json"), JSON.stringify(main));
+    // A binding written by a newer CLI: valid JSON, a version this one doesn't read.
+    writeFileSync(join(sb.repo, ".jubarteai", "config.json"), JSON.stringify({ ...main, version: 2 }));
+    const result = await run(["uninstall", "--yes", "--keep-login", "--skip-harness", "claude-code", "--skip-harness", "codex"], realpathSync(tree));
+    expect(result.code, result.err).toBe(0);
+    expect(result.err).not.toContain("could not read its config files");
+    expect(existsSync(join(tree, ".jubarteai", "config.json"))).toBe(false);
+    // The main checkout's file is untouched, and the output still says it stays.
+    expect(existsSync(join(sb.repo, ".jubarteai", "config.json"))).toBe(true);
+    expect(result.err).toContain("The main checkout keeps its own binding");
+  });
+
+  it("in a worktree with its own binding and none in the main checkout it removes that one and adds no note", async () => {
+    await initAll();
+    sb.git(["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "base"]);
+    const tree = join(sb.root, "wt");
+    sb.git(["worktree", "add", "-q", tree]);
+    const main = JSON.parse(read(join(sb.repo, ".jubarteai", "config.json"))) as Record<string, unknown>;
+    mkdirSync(join(tree, ".jubarteai"));
+    writeFileSync(join(tree, ".jubarteai", "config.json"), JSON.stringify(main));
+    rmSync(join(sb.repo, ".jubarteai"), { recursive: true, force: true });
+    const result = await run(["uninstall", "--yes", "--keep-login", "--skip-harness", "claude-code", "--skip-harness", "codex"], realpathSync(tree));
+    expect(result.code, result.err).toBe(0);
+    expect(existsSync(join(tree, ".jubarteai", "config.json"))).toBe(false);
+    expect(result.err + result.out).not.toContain("The main checkout keeps its own binding");
   });
 
   it("--keep-login leaves the saved logins", async () => {
@@ -214,7 +265,7 @@ describe.skipIf(!posix)("uninstall after init", () => {
     expect(result.err).toContain("git rm -r .jubarteai");
   });
 
-  it("removes a CLAUDE.md that init made, and only the import line from one it appended to", async () => {
+  it("removes the import line from a CLAUDE.md that init appended to, once AGENTS.md goes", async () => {
     writeFileSync(join(sb.repo, "CLAUDE.md"), "# Notes\n");
     await initAll();
     expect(read(join(sb.repo, "CLAUDE.md"))).toContain("@AGENTS.md");
@@ -223,5 +274,37 @@ describe.skipIf(!posix)("uninstall after init", () => {
     expect(read(join(sb.repo, "CLAUDE.md"))).toBe("# Notes\n");
     expect(existsSync(join(sb.repo, "AGENTS.md"))).toBe(false); // init created it, it held only the section
     expect(realpathSync(sb.repo)).toBeTruthy();
+  });
+
+  it("removes a CLAUDE.md that only imported the AGENTS.md init created", async () => {
+    await initAll();
+    expect(read(join(sb.repo, "CLAUDE.md"))).toBe("@AGENTS.md\n");
+    const result = await run(["uninstall", "--yes", "--keep-login"]);
+    expect(result.code, result.err).toBe(0);
+    expect(existsSync(join(sb.repo, "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(sb.repo, "AGENTS.md"))).toBe(false);
+  });
+
+  it("keeps a committed CLAUDE.md that only imports AGENTS.md while AGENTS.md survives, and says so", async () => {
+    writeFileSync(join(sb.repo, "CLAUDE.md"), "@AGENTS.md\n");
+    writeFileSync(join(sb.repo, "AGENTS.md"), "# Rules\n");
+    sb.git(["add", "CLAUDE.md", "AGENTS.md"]);
+    sb.git(["commit", "-q", "-m", "mine"]);
+    await initAll();
+    const result = await run(["uninstall", "--yes", "--keep-login"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.repo, "CLAUDE.md"))).toBe("@AGENTS.md\n");
+    expect(read(join(sb.repo, "AGENTS.md"))).toBe("# Rules\n");
+    expect(result.err + result.out).toContain("CLAUDE.md still imports AGENTS.md");
+  });
+
+  it("leaves a user's own CLAUDE.md alone in a repo init never touched", async () => {
+    writeFileSync(join(sb.repo, "AGENTS.md"), "# Rules\n");
+    writeFileSync(join(sb.repo, "CLAUDE.md"), "@AGENTS.md\n");
+    const result = await run(["uninstall", "--yes", "--keep-login"]);
+    expect(result.code, result.err).toBe(0);
+    expect(read(join(sb.repo, "CLAUDE.md"))).toBe("@AGENTS.md\n");
+    expect(read(join(sb.repo, "AGENTS.md"))).toBe("# Rules\n");
+    expect(result.out + result.err).not.toContain("held only the JubarteAI lines");
   });
 });

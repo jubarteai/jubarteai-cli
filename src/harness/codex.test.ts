@@ -582,3 +582,43 @@ describe("inspect", () => {
     expect(await adapter().inspect(ctx())).toMatchObject({ hooks: "manual" });
   });
 });
+
+describe("uninstall: the network opt-in", () => {
+  const PRIVATE_BLOCK = "# jubarteai: private Codex network setting\n/.codex/config.toml\n";
+  const networkStep = async (): Promise<PlanStep | undefined> => ((await adapter().uninstall?.(ctx())) ?? []).filter(isStep).find((s) => s.id === "codex:uninstall-network");
+  const networkManual = async (): Promise<ManualInstructions | undefined> => ((await adapter().uninstall?.(ctx())) ?? []).filter(isManual).find((m) => m.title === "Codex network access for jubarteai");
+
+  it("takes back a key in the private file init wrote (the ignore block proves it)", async () => {
+    write(projectConfig(), OPT_IN);
+    write(path.join(proj, ".gitignore"), PRIVATE_BLOCK);
+    const step = await networkStep();
+    expect(step).toBeDefined();
+    await applyPlan([step as PlanStep], { tty: false, yes: true, ...applyUi() });
+    expect(fs.existsSync(projectConfig())).toBe(false);
+    expect(fs.existsSync(path.join(proj, ".gitignore"))).toBe(false);
+  });
+
+  it("leaves a key the user set (no ignore block): prints instructions, plans nothing", async () => {
+    write(projectConfig(), OPT_IN);
+    expect(await networkStep()).toBeUndefined();
+    expect((await networkManual())?.lines.join("\n")).toContain("keep it");
+    expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
+  });
+
+  it("plans nothing, and never throws, when the key isn't set to true or the file isn't valid TOML", async () => {
+    write(path.join(proj, ".gitignore"), PRIVATE_BLOCK);
+    for (const text of [`[sandbox_workspace_write]\nnetwork_access = false\n`, `model = "p"\n`, `[sandbox_workspace_write\nnetwork_access = true\n`]) {
+      write(projectConfig(), text);
+      expect(await networkStep()).toBeUndefined();
+      expect(await networkManual()).toBeUndefined();
+      expect(fs.readFileSync(projectConfig(), "utf8")).toBe(text);
+    }
+  });
+
+  it("leaves a shared file alone: an ignore block for some other line is not proof", async () => {
+    write(projectConfig(), `model = "p"\n\n${OPT_IN}`);
+    write(path.join(proj, ".gitignore"), "node_modules\n");
+    expect(await networkStep()).toBeUndefined();
+    expect(await networkManual()).toBeDefined();
+  });
+});

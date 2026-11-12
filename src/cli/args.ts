@@ -14,6 +14,12 @@ export type FlagSpec = {
   /** Also accept `--<name>-file <path|->`, which reads the value from a file (or stdin for `-`). */
   file?: boolean;
   hidden?: boolean;
+  /**
+   * Booleans only: what `--no-<name>` does, for a flag whose negated form is the one people type (on by default, or a
+   * filter where false means something). Completion lists `--no-<name>` with this text. The parser accepts `--no-<name>`
+   * for every boolean either way.
+   */
+  negation?: string;
 };
 
 /**

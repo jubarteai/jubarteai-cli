@@ -29,6 +29,34 @@ describe("completion scripts", () => {
     });
   }
 
+  it("lists the --no- form of a boolean whose negated form is the one people type, and of no other flag", () => {
+    const info = describeCommands(COMMANDS);
+    const flagsOf = (name: string) => (info.find((command) => command.name === name)?.flags ?? []).map((flag) => flag.name);
+    expect(flagsOf("update")).toEqual(expect.arrayContaining(["self-update", "no-self-update"]));
+    expect(flagsOf("search-knowledge")).toEqual(expect.arrayContaining(["needs-verification", "no-needs-verification"]));
+    // Ordinary booleans keep one entry: no --no-json, --no-yes, --no-check.
+    expect(flagsOf("update")).not.toContain("no-check");
+    expect(flagsOf("update")).not.toContain("no-yes");
+    expect(flagsOf("search-knowledge")).not.toContain("no-json");
+    // A flag that is itself named no-… is never doubled into --no-no-….
+    for (const command of info) for (const flag of command.flags) expect(flag.name).not.toMatch(/^no-no-/);
+    for (const shell of SHELLS) {
+      const script = completionScript(shell, COMMANDS);
+      expect(script, shell).toContain(shell === "fish" ? "-l no-self-update" : "--no-self-update");
+      expect(script, shell).toContain(shell === "fish" ? "-l no-needs-verification" : "--no-needs-verification");
+    }
+  });
+
+  it("each listed --no- form is one the parser accepts", async () => {
+    for (const command of describeCommands(COMMANDS)) {
+      for (const flag of command.flags.filter((f) => f.name.startsWith("no-"))) {
+        const result = await run([command.name, `--${flag.name}`, "--help"]);
+        expect(result.err, `${command.name} --${flag.name}`).not.toContain("Unknown");
+        expect(result.code, `${command.name} --${flag.name}`).toBe(0);
+      }
+    }
+  });
+
   it("is built from the registry: a new command or flag shows up with no other change", () => {
     const registry = [...COMMANDS, { name: "brand-new", summary: "A new one", group: "setup" as const, flags: [{ name: "fresh-flag", type: "boolean" as const, description: "x" }], run: async () => 0 }];
     for (const shell of SHELLS) {

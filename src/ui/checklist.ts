@@ -15,6 +15,8 @@ export type ChecklistInput = { title: string; hint: string; groups: ChecklistGro
 
 const MAX_LINE_ATTEMPTS = 3;
 const ROW_LIMIT = 300;
+/** Rows assumed for a terminal that doesn't say. */
+const DEFAULT_ROWS = 24;
 
 type Item = { kind: "group"; group: number } | { kind: "row"; group: number; row: number };
 
@@ -133,23 +135,44 @@ async function richForm(ui: Ui, handle: TtyHandle, keys: AsyncIterable<Key>, inp
     const glyph = kind === "checked" ? g.checked : kind === "partial" ? g.partial : g.unchecked;
     return kind === "unchecked" ? ui.paint("dim", glyph) : ui.paint("brand", glyph);
   };
+  // The redraw moves the cursor up by the lines it drew, which can't reach above the top of the window: a list taller than
+  // the terminal would leave a copy of its top in the scrollback on every key. Past the window, only a slice around the
+  // cursor is drawn, between two fixed "more" lines, so the frame is always the same height and always fits.
+  const windowRows = (): number => {
+    const stream = handle.output as { rows?: unknown };
+    return typeof stream.rows === "number" && stream.rows > 0 ? stream.rows : DEFAULT_ROWS;
+  };
+  let top = 0;
+  const itemLine = (item: Item, here: boolean): string => {
+    const pointer = here ? ui.paint("accent", g.pointer) : " ";
+    if (item.kind === "group") {
+      const group = input.groups[item.group];
+      if (group === undefined) return "";
+      const note = group.note === undefined ? "" : `  ${ui.paint("dim", safeForDisplay(group.note, ROW_LIMIT))}`;
+      return `${ui.paint("dim", g.bar)}  ${pointer} ${box(groupState(state, item.group))} ${ui.paint("bold", safeForDisplay(group.title, ROW_LIMIT))}${note}`;
+    }
+    const row = input.groups[item.group]?.rows[item.row];
+    if (row === undefined) return "";
+    return `${ui.paint("dim", g.bar)}  ${pointer}     ${box(state[item.group]?.[item.row] === true)} ${safeForDisplay(row.label, ROW_LIMIT)}`;
+  };
   const render = (): void => {
     clear();
     const lines: string[] = [`${ui.paint("brand", g.active)}  ${ui.paint("bold", safeForDisplay(input.title, ROW_LIMIT))}`, `${ui.paint("dim", g.bar)}  ${ui.paint("dim", input.hint)}`];
-    items.forEach((item, index) => {
-      const here = index === cursor;
-      const pointer = here ? ui.paint("accent", g.pointer) : " ";
-      if (item.kind === "group") {
-        const group = input.groups[item.group];
-        if (group === undefined) return;
-        const note = group.note === undefined ? "" : `  ${ui.paint("dim", safeForDisplay(group.note, ROW_LIMIT))}`;
-        lines.push(`${ui.paint("dim", g.bar)}  ${pointer} ${box(groupState(state, item.group))} ${ui.paint("bold", safeForDisplay(group.title, ROW_LIMIT))}${note}`);
-      } else {
-        const row = input.groups[item.group]?.rows[item.row];
-        if (row === undefined) return;
-        lines.push(`${ui.paint("dim", g.bar)}  ${pointer}     ${box(state[item.group]?.[item.row] === true)} ${safeForDisplay(row.label, ROW_LIMIT)}`);
-      }
-    });
+    // Two lines for the title and hint, one for the cursor's own line of the shell below the frame.
+    const room = windowRows() - lines.length - 1;
+    if (items.length <= room) {
+      items.forEach((item, index) => lines.push(itemLine(item, index === cursor)));
+    } else {
+      const size = Math.max(1, room - 2);
+      if (cursor < top) top = cursor;
+      else if (cursor >= top + size) top = cursor - size + 1;
+      top = Math.max(0, Math.min(top, items.length - size));
+      const above = top;
+      const below = items.length - top - size;
+      lines.push(`${ui.paint("dim", g.bar)}  ${ui.paint("dim", above > 0 ? `${g.up} ${above} more` : "")}`);
+      items.slice(top, top + size).forEach((item, index) => lines.push(itemLine(item, top + index === cursor)));
+      lines.push(`${ui.paint("dim", g.bar)}  ${ui.paint("dim", below > 0 ? `${g.down} ${below} more` : "")}`);
+    }
     const fitted = lines.map((line) => truncate(line, width));
     out(`${fitted.join("\n")}\n`);
     drawn = fitted.length;

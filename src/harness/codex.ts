@@ -5,7 +5,7 @@
 // entry, because without network access its shell can't reach the CLI).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ensureIgnoreBlock, removeFileSafely, removeIgnoreBlock } from "../binding/gitignore.js";
+import { ensureIgnoreBlock, hasIgnoreBlock, removeFileSafely, removeIgnoreBlock } from "../binding/gitignore.js";
 import { runCommand } from "../install/run.js";
 import { safeForDisplay } from "../output.js";
 import { TomlConflictError, editTomlFile, readTomlKey, removeTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
@@ -410,7 +410,18 @@ async function uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructi
     const config = path.join(root, ".codex", "config.toml");
     const gitignore = path.join(root, ".gitignore");
     const text = readText(config);
-    if (text !== null && readTomlKey(text, NETWORK_TABLE, NETWORK_KEY) === true) {
+    const keySet = text !== null && readTomlKeySafe(text, NETWORK_TABLE, NETWORK_KEY) === true;
+    // init keeps the file it wrote private with a marked .gitignore block, and writes nothing like it when the key was
+    // already set or the file is shared with the repo. Only that block proves the key is ours to take back.
+    if (keySet && !hasIgnoreBlock(gitignore, IGNORE_BLOCK)) {
+      out.push(
+        manual(
+          "Codex network access for jubarteai",
+          [`${shownPath(config, ctx.home)} sets ${NETWORK_KEY} = true under [${NETWORK_TABLE}]. If init added it, delete that line; if you set it, or the file is shared with your repo, keep it.`],
+          "the setting isn't in a file only init wrote, so the CLI doesn't remove it",
+        ),
+      );
+    } else if (keySet) {
       const id = `${ID}:uninstall-network`;
       const label = `Remove the network opt-in for jubarteai from ${shownPath(config, ctx.home)}`;
       out.push({

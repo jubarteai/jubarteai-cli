@@ -306,14 +306,6 @@ export async function withRawTerminal<T>(
   }
 }
 
-/** One line of visible input after `question`. Null without a terminal or at end of input. */
-export async function promptLine(question: string): Promise<string | null> {
-  return withTerminal<string | null>(null, async (handle) => {
-    handle.output.write(question);
-    return readLine(handle, false);
-  });
-}
-
 /** Y/n question. Without a reachable TTY (or on end of input) it returns the default. */
 export async function confirm(question: string, opts: { defaultYes: boolean }): Promise<boolean> {
   return withTerminal(opts.defaultYes, async (handle) => {

@@ -9,8 +9,9 @@ import type { PlanStep, StepGroup } from "./plan.js";
 const LABEL_LIMIT = 200;
 const SEP = "\u0000";
 
+/** One group per repo root: in a linked worktree the binding goes to the main checkout and the instruction files stay here. */
 export function groupKey(group: StepGroup): string {
-  return group.kind === "harness" ? `harness:${group.id}` : group.kind === "repo" ? "repo" : "machine";
+  return group.kind === "harness" ? `harness:${group.id}` : group.kind === "repo" ? `repo:${group.root}` : "machine";
 }
 
 export function groupTitle(group: StepGroup): string {

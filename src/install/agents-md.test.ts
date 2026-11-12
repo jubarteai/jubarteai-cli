@@ -19,7 +19,7 @@ import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyPlan, summarize, type StepResult } from "../safe-edit/plan.js";
 import { AGENTS_MD_MARKERS, agentsMdSnippet, agentsMdSnippetHistory } from "./constants.js";
-import { inspectInstructions, notProjectReason, planInstructionSteps, type InstructionOptions } from "./agents-md.js";
+import { inspectInstructions, notProjectReason, planInstructionRemoval, planInstructionSteps, type InstructionOptions } from "./agents-md.js";
 import { applyUi } from "../../test/helpers/apply-ui.js";
 
 // The scenarios below are ported from the app's update.sh and install.sh tests
@@ -940,6 +940,90 @@ describe("the repository slug in the section", () => {
   it("does not substitute a slug with `$` in it: a replacement pattern never reaches the text", async () => {
     await run("update", { slug: "a$&b" });
     expect(read("AGENTS.md")).toContain("--repositories <repo-slug>");
+  });
+});
+
+describe.skipIf(!POSIX)("planInstructionRemoval: CLAUDE.md", () => {
+  const ids = (): string[] => planInstructionRemoval(proj).map((s) => ("id" in s ? s.id : "manual"));
+  const put = (name: string, text: string): void => writeFileSync(join(proj, name), text);
+
+  it("never plans CLAUDE.md when AGENTS.md has no JubarteAI section (the user's own import stays)", () => {
+    put("AGENTS.md", "# Rules\n");
+    put("CLAUDE.md", "@AGENTS.md\n");
+    expect(ids()).toEqual([]);
+  });
+
+  it("never plans CLAUDE.md when AGENTS.md keeps other content after the section goes", async () => {
+    put("AGENTS.md", `# Rules\n\n${SECTION}\n`);
+    put("CLAUDE.md", "# Notes\n@AGENTS.md\n");
+    expect(ids()).toEqual(["uninstall-agents-md", "manual"]);
+    for (const step of planInstructionRemoval(proj)) if ("apply" in step) await step.apply();
+    expect(readFileSync(join(proj, "AGENTS.md"), "utf8").trim()).toBe("# Rules");
+    expect(readFileSync(join(proj, "CLAUDE.md"), "utf8")).toBe("# Notes\n@AGENTS.md\n");
+  });
+
+  it("plans CLAUDE.md when AGENTS.md held only the section, and removes both", async () => {
+    put("AGENTS.md", `${SECTION}\n`);
+    put("CLAUDE.md", "@AGENTS.md\n");
+    expect(ids()).toEqual(["uninstall-agents-md", "uninstall-claude-md"]);
+    for (const step of planInstructionRemoval(proj)) if ("apply" in step) await step.apply();
+    expect(() => readFileSync(join(proj, "AGENTS.md"))).toThrow();
+    expect(() => readFileSync(join(proj, "CLAUDE.md"))).toThrow();
+  });
+
+  it("removes a CLAUDE.md that only holds the import and git has never seen, even while AGENTS.md keeps the user's text", async () => {
+    put("AGENTS.md", `# Rules\n\n${SECTION}\n`);
+    put("CLAUDE.md", "@AGENTS.md\n");
+    expect(ids()).toEqual(["uninstall-agents-md", "uninstall-claude-md"]);
+    for (const step of planInstructionRemoval(proj)) if ("apply" in step) await step.apply();
+    expect(() => readFileSync(join(proj, "CLAUDE.md"))).toThrow();
+    expect(readFileSync(join(proj, "AGENTS.md"), "utf8").trim()).toBe("# Rules");
+  });
+
+  it("keeps a committed CLAUDE.md that only holds the import while AGENTS.md survives: it may be the user's own", async () => {
+    put("AGENTS.md", `# Rules\n\n${SECTION}\n`);
+    put("CLAUDE.md", "@AGENTS.md\n");
+    git(["add", "CLAUDE.md"]);
+    expect(ids()).toEqual(["uninstall-agents-md", "manual"]);
+  });
+
+  it("keeps a gitignored CLAUDE.md that only holds the import while AGENTS.md survives: it is the user's own local file", async () => {
+    put("AGENTS.md", `# Rules\n\n${SECTION}\n`);
+    put("CLAUDE.md", "@AGENTS.md\n");
+    put(".gitignore", "CLAUDE.md\n");
+    expect(ids()).toEqual(["uninstall-agents-md", "manual"]);
+    for (const step of planInstructionRemoval(proj)) if ("apply" in step) await step.apply();
+    expect(readFileSync(join(proj, "CLAUDE.md"), "utf8")).toBe("@AGENTS.md\n");
+  });
+
+  it("keeps a CLAUDE.md that only holds the import when git can't say whether it ever saw it (not a repository)", async () => {
+    rmSync(join(proj, ".git"), { recursive: true, force: true });
+    put("AGENTS.md", `# Rules\n\n${SECTION}\n`);
+    put("CLAUDE.md", "@AGENTS.md\n");
+    expect(ids()).toEqual(["uninstall-agents-md", "manual"]);
+    for (const step of planInstructionRemoval(proj)) if ("apply" in step) await step.apply();
+    expect(readFileSync(join(proj, "CLAUDE.md"), "utf8")).toBe("@AGENTS.md\n");
+    expect(readFileSync(join(proj, "AGENTS.md"), "utf8").trim()).toBe("# Rules");
+  });
+
+  it("names the right reason when AGENTS.md goes with the section but the import is mid-file in CLAUDE.md", () => {
+    put("AGENTS.md", `${SECTION}\n`);
+    put("CLAUDE.md", "# Notes\n@AGENTS.md\nMore.\n");
+    const plan = planInstructionRemoval(proj);
+    expect(plan.map((s) => ("id" in s ? s.id : "manual"))).toEqual(["uninstall-agents-md", "manual"]);
+    const note = plan.find((s) => !("id" in s));
+    expect(note && "reason" in note ? note.reason : "").toContain("middle of CLAUDE.md");
+  });
+
+  it("keeps the import when the AGENTS.md step was declined", async () => {
+    put("AGENTS.md", `${SECTION}\n`);
+    put("CLAUDE.md", "@AGENTS.md\n");
+    git(["add", "CLAUDE.md"]);
+    const claude = planInstructionRemoval(proj).find((s) => "id" in s && s.id === "uninstall-claude-md");
+    if (claude === undefined || !("apply" in claude)) throw new Error("expected the CLAUDE.md step");
+    const res = await claude.apply();
+    expect(res.status).toBe("skipped");
+    expect(readFileSync(join(proj, "CLAUDE.md"), "utf8")).toBe("@AGENTS.md\n");
   });
 });
 

@@ -6,6 +6,7 @@ import { CliError } from "../errors.js";
 import {
   ensureIgnoreBlock,
   ensurePrivateGitignore,
+  hasIgnoreBlock,
   removeFileSafely,
   removeIgnoreBlock,
   removePrivateGitignore,
@@ -134,6 +135,45 @@ describe("ensureIgnoreBlock / removeIgnoreBlock", () => {
     writeFileSync(path, "other\nconfig.local.json\n");
     removeIgnoreBlock(path, ["config.local.json"], { deleteWhenEmpty: true });
     expect(readFileSync(path, "utf8")).toBe("other\n");
+  });
+});
+
+describe("hasIgnoreBlock", () => {
+  const BLOCK = ["# jubarteai: private Codex network setting", "/.codex/config.toml"];
+
+  it("is true only for the block's lines in order and next to each other", () => {
+    const path = join(root, ".gitignore");
+    writeFileSync(path, `node_modules\n${BLOCK.join("\n")}\ndist\n`);
+    expect(hasIgnoreBlock(path, BLOCK)).toBe(true);
+    // Both lines, but apart: not the block init writes.
+    writeFileSync(path, `${BLOCK[0]}\nother\n${BLOCK[1]}\n`);
+    expect(hasIgnoreBlock(path, BLOCK)).toBe(false);
+    // Reversed.
+    writeFileSync(path, `${BLOCK[1]}\n${BLOCK[0]}\n`);
+    expect(hasIgnoreBlock(path, BLOCK)).toBe(false);
+    // Only the pattern, with no marker: the user's own line.
+    writeFileSync(path, `${BLOCK[1]}\n`);
+    expect(hasIgnoreBlock(path, BLOCK)).toBe(false);
+  });
+
+  it("reads the block written by ensureIgnoreBlock, with CRLF line ends and trailing spaces too", () => {
+    const path = join(root, ".gitignore");
+    ensureIgnoreBlock(path, BLOCK);
+    expect(hasIgnoreBlock(path, BLOCK)).toBe(true);
+    writeFileSync(path, `a\r\n${BLOCK[0]}  \r\n${BLOCK[1]}\r\n`);
+    expect(hasIgnoreBlock(path, BLOCK)).toBe(true);
+  });
+
+  it("is false, never a throw, for a missing file, a directory or a refused symlink", () => {
+    expect(hasIgnoreBlock(join(root, "missing.gitignore"), BLOCK)).toBe(false);
+    expect(hasIgnoreBlock(root, BLOCK)).toBe(false);
+    if (posix) {
+      const target = join(root, "elsewhere");
+      writeFileSync(target, `${BLOCK.join("\n")}\n`);
+      const link = join(root, "linked.gitignore");
+      symlinkSync(target, link);
+      expect(hasIgnoreBlock(link, BLOCK)).toBe(false);
+    }
   });
 });
 

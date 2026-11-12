@@ -1,7 +1,7 @@
 // The inverse of what init writes, for the adapters' `uninstall()`: remove only the entries that are ours (matched the
 // way init and doctor recognise them), leave every other key and every other tool's entry, tidy the empty containers
 // we leave behind, and report through the same single approval gate (these are sensitive steps like their writers).
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 import { removeFileSafely } from "../binding/gitignore.js";
 import { harnessGroup } from "../safe-edit/plan.js";
@@ -174,13 +174,4 @@ export function jsonRemovalStep(spec: RemovalSpec): PlanStep | ManualInstruction
 
 function manualRemoval(spec: RemovalSpec, reason: string): ManualInstructions {
   return { kind: "manual", harness: spec.harness, title: spec.label, lines: [`Open ${shownPath(spec.file, spec.home)} and remove:`, ...spec.byHand], reason };
-}
-
-/** True when `file` exists and holds text matching `pattern` (cheap pre-check for files that aren't JSON). */
-export function fileHas(file: string, pattern: RegExp): boolean {
-  try {
-    return existsSync(file) && pattern.test(readFileSync(file, "utf8"));
-  } catch {
-    return false;
-  }
 }

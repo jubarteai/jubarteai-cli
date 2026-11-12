@@ -15,9 +15,15 @@ export type ToolSpec = {
 };
 
 /** A flag named after its argument: `--ttl-seconds` for `ttl_seconds`. */
-function flag(arg: string, type: FlagSpec["type"], description: string, extra: { file?: boolean; name?: string } = {}): ToolFlag {
+function flag(
+  arg: string,
+  type: FlagSpec["type"],
+  description: string,
+  extra: { file?: boolean; name?: string; negation?: string } = {},
+): ToolFlag {
   const spec: ToolFlag = { name: extra.name ?? arg.replaceAll("_", "-"), arg, type, description };
   if (extra.file === true) spec.file = true;
+  if (extra.negation !== undefined) spec.negation = extra.negation;
   return spec;
 }
 
@@ -86,7 +92,9 @@ export const TOOL_SPECS: ToolSpec[] = [
       flag("refs", "string[]", "Only entries with this ref (repeat for several)"),
       flag("kind", "string", `Only this kind: ${KINDS}`),
       flag("paths", "string[]", "Only entries touching this path (repeat for several)"),
-      flag("needs_verification", "boolean", "Only entries flagged (or not flagged) for re-verification"),
+      flag("needs_verification", "boolean", "Only entries flagged (or not flagged) for re-verification", {
+        negation: "Only entries not flagged for re-verification",
+      }),
       flag("include_superseded", "boolean", "Include entries another entry supersedes"),
       flag("limit", "number", "Most results to return (1-50, default 10)"),
     ],

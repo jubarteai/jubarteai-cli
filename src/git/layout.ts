@@ -86,6 +86,9 @@ export function linkedWorktree(top: string): LinkedWorktree | null {
   if (commonRel === "" || commonRel.includes("\0")) return null;
   const commonDir = realpathOrNull(isAbsolute(commonRel) ? commonRel : resolve(realGitDir, commonRel));
   if (commonDir === null || !isDirectory(commonDir)) return null;
+  // A real linked worktree's private git directory sits at exactly `<common>/worktrees/<name>`. A forged `.git` file can
+  // fabricate commondir and a back-link, but not make a folder of its choosing live under another repository's worktrees.
+  if (dirname(realGitDir) !== join(commonDir, "worktrees")) return null;
 
   const backLink = readSmallFile(join(realGitDir, "gitdir"), MAX_GIT_FILE_BYTES);
   if (backLink === null) return null;

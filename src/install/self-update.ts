@@ -282,13 +282,15 @@ function signalCode(signal: NodeJS.Signals | null): number {
 /**
  * Runs `node <entry> <args>` — `entry` is the bin script npm just replaced in place under the running install's
  * prefix, never whatever `jubarteai` comes first on PATH (that can be another, stale copy) — with this process's own
- * Node, inheriting the terminal, and resolves with its exit code. The environment is childEnv() (never the key).
+ * Node, inheriting the terminal, and resolves with its exit code. The environment is childEnv() (never the key) with
+ * JUBARTEAI_BANNER=off, so the continued run doesn't print a second banner.
  * While it runs, SIGINT and SIGTERM don't end this process: Ctrl-C reaches the child through the terminal, and a
  * SIGTERM is passed on to it.
  */
 export async function reexecCli(entry: string, args: string[]): Promise<ReexecOutcome> {
   if (!fileExists(entry)) return { started: false, reason: "not-found" };
-  const env = childEnv();
+  // The parent already printed the banner; the new CLI continues the same run and must not print it again.
+  const env = childEnv({ JUBARTEAI_BANNER: "off" });
   return new Promise<ReexecOutcome>((done) => {
     let child: ChildProcess;
     try {

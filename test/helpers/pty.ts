@@ -1,6 +1,6 @@
 // A real pseudo-terminal (node-pty: openpty on POSIX, ConPTY on Windows) around the built binary, for the tests that
 // press keys: the raw-mode checklist, the spinner, the banner at a given width. A missing or unbuildable node-pty
-// skips the test loudly, and CI (where `npm ci` builds it) must not.
+// skips the test loudly on a developer machine; on CI (where `npm ci` builds it) it fails the run instead.
 import { chmodSync, existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -27,7 +27,12 @@ export function loadPty(): NodePty | null {
     }
     cached = require("node-pty") as NodePty;
   } catch (error) {
-    console.warn(`pty tests skipped: node-pty is not usable here (${error instanceof Error ? error.message : "unknown error"})`);
+    const why = error instanceof Error ? error.message : "unknown error";
+    // CI builds node-pty with `npm ci`; if it can't load there, the terminal tests would pass by not running.
+    if (process.env["CI"] !== undefined && process.env["CI"] !== "" && process.env["CI"] !== "false" && process.env["CI"] !== "0") {
+      throw new Error(`node-pty is not usable on this CI runner, so the pty tests cannot run (${why})`, { cause: error });
+    }
+    console.warn(`pty tests skipped: node-pty is not usable here (${why})`);
     cached = null;
   }
   return cached;

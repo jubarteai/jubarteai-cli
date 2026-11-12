@@ -3,7 +3,7 @@
 // programs the CLI starts (npx, npm, claude, codex) and a scan that proves a key never lands where it must not.
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,15 +48,29 @@ export type Running = {
 };
 
 class DistMissingError extends Error {
-  constructor() {
-    super("dist/main.js is missing: run `npm run build` before the integration tests");
+  constructor(reason: string) {
+    super(`${reason}: run \`npm run build\` before the integration tests`);
     this.name = "DistMissingError";
   }
 }
 
-/** Fails fast, with the instruction, when the binary has not been built. */
+/** The newest modification time (ms) of a source file under `dir`, 0 when there is none. */
+function newestSourceMtime(dir: string): number {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) newest = Math.max(newest, newestSourceMtime(path));
+    else if (entry.isFile() && path.endsWith(".ts") && !path.endsWith(".test.ts")) newest = Math.max(newest, statSync(path).mtimeMs);
+  }
+  return newest;
+}
+
+/** Fails fast, with the instruction, when the binary has not been built or is older than the sources it was built from. */
 export function ensureBuilt(): void {
-  if (!existsSync(join(CLI_ROOT, "dist", "main.js"))) throw new DistMissingError();
+  const main = join(CLI_ROOT, "dist", "main.js");
+  if (!existsSync(main)) throw new DistMissingError("dist/main.js is missing");
+  // dist/main.js is the entry, but a rebuild rewrites every module: the oldest-looking check is the entry against the newest source.
+  if (statSync(main).mtimeMs < newestSourceMtime(join(CLI_ROOT, "src"))) throw new DistMissingError("dist/ is older than src/");
 }
 
 function findOnPath(command: string): string | null {

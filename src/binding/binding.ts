@@ -52,8 +52,18 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
+/** A binding file that exists but is not valid. `path` is the exact file (config.json or config.local.json). */
+export class InvalidBindingError extends UsageError {
+  readonly path: string;
+  constructor(path: string) {
+    super(`The workspace binding at ${path} is not valid. Fix it, or run: jubarteai link`);
+    this.name = "InvalidBindingError";
+    this.path = path;
+  }
+}
+
 function bindingError(path: string): UsageError {
-  return new UsageError(`The workspace binding at ${path} is not valid. Fix it, or run: jubarteai link`);
+  return new InvalidBindingError(path);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -189,23 +199,36 @@ function inheritFromMain(top: string): Binding | null {
  * main checkout has none). `doctor` uses it to say that a worktree's own binding shadows the main checkout's.
  */
 export function mainCheckoutBinding(cwd: string): Binding | null {
+  const main = mainCheckoutRoot(cwd);
+  return main === null ? null : readBindingAt(main);
+}
+
+/** The main checkout's folder for a command run inside a linked worktree (null outside one). Reads no binding file. */
+export function mainCheckoutRoot(cwd: string): string | null {
   const top = gitTopLevel(resolve(cwd));
   if (top === null) return null;
   const main = mainCheckoutOf(top);
   if (main === null || resolve(main) === resolve(top)) return null;
-  return readBindingAt(main);
+  return main;
 }
 
 /**
  * A shared binding committed to the repo has no email in the worktree (it lives in the ignored
  * `config.local.json` of the checkout that ran `init`). Take it from the main checkout's binding, but
- * only when that names the same workspace.
+ * only when that names the same workspace. Best effort: the main checkout's files are not this worktree's
+ * binding, so one that is unreadable or invalid there must not fail the worktree's own valid binding —
+ * the email just stays unknown (`doctor` reports the main checkout's file on its own).
  */
 function withMainEmail(found: Binding, top: string | null): Binding {
   if (found.email !== null || top === null || resolve(found.root) !== resolve(top)) return found;
   const main = mainCheckoutOf(top);
   if (main === null || resolve(main) === resolve(top)) return found;
-  const mainBinding = readBindingAt(main);
+  let mainBinding: Binding | null;
+  try {
+    mainBinding = readBindingAt(main);
+  } catch {
+    return found;
+  }
   if (mainBinding === null || mainBinding.workspace.id !== found.workspace.id || mainBinding.email === null) return found;
   return { ...found, email: mainBinding.email };
 }
@@ -213,13 +236,16 @@ function withMainEmail(found: Binding, top: string | null): Binding {
 /**
  * The folder a binding is written to for a command run in `cwd`: the main checkout when `cwd` is inside
  * a linked worktree that has one (so every worktree of a repo shares one binding), else the git top
- * level, else `cwd` itself.
+ * level, else `cwd` itself. A worktree that already has a binding of its own keeps writing it: that is the
+ * one `findBinding` reads there, so writing the main checkout's instead would change nothing the worktree sees.
  */
 export function bindingRootFor(cwd: string): string {
   const start = resolve(cwd);
   const top = gitTopLevel(start);
   if (top === null) return start;
-  return mainCheckoutOf(top) ?? top;
+  const main = mainCheckoutOf(top);
+  if (main === null || hasBindingFiles(top)) return top;
+  return main;
 }
 
 function writeRepoFile(path: string, data: string): void {

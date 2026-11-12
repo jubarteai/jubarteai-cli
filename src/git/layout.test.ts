@@ -71,6 +71,18 @@ describe("linkedWorktree", () => {
     expect(linkedWorktree(forged)).toBeNull();
   });
 
+  posix("rejects a forged layout whose gitdir lives in an untrusted folder, not under <common>/worktrees", () => {
+    const { main } = repoWithWorktree();
+    const evil = path.join(root, "evil");
+    const fakeGit = path.join(evil, "gitdir-store");
+    mkdirSync(fakeGit, { recursive: true });
+    // Every file git's back-link check reads, all forged by whoever owns the folder.
+    writeFileSync(path.join(fakeGit, "commondir"), `${path.join(main, ".git")}\n`);
+    writeFileSync(path.join(fakeGit, "gitdir"), `${path.join(evil, ".git")}\n`);
+    writeFileSync(path.join(evil, ".git"), `gitdir: ${fakeGit}\n`);
+    expect(linkedWorktree(evil)).toBeNull();
+  });
+
   posix("is null for a submodule-style .git file (no commondir)", () => {
     const sub = path.join(root, "sub");
     const modules = path.join(root, "super", ".git", "modules", "sub");

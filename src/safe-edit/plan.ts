@@ -1,7 +1,8 @@
 // The only way the CLI writes harness and security files (invariant I6): every
 // command that changes a config, hook, skill or instruction file builds a list of
-// steps and hands it to applyPlan, which shows what will happen, asks once, asks
-// again before each sensitive step, and runs the rest. Nothing else writes those files.
+// steps and hands it to applyPlan, which shows what will happen, asks once for the
+// whole plan (a checklist or one question), and runs what was approved. Nothing else
+// writes those files.
 import { agentSessionVar } from "../agent-session.js";
 import type { HarnessId } from "../session/harness-env.js";
 import { homeDir } from "../paths.js";
@@ -43,7 +44,7 @@ export const harnessGroup = (id: HarnessId): StepGroup => ({ kind: "harness", id
 export const repoGroup = (root: string): StepGroup => ({ kind: "repo", root });
 export const MACHINE_GROUP: StepGroup = { kind: "machine" };
 
-export type PlanStep = {
+type PlanStepBase = {
   id: string;
   label: string;
   /**
@@ -54,20 +55,31 @@ export type PlanStep = {
   kind?: "change" | "info";
   /** Required, so the compiler proves every builder says who its step is for. */
   group: StepGroup;
-  /** Other harnesses the same step serves (one `npx skills add -a a -a b` covers several): the step shows under `group` and these. */
-  alsoGroups?: HarnessId[];
-  /** The same step limited to the harnesses still checked; null when none is left. Only ever removes harnesses. */
-  narrow?(keep: ReadonlySet<HarnessId>): PlanStep | null;
   /** A choice asked before approval; the checklist is shown only after it is answered. */
   question?: StepQuestion;
   files: string[];
   /** Sensitive steps (hooks, permission files) are approved by a person in the checklist and never run without a TTY or --yes. */
   sensitive: boolean;
-  /** The exact entry shown in the per-step prompt. */
+  /** The exact entry shown behind `d` / "Show" in the approval, and with `--show-changes`. */
   preview?: string;
   flag?: string;
   apply(): Promise<StepResult>;
 };
+
+/**
+ * A step shown under more than one harness must also say how to run it for fewer of them: the checklist lets a person
+ * leave one harness out, and without `narrow` the step would run for all of them anyway. The type makes the two travel together.
+ */
+export type PlanStep = PlanStepBase &
+  (
+    | { alsoGroups?: undefined; narrow?: undefined }
+    | {
+        /** Other harnesses the same step serves (one `npx skills add -a a -a b` covers several): the step shows under `group` and these. */
+        alsoGroups: HarnessId[];
+        /** The same step limited to the harnesses still checked; null when none is left. Only ever removes harnesses. */
+        narrow(keep: ReadonlySet<HarnessId>): PlanStep | null;
+      }
+  );
 
 const DEFAULT_FLAG = "--yes";
 const NEEDS_CONFIRMATION = "needs confirmation";
@@ -124,6 +136,8 @@ const DEFAULT_HINT = "↑/↓ move · space toggle · d show the exact changes �
 async function approveInteractively(steps: PlanStep[], opts: ApplyOptions): Promise<ReadonlySet<string> | null> {
   const home = homeDir();
   const groups = approvalGroups(steps, home);
+  // Only findings (kind "info"): nothing to approve, so nothing to ask, and declining isn't what happened.
+  if (groups.length === 0) return new Set();
   const details = (checked: ReadonlySet<string>): string[] => exactChanges(steps, checked, home);
   if (opts.showChanges === true) for (const line of exactChanges(steps, new Set(groups.flatMap((g) => g.rows.map((r) => r.key))), home)) opts.ui.line(line);
   let result: ChecklistResult;

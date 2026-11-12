@@ -1,7 +1,7 @@
 // `jubarteai completion bash|zsh|fish|powershell`: prints a static completion script built from the command registry, so it
 // can never drift from the commands. It reads nothing from the machine, never edits a profile (the README shows the line
 // to add), and lists only public commands and non-hidden flags.
-import type { ParsedArgs } from "../cli/args.js";
+import type { FlagSpec, ParsedArgs } from "../cli/args.js";
 import { GLOBAL_FLAGS } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { suggest } from "../cli/suggest.js";
@@ -17,13 +17,24 @@ type CommandInfo = { name: string; summary: string; flags: FlagInfo[] };
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
 
+/** A visible flag, then its `--no-<name>` form when the spec says that form is the one people type. */
+function flagInfos(specs: readonly FlagSpec[]): FlagInfo[] {
+  return specs
+    .filter((spec) => spec.hidden !== true)
+    .flatMap((spec) => {
+      const info: FlagInfo[] = [{ name: spec.name, description: oneLine(spec.description) }];
+      if (spec.type === "boolean" && spec.negation !== undefined) info.push({ name: `no-${spec.name}`, description: oneLine(spec.negation) });
+      return info;
+    });
+}
+
 /** The public commands with their flags (own, then the global ones), in help order. */
 export function describeCommands(commands: readonly CommandDef[]): CommandInfo[] {
-  const globals = GLOBAL_FLAGS.filter((spec) => spec.hidden !== true).map((spec) => ({ name: spec.name, description: oneLine(spec.description) }));
+  const globals = flagInfos(GLOBAL_FLAGS);
   return commands
     .filter((command) => command.group !== "internal")
     .map((command) => {
-      const own = command.flags.filter((spec) => spec.hidden !== true).map((spec) => ({ name: spec.name, description: oneLine(spec.description) }));
+      const own = flagInfos(command.flags);
       const ownNames = new Set(own.map((flag) => flag.name));
       return { name: command.name, summary: oneLine(command.summary), flags: [...own, ...globals.filter((flag) => !ownNames.has(flag.name))] };
     });

@@ -74,6 +74,16 @@ export function ensureIgnoreBlock(path: string, block: readonly string[]): { cha
   return { changed: true };
 }
 
+/** Whether `path` holds `block` as consecutive lines. False for a missing, unreadable or refused file. */
+export function hasIgnoreBlock(path: string, block: readonly string[]): boolean {
+  try {
+    const file = readIgnoreFile(path);
+    return file.exists && hasBlock(file.lines, block);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Removes every consecutive occurrence of `block` and nothing else. With `deleteWhenEmpty`, a file
  * left with no lines at all is deleted (for a file the CLI created itself).

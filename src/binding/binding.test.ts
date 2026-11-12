@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CliError } from "../errors.js";
-import { bindingRootFor, convertBinding, findBinding, writeBinding } from "./binding.js";
+import { bindingRootFor, convertBinding, findBinding, mainCheckoutBinding, mainCheckoutRoot, writeBinding } from "./binding.js";
 
 const MARKER = "# jubarteai: private workspace binding";
 const WORKSPACE = { id: "22222222-0000-4000-8000-000000000001", slug: "acme" };
@@ -254,6 +254,55 @@ describe("findBinding", () => {
       expect(findBinding(tree)?.email).toBeNull();
     });
 
+    worktreeIt("a worktree's valid shared binding survives an unreadable main checkout binding, with the email unknown", () => {
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: true });
+      const tree = addWorktree();
+      writeRaw(tree, "config.json", JSON.stringify({ version: 1, workspace: WORKSPACE }));
+      // A corrupt local file in the main checkout, then a config.json of an unsupported version there.
+      writeRaw(repo, "config.local.json", "{ not json");
+      const corruptLocal = findBinding(tree);
+      expect(corruptLocal?.workspace.slug).toBe("acme");
+      expect(corruptLocal?.email).toBeNull();
+      // A valid local file again, so the version is the only thing wrong with the main checkout's binding below.
+      writeRaw(repo, "config.local.json", JSON.stringify({ version: 1, user: { email: "a@example.com" } }));
+      expect(findBinding(tree)?.email).toBe("a@example.com");
+      writeRaw(repo, "config.json", JSON.stringify({ version: 2, workspace: WORKSPACE }));
+      const futureMain = findBinding(tree);
+      expect(futureMain?.workspace.slug).toBe("acme");
+      expect(futureMain?.email).toBeNull();
+    });
+
+    worktreeIt("mainCheckoutRoot names the main checkout from a worktree, without reading any binding", () => {
+      const tree = addWorktree();
+      expect(mainCheckoutRoot(tree)).toBe(repo);
+      mkdirSync(join(tree, "deep"));
+      expect(mainCheckoutRoot(join(tree, "deep"))).toBe(repo);
+      // An invalid binding there doesn't matter: only the folder is asked for.
+      writeRaw(repo, "config.json", "{ not json");
+      expect(mainCheckoutRoot(tree)).toBe(repo);
+      expect(() => mainCheckoutBinding(tree)).toThrow(CliError);
+    });
+
+    worktreeIt("mainCheckoutRoot is null in the main checkout itself, outside git and for a forged .git file", () => {
+      addWorktree();
+      expect(mainCheckoutRoot(repo)).toBeNull();
+      const plain = join(sandbox, "plain-nowhere");
+      mkdirSync(plain);
+      expect(mainCheckoutRoot(plain)).toBeNull();
+      const forged = join(sandbox, "forged");
+      mkdirSync(forged);
+      writeFileSync(join(forged, ".git"), `gitdir: ${join(repo, ".git")}\n`);
+      expect(mainCheckoutRoot(forged)).toBeNull();
+    });
+
+    worktreeIt("mainCheckoutBinding is null from a worktree whose main checkout has no binding, and the main one when it has", () => {
+      const tree = addWorktree();
+      expect(mainCheckoutBinding(tree)).toBeNull();
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: false });
+      expect(mainCheckoutBinding(tree)?.root).toBe(repo);
+      expect(mainCheckoutBinding(repo)).toBeNull();
+    });
+
     worktreeIt("a forged .git file inherits nothing", () => {
       writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: false });
       const forged = join(sandbox, "forged");
@@ -269,6 +318,18 @@ describe("findBinding", () => {
       expect(bindingRootFor(join(tree, "deep"))).toBe(repo);
       expect(bindingRootFor(repo)).toBe(repo);
       expect(bindingRootFor(join(sandbox, "plain-nowhere"))).toBe(join(sandbox, "plain-nowhere"));
+    });
+
+    worktreeIt("a worktree with its own binding keeps writing that one, so findBinding sees the change", () => {
+      const tree = addWorktree();
+      const other = { id: "22222222-0000-4000-8000-000000000002", slug: "other" };
+      writeBinding(repo, { workspace: WORKSPACE, email: "a@example.com", shared: false });
+      writeBinding(tree, { workspace: WORKSPACE, email: "a@example.com", shared: false });
+      expect(bindingRootFor(tree)).toBe(tree);
+      writeBinding(bindingRootFor(tree), { workspace: other, email: "a@example.com", shared: false });
+      expect(findBinding(tree)?.workspace.slug).toBe("other");
+      // The main checkout's binding is untouched.
+      expect(findBinding(repo)?.workspace.slug).toBe("acme");
     });
   });
 
