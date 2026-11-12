@@ -87,7 +87,7 @@ export function createTimeline(ui: Ui): Timeline {
         return;
       }
       const glyph = opts?.warn === true ? ui.paint("warn", g.warn) : ui.paint("ok", g.done);
-      ui.line(truncate(`${glyph}  ${safeName.padEnd(HEADER_WIDTH)}${safeValue}`, mode.columns));
+      ui.line(truncate(`${glyph}  ${safeName.padEnd(Math.max(HEADER_WIDTH, safeName.length + 1))}${safeValue}`, mode.columns));
     },
 
     row(kind, group, text, detail) {

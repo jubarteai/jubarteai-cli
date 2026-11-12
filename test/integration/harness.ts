@@ -98,6 +98,8 @@ export type Sandbox = {
   runs: Array<{ args: string[]; result: RunResult }>;
   run(args: string[], opts?: RunOptions): Promise<RunResult>;
   start(args: string[], opts?: RunOptions): Running;
+  /** The sandbox's environment for a child of the caller's own (a pseudo-terminal session): HOME, PATH with only the stubs, and `extra`. */
+  env(extra?: Record<string, string | undefined>): NodeJS.ProcessEnv;
   /** Starts any program in the sandbox's environment (stdin is left open for the caller). */
   startCommand(file: string, argv: string[], opts?: RunOptions): Running;
   /** Runs a shell command line the way a harness runs a registered hook: `sh -c`, the sandbox's environment, JSON on stdin. POSIX only. */
@@ -282,6 +284,7 @@ export function createSandbox(options: SandboxOptions = {}): Sandbox {
       return running.exit;
     },
     startCommand: (file, argv, opts = {}) => startProcess(file, argv, [file, ...argv], opts),
+    env: (extra = {}) => childEnv(box, extra),
     async runShell(command, opts = {}) {
       return runChild("/bin/sh", ["-c", command], opts);
     },

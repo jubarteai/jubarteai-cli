@@ -197,7 +197,8 @@ async function chooseAccount(ctx: CommandContext, root: string | null, opts: Acc
   }
 
   const { seat } = proposal.entry;
-  if (!tty || ctx.globals.yes) return useStored(ctx, seat);
+  // A person is asked which account; an agent's shell takes the proposal (a prompt there could be answered by the agent).
+  if (!tty || ctx.globals.yes || agentSessionVar() !== null) return useStored(ctx, seat);
   if (await confirm(useAccountQuestion(safeForDisplay(seat.user.email, DISPLAY_MAX), workspaceName(seat)), { defaultYes: true })) return useStored(ctx, seat);
 
   const entries = seatEntries(credentials);

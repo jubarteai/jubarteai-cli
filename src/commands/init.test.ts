@@ -439,6 +439,34 @@ describe("init: the one approval", () => {
   });
 });
 
+describe("init inside an agent's shell (R-M1, C4)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  for (const yes of [false, true]) {
+    it(`shows no checklist or question to a scripted terminal and applies no sensitive step (${yes ? "--yes" : "no flag"})`, async () => {
+      storeSeats();
+      vi.stubEnv("CLAUDECODE", "1");
+      // A terminal that would press Enter, space, y and n for anything it was asked.
+      const tty = scriptedTty(() => "y");
+      const result = await run(["init", ...(yes ? ["--yes"] : []), "--keep-mcp"]);
+      expect(result.code, result.err).toBe(0);
+      expect(tty.prompts).toEqual([]);
+      expect(tty.shown()).toBe("");
+      expect(result.err).not.toContain(INIT_COPY.checklistTitle);
+      // The non-sensitive steps ran (the binding, the AGENTS.md section, the skill); each sensitive one needs the person.
+      expect(existsSync(join(sb.repo, ".jubarteai", "config.json"))).toBe(true);
+      expect(existsSync(join(sb.repo, "AGENTS.md"))).toBe(true);
+      expect(existsSync(join(sb.home, ".claude", "settings.json"))).toBe(false);
+      expect(existsSync(join(sb.home, ".codex", "hooks.json"))).toBe(false);
+      expect(result.err).toContain("needs your approval");
+      // The binding stayed private: the share question is only ever asked of a person.
+      expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ user: { email: "ada@example.com" } });
+    });
+  }
+});
+
 describe("init: the binding", () => {
   it("is private with no terminal, and without being asked under --yes", async () => {
     withEnvKey();
