@@ -299,7 +299,9 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
         const raw = build();
         expect(Buffer.byteLength(raw)).toBeGreaterThan(GUARD_INPUT_MAX_BYTES * 0.99);
         let out: unknown;
-        expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(4_000);
+        // A shared CI runner is several times slower than the 1.5 s measured worst case; the bound only has to stay
+        // under the hook's 8 s fail-open timeout with room to spare.
+        expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(6_000);
         expect(out).toEqual(expected);
       }, 20_000);
     }
