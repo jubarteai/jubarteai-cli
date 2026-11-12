@@ -29,6 +29,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
+          # "22.x" would otherwise resolve to an older release preinstalled on the runner.
+          check-latest: true
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -85,7 +87,7 @@ jobs:
           cat stderr.txt
           test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
           test ! -s stdout.txt || { echo "expected empty stdout"; exit 1; }
-          grep -Eq '^jubarteai needs Node 22\.23\.4 or newer \(you have 20\.[0-9.]+\)\. Upgrade: https://nodejs\.org/en/download' stderr.txt
+          grep -Eq '^jubarteai needs Node 22\.23\.5 or newer \(you have 20\.[0-9.]+\)\. Upgrade: https://nodejs\.org/en/download' stderr.txt
       - name: hook exits 0 and prints nothing
         shell: bash
         run: |

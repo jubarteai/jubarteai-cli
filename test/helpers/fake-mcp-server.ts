@@ -193,6 +193,8 @@ const ENV_KEYS = [
   "XDG_CONFIG_HOME",
   "APPDATA",
   "TMPDIR",
+  "TEMP",
+  "TMP",
   "JUBARTEAI_TOKEN",
   "JUBARTEAI_URL",
   "CLAUDE_CODE_SESSION_ID",
@@ -216,6 +218,8 @@ export function createSandbox(): Sandbox {
   process.env["XDG_CONFIG_HOME"] = join(dir, ".config");
   process.env["APPDATA"] = join(dir, "AppData");
   process.env["TMPDIR"] = join(dir, "tmp");
+  process.env["TEMP"] = join(dir, "tmp");
+  process.env["TMP"] = join(dir, "tmp");
   for (const key of ["JUBARTEAI_TOKEN", "JUBARTEAI_URL", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]) delete process.env[key];
   resetEnvTokenForTests();
   const repo = join(dir, "repo");

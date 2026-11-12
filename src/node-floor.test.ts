@@ -120,8 +120,8 @@ describe("node floor", () => {
 
   describe("release metadata (CREL)", () => {
     const full = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as Record<string, unknown>;
-    const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-    const release = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+    const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const release = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
     it("the CI matrix names every floor and the latest of each line", () => {
       const line = /^\s+node: \[(.*)\]\s*$/m.exec(ci);
