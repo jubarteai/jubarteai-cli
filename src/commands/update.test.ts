@@ -235,7 +235,7 @@ async function update(argv: string[] = [], opts: RunOpts = {}): Promise<RunResul
     isTty: () => false,
     confirm,
     latestSkill: sb.latest,
-    nodeVersion: "24.22.1",
+    nodeVersion: "24.22.3",
     cliCommand: () => ({ command: NEW_HOOK_COMMAND, npx: false }),
     locateInstall: () => ({ prefix: sb.prefix, entry: entryFile() }),
     ...opts.deps,

@@ -160,7 +160,7 @@ function nodeCheck(): Check {
     id: "node",
     level: ok ? "ok" : "fail",
     label: "Node",
-    detail: ok ? `v${version}` : `v${version} is below what jubarteai needs. Install a current Node LTS (22.23.4, 24.22.1, 26.12.1 or newer)`,
+    detail: ok ? `v${version}` : `v${version} is below what jubarteai needs. Install a current Node LTS (22.23.5, 24.22.3, 26.13.1 or newer)`,
     data: { version, meets_floor: ok },
   };
 }

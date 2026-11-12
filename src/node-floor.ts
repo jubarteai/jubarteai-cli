@@ -1,9 +1,9 @@
 // Must match the FLOORS table inlined in bin/jubarteai.js and package.json
 // "engines.node" (node-floor.test.ts compares all three).
 
-export const NODE_FLOORS: Readonly<Record<22 | 24 | 26, string>> = { 22: "22.23.4", 24: "24.22.1", 26: "26.12.1" };
+export const NODE_FLOORS: Readonly<Record<22 | 24 | 26, string>> = { 22: "22.23.5", 24: "24.22.3", 26: "26.13.1" };
 
-export const ENGINES_RANGE = "^22.23.4 || ^24.22.1 || >=26.12.1";
+export const ENGINES_RANGE = "^22.23.5 || ^24.22.3 || >=26.13.1";
 
 /** The newest LTS line named in NODE_FLOORS; every even major above it is accepted. */
 const LAST_LINE = 26;

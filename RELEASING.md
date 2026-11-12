@@ -44,7 +44,7 @@ Do not configure the trusted publisher yet.
 
 ## Before every tag: re-check the Node floor
 
-The floor is the security-patched Node release of each LTS line (grill D33). On 2026-11-10 it was `22.23.4` / `24.22.1` / `26.12.1`; the 2026-11-11 Node security release (High severity on all three lines) was announced but not out (`docs/plans/jubarteai-cli-proofs/p4-node-npm.md` in the app repo).
+The floor is the security-patched Node release of each LTS line (grill D33). On 2026-11-10 it was `22.23.4` / `24.22.1` / `26.12.1`; since the 2026-11-10/11 Node security releases it is `22.23.5` / `24.22.3` / `26.13.1` (released as 0.1.1). `docs/plans/jubarteai-cli-proofs/p4-node-npm.md` in the app repo has the background.
 
 **On or after 2026-11-11, before the first tag**, and again before each later release:
 

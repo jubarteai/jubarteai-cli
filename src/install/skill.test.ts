@@ -216,7 +216,7 @@ async function plan(opts: Opts = {}): Promise<PlanStep[]> {
     mode: opts.mode ?? "update",
     agents: opts.agents ?? [],
     latest: opts.latest === undefined ? sb.latest : opts.latest,
-    nodeVersion: opts.nodeVersion ?? "24.22.1",
+    nodeVersion: opts.nodeVersion ?? "24.22.3",
   });
 }
 
@@ -735,7 +735,7 @@ describe.skipIf(!posix)("skill: Node below the floor", () => {
 
     const step = find(results, "Update skill");
     expect(step.status).toBe("skipped");
-    expect(step.detail).toMatch(/^Node v22\.13\.0 found; the skills CLI needs >= 22\.23\.4\. Then run: /);
+    expect(step.detail).toMatch(/^Node v22\.13\.0 found; the skills CLI needs >= 22\.23\.5\. Then run: /);
     expect(step.detail).toContain(`cd ${sb.project} && npx -y skills@${SKILLS_CLI_VERSION} add ${SKILL_REPO} -a claude-code -y`);
     expect(calls("npx")).toEqual([]);
     expect(readFileSync(join(dir, "SKILL.md"), "utf8")).toBe(before);
@@ -782,7 +782,7 @@ describe.skipIf(!posix)("skill: Node below the floor", () => {
     writeFileSync(join(sb.project, "skills-lock.json"), LOCK);
     stubNpx({ copyTo: { project: [dir] } });
     expect((await run({ nodeVersion: "22.23.3" })).results[0]?.status).toBe("skipped");
-    expect((await run({ nodeVersion: "22.23.4" })).results[0]?.status).toBe("configured");
+    expect((await run({ nodeVersion: "22.23.5" })).results[0]?.status).toBe("configured");
     expect(calls("npx")).toHaveLength(1);
   });
 });
@@ -882,7 +882,7 @@ describe.skipIf(!posix)("skill: init", () => {
     const { results } = await run({ mode: "init", agents: ["cursor"], nodeVersion: "20.12.0" });
     expect(results[0]?.status).toBe("skipped");
     expect(results[0]?.detail).toBe(
-      `Node v20.12.0 found; the skills CLI needs >= 22.23.4. Then run: cd ${sb.project} && npx -y skills@${SKILLS_CLI_VERSION} add ${SKILL_REPO} -a cursor -y`,
+      `Node v20.12.0 found; the skills CLI needs >= 22.23.5. Then run: cd ${sb.project} && npx -y skills@${SKILLS_CLI_VERSION} add ${SKILL_REPO} -a cursor -y`,
     );
     expect(calls("npx")).toEqual([]);
   });
