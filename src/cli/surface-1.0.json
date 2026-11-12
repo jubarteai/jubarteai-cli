@@ -1,0 +1,280 @@
+{
+  "commands": {
+    "call": {
+      "group": "tools",
+      "flags": {
+        "json": "json"
+      }
+    },
+    "check-inbox": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "wait-seconds": "number",
+        "watch-minutes": "number"
+      }
+    },
+    "claim": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "resource": "string",
+        "ttl-seconds": "number"
+      }
+    },
+    "completion": {
+      "group": "setup",
+      "flags": {}
+    },
+    "connect": {
+      "group": "tools",
+      "flags": {
+        "description": "string",
+        "json": "json"
+      }
+    },
+    "create-knowledge": {
+      "group": "tools",
+      "flags": {
+        "branches": "string[]",
+        "description": "string",
+        "json": "json",
+        "kind": "string",
+        "metadata": "json",
+        "paths": "string[]",
+        "refs": "string[]",
+        "repositories": "string[]",
+        "tags": "string[]",
+        "title": "string"
+      }
+    },
+    "disconnect": {
+      "group": "tools",
+      "flags": {
+        "json": "json"
+      }
+    },
+    "doctor": {
+      "group": "setup",
+      "flags": {
+        "json": "boolean"
+      }
+    },
+    "echo-current-task": {
+      "group": "tools",
+      "flags": {
+        "branches": "string[]",
+        "description": "string",
+        "json": "json",
+        "paths": "string[]",
+        "refs": "string[]",
+        "repositories": "string[]",
+        "tickets": "string[]",
+        "title": "string"
+      }
+    },
+    "get-knowledge": {
+      "group": "tools",
+      "flags": {
+        "id": "string",
+        "json": "json",
+        "name": "string"
+      }
+    },
+    "hook": {
+      "group": "internal",
+      "flags": {
+        "harness": "string"
+      }
+    },
+    "inbox": {
+      "group": "tools",
+      "flags": {
+        "minutes": "number",
+        "wait": "number",
+        "watch": "boolean"
+      }
+    },
+    "init": {
+      "group": "setup",
+      "flags": {
+        "keep-mcp": "boolean",
+        "no-browser": "boolean",
+        "no-hooks": "boolean",
+        "no-permissions": "boolean",
+        "paste": "boolean",
+        "private-binding": "boolean",
+        "share-binding": "boolean",
+        "show-changes": "boolean",
+        "skip-harness": "string[]"
+      }
+    },
+    "link": {
+      "group": "setup",
+      "flags": {
+        "private-binding": "boolean",
+        "share-binding": "boolean"
+      }
+    },
+    "list-agents": {
+      "group": "tools",
+      "flags": {
+        "json": "json"
+      }
+    },
+    "list-knowledge-gaps": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "limit": "number",
+        "status": "string"
+      }
+    },
+    "list-knowledge-merges": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "limit": "number",
+        "status": "string"
+      }
+    },
+    "login": {
+      "group": "account",
+      "flags": {
+        "no-browser": "boolean",
+        "paste": "boolean",
+        "with-token": "boolean"
+      }
+    },
+    "logout": {
+      "group": "account",
+      "flags": {
+        "email": "string"
+      }
+    },
+    "message-agents": {
+      "group": "tools",
+      "flags": {
+        "all": "boolean",
+        "content": "string",
+        "json": "json",
+        "priority": "string",
+        "reply-to": "string",
+        "to": "string[]"
+      }
+    },
+    "release": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "resource": "string"
+      }
+    },
+    "resolve-knowledge-merge": {
+      "group": "tools",
+      "flags": {
+        "action": "string",
+        "description": "string",
+        "id": "string",
+        "json": "json",
+        "snooze-days": "number",
+        "title": "string"
+      }
+    },
+    "search-knowledge": {
+      "group": "tools",
+      "flags": {
+        "branches": "string[]",
+        "include-superseded": "boolean",
+        "json": "json",
+        "kind": "string",
+        "limit": "number",
+        "needs-verification": "boolean",
+        "paths": "string[]",
+        "query": "string",
+        "refs": "string[]",
+        "repositories": "string[]"
+      }
+    },
+    "status": {
+      "group": "account",
+      "flags": {
+        "json": "boolean"
+      }
+    },
+    "uninstall": {
+      "group": "setup",
+      "flags": {
+        "keep-login": "boolean",
+        "show-changes": "boolean",
+        "skip-harness": "string[]"
+      }
+    },
+    "update": {
+      "group": "setup",
+      "flags": {
+        "check": "boolean",
+        "keep-mcp": "boolean",
+        "self-update": "boolean",
+        "show-changes": "boolean"
+      }
+    },
+    "update-knowledge": {
+      "group": "tools",
+      "flags": {
+        "branches": "string[]",
+        "description": "string",
+        "expected-updated-at": "string",
+        "id": "string",
+        "json": "json",
+        "kind": "string",
+        "metadata": "json",
+        "paths": "string[]",
+        "refs": "string[]",
+        "repositories": "string[]",
+        "tags": "string[]",
+        "title": "string"
+      }
+    },
+    "verify-knowledge": {
+      "group": "tools",
+      "flags": {
+        "expected-updated-at": "string",
+        "id": "string",
+        "json": "json"
+      }
+    }
+  },
+  "aliases": {
+    "check_inbox": "check-inbox",
+    "create_knowledge": "create-knowledge",
+    "echo_current_task": "echo-current-task",
+    "get_knowledge": "get-knowledge",
+    "list_agents": "list-agents",
+    "list_knowledge_gaps": "list-knowledge-gaps",
+    "list_knowledge_merges": "list-knowledge-merges",
+    "message_agents": "message-agents",
+    "resolve_knowledge_merge": "resolve-knowledge-merge",
+    "search_knowledge": "search-knowledge",
+    "update_knowledge": "update-knowledge",
+    "verify_knowledge": "verify-knowledge"
+  },
+  "globalFlags": {
+    "workspace": "string",
+    "agent": "string",
+    "pretty": "boolean",
+    "yes": "boolean",
+    "plain": "boolean",
+    "verbose": "boolean",
+    "help": "boolean",
+    "version": "boolean"
+  },
+  "exitCodes": {
+    "OK": 0,
+    "SERVER_ERROR": 1,
+    "USAGE": 2,
+    "AUTH": 3,
+    "NETWORK": 4,
+    "NO_SEAT": 5
+  }
+}

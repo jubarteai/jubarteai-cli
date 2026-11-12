@@ -100,6 +100,17 @@ jubarteai link --private-binding     # convert it back to the private form
 
 All worktrees of a repo share one binding. A linked worktree (`git worktree add`) with no `.jubarteai/` of its own reads the main checkout's binding (read-only, and only when git's own back-link confirms the worktree), so hooks and commands there use the same workspace. `init` and `link` run in a worktree write the binding to the main checkout; `AGENTS.md`, the skill and `CLAUDE.md` are still written in the worktree itself. `jubarteai status` and `jubarteai doctor` say when a binding came from the main checkout, and `doctor` notes a worktree that has its own binding hiding the main checkout's (a binding from 0.1.x wins). A worktree of a bare repository has no main checkout, so its binding stays in the worktree.
 
+## Shell completion and typos
+
+```sh
+source <(jubarteai completion bash)          # bash: add to ~/.bashrc
+source <(jubarteai completion zsh)           # zsh: add to ~/.zshrc (after compinit)
+jubarteai completion fish | source           # fish: or save it to ~/.config/fish/completions/jubarteai.fish
+jubarteai completion powershell | Out-String | Invoke-Expression   # PowerShell: add to $PROFILE
+```
+
+`completion` prints a static script built from the same command list the CLI runs, so it never drifts; it never edits your shell profile. Tool commands answer to their MCP tool name too: `jubarteai search_knowledge --query "…"` runs `search-knowledge`. A mistyped command or flag within two edits gets a suggestion and exit code 2 (`Unknown command "serch-knowledge". Did you mean "search-knowledge"?`); nothing runs.
+
 ## Check your setup
 
 ```sh
@@ -228,7 +239,7 @@ jubarteai inbox --watch --minutes 90
 | `4` | Network failure, timeout or a server error (HTTP 5xx). |
 | `5` | Not signed in, or no saved login for the workspace. |
 
-Setup commands (`init`, `link`, `doctor`, `update`) print text for people rather than JSON. `doctor` exits 1 when a check failed; `update` uses `0`, `1` and `2` as described above.
+Setup commands (`init`, `link`, `doctor`, `update`, `uninstall`) print text for people rather than JSON. `doctor` exits 1 when a check failed; `update` uses `0`, `1` and `2` as described above. What 1.x keeps stable (and what is not covered, such as the wording of messages) is in [STABILITY.md](STABILITY.md).
 
 Global options on every command: `--workspace <slug>`, `--agent <uuid>`, `--pretty`, `--yes`, `--plain`, `--verbose`, `--help`, `--version`. They go after the command name (`jubarteai list-agents --workspace acme`); only `--help` and `--version` may come first.
 

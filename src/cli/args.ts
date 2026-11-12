@@ -3,6 +3,7 @@ import { readFileSync, readSync, statSync } from "node:fs";
 import { ARG_INPUT_MAX_BYTES } from "../constants.js";
 import { UsageError } from "../errors.js";
 import { safeForDisplay } from "../output.js";
+import { suggest } from "./suggest.js";
 
 export type FlagType = "string" | "number" | "boolean" | "string[]" | "json";
 
@@ -139,6 +140,7 @@ export function parseArgs(argv: string[], specs: FlagSpec[], options: ParseOptio
     byName.set(spec.name, spec);
     if (spec.file === true && spec.type !== "boolean") byFileName.set(`${spec.name}-file`, spec);
   }
+  const flagNames = specs.filter((spec) => spec.hidden !== true).map((spec) => spec.name);
   const reader = new Reader(options.readStdin ?? defaultReadStdin);
   const flags: Record<string, unknown> = {};
   const origin = new Map<string, "value" | "file">();
@@ -190,7 +192,10 @@ export function parseArgs(argv: string[], specs: FlagSpec[], options: ParseOptio
     }
 
     const found = name === "" ? null : resolve(name);
-    if (found === null) throw new UsageError(`Unknown flag --${safeForDisplay(name)}`);
+    if (found === null) {
+      const near = name === "" ? null : suggest(name, flagNames);
+      throw new UsageError(`Unknown flag --${safeForDisplay(name)}${near === null ? "" : `. Did you mean "--${near}"?`}`);
+    }
     const { spec } = found;
 
     if (found.kind === "negation") {

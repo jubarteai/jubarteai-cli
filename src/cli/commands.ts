@@ -1,4 +1,5 @@
 import { callCommand } from "../commands/call.js";
+import { completionCommand } from "../commands/completion.js";
 import { connectCommand } from "../commands/connect.js";
 import { doctorCommand } from "../commands/doctor.js";
 import { hookCommand } from "../commands/hook.js";
@@ -43,6 +44,7 @@ export const COMMANDS: CommandDef[] = [
   doctorCommand,
   updateCommand,
   uninstallCommand,
+  completionCommand,
   loginCommand,
   logoutCommand,
   statusCommand,
