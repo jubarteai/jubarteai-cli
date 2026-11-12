@@ -115,11 +115,23 @@ An unused trusted-publisher configuration expires 2 days after it is created. Do
    Expected: `X.Y.Z`; a provenance object (npm also shows a "Built and signed on GitHub Actions" badge on the package page); and `X.Y.Z` printed by the CLI.
    For a prerelease, `npm view jubarteai dist-tags` must show `next: X.Y.Z-...` and `latest` unchanged, and the install command is `npx --yes jubarteai@next --version`.
 6. **First release only:** on npmjs.com, package **Settings**, **Publishing access**, choose **Require two-factor authentication and disallow tokens**. It only affects token authentication, so the trusted publisher keeps working.
-7. Anything outside this repository that tells people to run the CLI through npm (the skills README, install pages, the app's install and update scripts) waits until step 5 passes on production.
+7. The **GitHub Release** job runs after the publish job. Its notes are the `## X.Y.Z` section of `CHANGELOG.md` (`scripts/changelog-section.mjs`), so add that section in the release commit, before tagging: the job, and `test/changelog.test.ts` for the current version, fail without it. Check with `gh release view vX.Y.Z`.
+8. Anything outside this repository that tells people to run the CLI through npm (the skills README, install pages, the app's install and update scripts) waits until step 5 passes on production.
+
+## The 1.0.0 release
+
+1.0.0 lands as the stacked pull requests of the plan (worktrees, terminal UI, one approval, uninstall, CLI surface, release), each merged **without a squash**. Before tagging, the owner runs the tarball from the release commit in a real terminal, in a scratch repository and in one of its linked worktrees:
+
+```bash
+npm pack
+npx ./jubarteai-1.0.0.tgz init        # then update, then uninstall
+```
+
+and checks the banner, the checklist (Space, `d`, Enter), the closing tally, `NO_COLOR=1`, a narrow window, and that `uninstall` leaves the repository as it was. The Node floor was re-checked on 2026-11-12 against `https://nodejs.org/dist/index.json`: `22.23.5` / `24.22.3` / `26.13.1` are still the newest security releases, so the floor files are unchanged.
 
 ## Windows in CI
 
-The CI matrix runs on Windows too, but those jobs are `continue-on-error` (see `.github/workflows/ci.yml`): a Windows failure is visible on the run and does not block a pull request or the release job. The test suite still assumes POSIX in places, so Windows support is unverified until it passes there. When it does, delete the `continue-on-error` line.
+The CI matrix runs on Windows too, but those jobs are `continue-on-error` (see `.github/workflows/ci.yml`): a Windows failure is visible on the run and does not block a pull request or the release job. The test suite still assumes POSIX in places (shell stubs, `/dev/null`, file modes), so Windows support is unverified until it passes there. The new pseudo-terminal tests (`node-pty`, ConPTY) are written to run on Windows too, and the 1.0 UI tests need no POSIX shell. To gate Windows: read the failing run's logs (`gh run view <id> --log-failed`, which needs `gh auth login`), port the remaining helpers (node stubs plus `.cmd` wrappers in place of `sh` stubs), and delete the `continue-on-error` line once all six Windows entries are green.
 
 ## Rollback
 

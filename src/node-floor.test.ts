@@ -130,9 +130,9 @@ describe("node floor", () => {
       expect(versions).toEqual([...Object.values(NODE_FLOORS), ...Object.keys(NODE_FLOORS).map((major) => `${major}.x`)]);
     });
 
-    it("ships exactly bin, dist, assets, README.md and LICENSE, at 0.1.1, with no runtime dependencies", () => {
-      expect(full.files).toEqual(["bin", "dist", "assets", "README.md", "LICENSE"]);
-      expect(full.version).toBe("0.1.1");
+    it("ships exactly bin, dist, assets, README.md, CHANGELOG.md, STABILITY.md and LICENSE, at 1.0.0, with no runtime dependencies", () => {
+      expect(full.files).toEqual(["bin", "dist", "assets", "README.md", "CHANGELOG.md", "STABILITY.md", "LICENSE"]);
+      expect(full.version).toBe("1.0.0");
       expect(full.dependencies).toBeUndefined();
       expect(full.publishConfig).toEqual({ access: "public", provenance: true });
       expect((full.scripts as Record<string, string>).prepack).toContain("npm run build");

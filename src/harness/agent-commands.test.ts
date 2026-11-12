@@ -19,6 +19,8 @@ const PERSON = [
   "jubarteai link --workspace x",
   "jubarteai init --yes",
   "jubarteai update",
+  "jubarteai uninstall",
+  "jubarteai uninstall --yes",
   "jubarteai logout",
   "jubarteai --yes init",
   "jubarteai --workspace x link",
@@ -28,7 +30,8 @@ describe("agent and person commands", () => {
   it("classify every registered command except the internal hook", () => {
     const classified = new Set<string>([...AGENT_COMMANDS, ...PERSON_COMMANDS]);
     const unclassified = COMMANDS.filter((command) => command.group !== "internal" && !classified.has(command.name)).map((c) => c.name);
-    expect(unclassified).toEqual([]);
+    // `completion` only prints a script: it changes nothing, so it is neither pre-approved nor asked about (U18).
+    expect(unclassified).toEqual(["completion"]);
     // A name in both lists would make the allowlist approve a person command.
     expect(AGENT_COMMANDS.filter((name) => (PERSON_COMMANDS as readonly string[]).includes(name))).toEqual([]);
     // Every listed command exists.

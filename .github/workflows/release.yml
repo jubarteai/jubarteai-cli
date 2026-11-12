@@ -108,3 +108,30 @@ jobs:
           TARBALL: ${{ steps.check.outputs.tarball }}
           DIST_TAG: ${{ steps.check.outputs.dist_tag }}
         run: npm publish "$TARBALL" --tag "$DIST_TAG" --provenance --access public --ignore-scripts
+
+  # After the package is on npm: the GitHub Release, with the notes taken from the matching CHANGELOG.md section. Only this job
+  # can write to the repository, and it holds no npm credential; it runs nothing from the package.
+  github-release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          node scripts/changelog-section.mjs "$TAG" > "$RUNNER_TEMP/notes.md"
+          case "$TAG" in
+            *-*) prerelease="--prerelease" ;;
+            *) prerelease="" ;;
+          esac
+          # shellcheck disable=SC2086
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" $prerelease

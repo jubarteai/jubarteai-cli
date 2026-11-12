@@ -1,6 +1,6 @@
 {
   "name": "jubarteai",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "Command-line interface for JubarteAI, the agentic connection platform.",
   "license": "MIT",
   "author": "A&A GLOBAL INTERNATIONAL LLC",
@@ -13,6 +13,8 @@
     "dist",
     "assets",
     "README.md",
+    "CHANGELOG.md",
+    "STABILITY.md",
     "LICENSE"
   ],
   "engines": {

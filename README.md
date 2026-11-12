@@ -22,7 +22,7 @@ irm https://jubarte.ai/install.ps1 | iex
 
 Both scripts install the same npm package. To skip the browser sign-in, set `JUBARTEAI_TOKEN` to a key from the dashboard before running them; it is passed to `init` for that one command and never as an argument. `init` saves that key as a login on this machine (see Security). If `npm install -g` is not allowed, the script retries with `--prefix "$HOME/.local"` and tells you the `PATH` line to add; it never edits a shell profile.
 
-Requires Node `^22.23.5 || ^24.22.3 || >=26.13.1`: 22.23.5 or newer on the 22 line, 24.22.3 or newer on the 24 line, or 26.13.1 or newer. Odd-numbered Node releases are not supported. The package has no runtime dependencies.
+Requires Node `^22.23.5 || ^24.22.3 || >=26.13.1`: 22.23.5 or newer on the 22 line, 24.22.3 or newer on the 24 line, or 26.13.1 or newer. Odd-numbered Node releases are not supported. The package has no runtime dependencies. What stays stable across 1.x is listed in [STABILITY.md](STABILITY.md); changes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Set up a repo
 
@@ -77,7 +77,7 @@ Every harness gets the skill, the AGENTS.md section and `--agent` support. Beyon
 
 Cursor, VS Code and Copilot CLI can inject the agent's identity and inbox at session start but not before each prompt, so the per-turn inbox check stays a duty in the skill and AGENTS.md section there. A config file that has comments, is hard-linked, belongs to someone else or is a symlink leaving your home folder is reported and never edited.
 
-**The Codex MCP entry holds your key.** It is a user-level copy in `~/.codex/config.toml` under `[mcp_servers.jubarteai]` (mode 0600, never in a project file), written only when Codex's network opt-in is not available. An existing entry is never replaced: after you sign in again, `init` offers (behind its own prompt) to write the new key into it when the entry is for the same server address, and only reports an entry for another address or one whose key is another saved login's (it names that workspace and leaves it, so running `init` in a second repo never moves Codex to that repo's workspace). The key is rewritten whichever way the header is spelled (inline `http_headers`, or a `[mcp_servers.jubarteai.http_headers]` table). Remove the table by hand when you no longer need it (see Uninstall).
+**The Codex MCP entry holds your key.** It is a user-level copy in `~/.codex/config.toml` under `[mcp_servers.jubarteai]` (mode 0600, never in a project file), written only when Codex's network opt-in is not available. An existing entry is never replaced: after you sign in again, `init` offers (as a row of its checklist) to write the new key into it when the entry is for the same server address, and only reports an entry for another address or one whose key is another saved login's (it names that workspace and leaves it, so running `init` in a second repo never moves Codex to that repo's workspace). The key is rewritten whichever way the header is spelled (inline `http_headers`, or a `[mcp_servers.jubarteai.http_headers]` table). Remove the table by hand when you no longer need it (see Uninstall).
 
 ### Hook entries
 

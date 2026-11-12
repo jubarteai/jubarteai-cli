@@ -40,13 +40,13 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
-      - name: Package contents are bin, dist, assets, README and LICENSE only
+      - name: Package contents are bin, dist, assets, README, CHANGELOG, STABILITY and LICENSE only
         shell: bash
         run: |
           npm pack --dry-run --json --ignore-scripts > pack.json
           node -e '
             const [{ files }] = JSON.parse(require("node:fs").readFileSync("pack.json", "utf8"));
-            const allowed = (p) => /^(bin|dist|assets)\//.test(p) || ["package.json", "README.md", "LICENSE"].includes(p);
+            const allowed = (p) => /^(bin|dist|assets)\//.test(p) || ["package.json", "README.md", "CHANGELOG.md", "STABILITY.md", "LICENSE"].includes(p);
             const stray = files.map((f) => f.path).filter((p) => !allowed(p) || /\.test\.(js|d\.ts)$/.test(p));
             if (stray.length > 0 || files.length === 0) {
               console.error("unexpected files in the package:", stray);
