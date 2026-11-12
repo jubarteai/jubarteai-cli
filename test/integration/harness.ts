@@ -28,7 +28,8 @@ export const ALL_STUBS: readonly StubName[] = ["npx", "npm", "claude", "codex"];
 export type RunResult = { code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string };
 export type RunOptions = {
   cwd?: string;
-  stdin?: string;
+  /** Written to the child's stdin, then closed. Bytes for input that is not text (invalid UTF-8). */
+  stdin?: string | Uint8Array;
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
 };

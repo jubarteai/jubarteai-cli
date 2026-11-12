@@ -8,8 +8,9 @@
 // five, and `{}` (no decision: the normal permission flow) for everything else. It never answers "allow".
 //
 // It is best effort, not a sandbox: a command hidden in a script file or a shell variable is not seen, nor a program word
-// the shell builds by glob or brace expansion (`jubarteai* login`, `/opt/homebrew/bin/jubartea? login`, `{jubarteai,} login`,
-// `npx ./*.tgz login`; spec I6): only a glob for the npm pack tarball is matched. Quoting is undone before matching,
+// whose final name the shell builds by glob or brace expansion (`jubarteai* login`, `/opt/homebrew/bin/jubartea? login`,
+// `{jubarteai,} login`, `npx ./*.tgz login`; spec I6): of those, only a glob for the npm pack tarball is matched. A glob or
+// brace earlier in the path is matched, since the word still ends in the name (`/opt/*/bin/jubarteai login`). Quoting is undone before matching,
 // so `jubarteai "login"`, `j"ubarteai" login`, `jubarteai \login`, `jubarteai $'login'` and PowerShell's
 // ``jubarteai l`ogin`` match, and the program may follow any shell separator or close a lookup, so chained, `$(…)`,
 // backtick, path, `$(command -v jubarteai) login` and `(Get-Command jubarteai) login` forms match too. Matching errs

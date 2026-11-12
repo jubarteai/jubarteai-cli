@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { GUARD_INPUT_MAX_BYTES, GUARD_SCAN_BUDGET, GUARD_SCAN_PARSE_COST, GUARD_SCAN_VALUE_COST } from "../constants.js";
+import { GUARD_INPUT_MAX_BYTES, GUARD_SCAN_BUDGET, GUARD_SCAN_MAX_DEPTH, GUARD_SCAN_PARSE_COST, GUARD_SCAN_VALUE_COST } from "../constants.js";
 import { AGENT_COMMANDS, PERSON_COMMANDS } from "../harness/agent-commands.js";
 import { SHELL_TOOL_MATCHER, personCommandIn, toolGuardDecision } from "./tool-guard.js";
 
@@ -10,6 +10,19 @@ const camel = (command: string, toolName = "bash"): string => JSON.stringify({ s
 const snake = (command: string, toolName = "Bash"): string => JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s", cwd: "/r", tool_name: toolName, tool_input: { command } });
 
 const denied = (raw: string): boolean => "permissionDecision" in toolGuardDecision(raw);
+
+/**
+ * The guard's own deny for `command`, matched from the reason's start. The too-large refusal also contains
+ * "jubarteai login" ("…check for jubarteai login, logout, …"), so a looser `stringContaining("jubarteai login")` passes
+ * on a too-large refusal too and can't tell the scan found the command (review round 13 N3).
+ */
+const denyFor = (command: string): { permissionDecision: "deny"; permissionDecisionReason: unknown } => ({
+  permissionDecision: "deny",
+  permissionDecisionReason: expect.stringMatching(new RegExp(`^jubarteai ${command} changes the saved account`)),
+});
+
+/** The refusal of a payload too large (or too deeply nested) to check. */
+const TOO_LARGE_OUT = { permissionDecision: "deny", permissionDecisionReason: expect.stringMatching(/^This tool call is too large/) };
 
 /** Spellings an agent (or an injected prompt) could use to run a person command. `%s` is the command; a function builds the line. */
 const PERSON_FORMS: ReadonlyArray<string | ((command: string) => string)> = [
@@ -101,12 +114,21 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
       const line = render(form, command);
       it(`${JSON.stringify(line)}`, () => {
         const camelOut = toolGuardDecision(camel(line));
-        expect(camelOut).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining(`jubarteai ${command}`) });
+        expect(camelOut).toEqual(denyFor(command));
         expect(denied(snake(line))).toBe(true);
         expect(denied(camel(line, "powershell"))).toBe(true);
       });
     }
   }
+
+  it("a glob or brace earlier in the path, before the final name: denied, since the word still ends in the name (review round 13 N2)", () => {
+    // Bash expands each glob to the installed path (when one file matches it), which runs the person command.
+    expect(toolGuardDecision(camel("/opt/*/bin/jubarteai login"))).toEqual(denyFor("login"));
+    expect(toolGuardDecision(camel("~/.nvm/versions/node/v2?.*/bin/jubarteai logout"))).toEqual(denyFor("logout"));
+    expect(toolGuardDecision(camel("/opt/home*/bin/jubarteai.cmd link"))).toEqual(denyFor("link"));
+    // Errs safe: bash runs `/usr/local/bin/jubarteai jubarteai login` (command `jubarteai`), but the word ends in the name.
+    expect(toolGuardDecision(camel("{/usr/local/bin/,}jubarteai login"))).toEqual(denyFor("login"));
+  });
 
   it("reads toolArgs given as an object as well as a JSON string", () => {
     expect(denied(JSON.stringify({ toolName: "bash", toolArgs: { command: "jubarteai login" } }))).toBe(true);
@@ -138,7 +160,7 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
   });
 
   it("denies a payload the hook read only in part, whatever the part holds", () => {
-    expect(toolGuardDecision('{"toolName":"bash","toolArgs":"{\\"command\\":\\"echo hi', true)).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+    expect(toolGuardDecision('{"toolName":"bash","toolArgs":"{\\"command\\":\\"echo hi', true)).toEqual(TOO_LARGE_OUT);
   });
 });
 
@@ -155,7 +177,7 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
       const line = `echo jubarteai ${`${flag} `.repeat(60)}x; jubarteai login`;
       let out: unknown;
       expect(time(() => (out = toolGuardDecision(camel(line)))), flag).toBeLessThan(1_000);
-      expect(out, flag).toMatchObject({ permissionDecision: "deny" });
+      expect(out, flag).toEqual(denyFor("login"));
     }
   });
 
@@ -163,15 +185,38 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     const line = `echo jubarteai ${"--a=b ".repeat(60_000)}x; jubarteai ${"--a=b ".repeat(60_000)}login`;
     let out: unknown;
     expect(time(() => (out = toolGuardDecision(camel(line))))).toBeLessThan(2_000);
-    expect(out).toMatchObject({ permissionDecision: "deny" });
+    expect(out).toEqual(denyFor("login"));
   });
 
-  it("JSON nested ten deep in a shell argument: scanned whole and decided quickly (review R-S1, round 9)", () => {
-    let nested = `echo ${"x".repeat(1024 * 1024)}; jubarteai login`;
-    for (let level = 0; level < 10; level += 1) nested = JSON.stringify([nested]);
-    let out: unknown;
-    expect(time(() => (out = toolGuardDecision(camel(nested))))).toBeLessThan(2_000);
-    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+  describe("JSON nested in a shell argument, level after level (review R-S1, round 9)", () => {
+    /** `inner` characters of padding before `tail`, string-encoded as a one-element JSON array `levels` times. */
+    const nest = (inner: number, tail: string, levels: number): string => {
+      let nested = `echo ${"x".repeat(inner)}; ${tail}`;
+      for (let level = 0; level < levels; level += 1) nested = JSON.stringify([nested]);
+      return nested;
+    };
+
+    it("nine deep: scanned whole and decided quickly, by the scan's own deny", () => {
+      // Every level's raw text is scanned as well as the innermost string (review round 10), so the payload costs about
+      // eleven times the inner string: 512 KiB keeps it under the scan budget. Ten levels of 1 MiB, the earlier version
+      // of this test, was the too-large refusal on both the budget and the depth cap, which the looser
+      // stringContaining("jubarteai login") matcher could not tell from a scan deny (review round 13 N3).
+      const inner = 512 * 1024;
+      expect(11 * inner).toBeLessThan(GUARD_SCAN_BUDGET);
+      let out: unknown;
+      expect(time(() => (out = toolGuardDecision(camel(nest(inner, "jubarteai login", 9)))))).toBeLessThan(2_000);
+      expect(out).toEqual(denyFor("login"));
+      // The same nesting with no person command is scanned through to {}: neither refused nor denied.
+      expect(toolGuardDecision(camel(nest(inner, "jubarteai inbox", 9)))).toEqual({});
+    });
+
+    it("ten deep is past the nesting cap: each string-encoded level is two levels (the string, then the array it parses to)", () => {
+      // Copilot's toolArgs object is depth 1 and its command string depth 2, so the ninth level's innermost string sits
+      // at depth 20 (GUARD_SCAN_MAX_DEPTH) and a tenth goes past it: refused as too deep to check, small as it is.
+      expect(GUARD_SCAN_MAX_DEPTH).toBe(20);
+      expect(toolGuardDecision(camel(nest(16, "jubarteai inbox", 9)))).toEqual({});
+      expect(toolGuardDecision(camel(nest(16, "jubarteai inbox", 10)))).toEqual(TOO_LARGE_OUT);
+    });
   });
 
   it("a large JSON-shaped command with no person command: its raw text and every string scanned, decided quickly (review R-S3, round 11)", () => {
@@ -181,7 +226,7 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     expect(time(() => (out = toolGuardDecision(camel(JSON.stringify(items)))))).toBeLessThan(3_000);
     expect(out).toEqual({});
     // The same array with the command split across its last two strings is denied by the raw text (review R-S1, round 10).
-    expect(toolGuardDecision(camel(JSON.stringify([...items, "$(npm exec jubarteai --cache ", " login)"])))).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+    expect(toolGuardDecision(camel(JSON.stringify([...items, "$(npm exec jubarteai --cache ", " login)"])))).toEqual(denyFor("login"));
   });
 
   describe("millions of tiny strings: refused as too large to check, quickly, not scanned into the timeout (review R-S1, round 11)", () => {
@@ -209,7 +254,7 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
         expect(raw.length).toBeLessThan(GUARD_INPUT_MAX_BYTES);
         let out: unknown;
         expect(time(() => (out = toolGuardDecision(raw)))).toBeLessThan(2_000);
-        expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+        expect(out).toEqual(TOO_LARGE_OUT);
       }, 20_000);
     }
 
@@ -241,10 +286,13 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
       [
         "a decoy key of backticks and separators before the person command: the deny is not delayed into the timeout",
         () => largest((n) => vscode({ explanation: JSON.stringify(["`;".repeat(n)]), command: "jubarteai login" })),
-        { permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") },
+        denyFor("login"),
       ],
       ["backticks and separators after the program, in a JSON-shaped command", () => largest((n) => vscode({ command: JSON.stringify([`jubarteai${"`;".repeat(n)}`]) })), {}],
-      ["backslash-backticks after the program, in a JSON-shaped command", () => largest((n) => vscode({ command: JSON.stringify([`jubarteai${"\\`".repeat(n)}`]) })), {}],
+      // Not a cap regression guard: JSON escapes each backslash twice on the way to the payload, so this content reaches
+      // only about half the scan budget at the cap and would pass at 16 MiB too. It times the slowest content per
+      // character found (about 235 ns), which the stated bound is built on (review round 13 N3).
+      ["backslash-backticks after the program, in a JSON-shaped command (about half the scan budget: the slowest content per character)", () => largest((n) => vscode({ command: JSON.stringify([`jubarteai${"\\`".repeat(n)}`]) })), {}],
     ];
     for (const [name, build, expected] of cases) {
       it(name, () => {
@@ -262,13 +310,13 @@ describe("toolGuardDecision: linear time (review R-S13)", () => {
     for (let level = 0; level < 10; level += 1) nested = JSON.stringify([nested]);
     let out: unknown;
     expect(time(() => (out = toolGuardDecision(camel(nested))))).toBeLessThan(2_000);
-    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+    expect(out).toEqual(TOO_LARGE_OUT);
   });
 
   it("a three-megabyte single word, then a person command: a deny, not an engine stack overflow that fails open", () => {
     let out: unknown;
     expect(time(() => (out = toolGuardDecision(camel(`jubarteai ${"x".repeat(3 * 1024 * 1024)}>&2; jubarteai login`))))).toBeLessThan(3_000);
-    expect(out).toEqual({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+    expect(out).toEqual(denyFor("login"));
   });
 
   it("one long token holding many program names (paths, versions, lookups) stays linear", () => {
@@ -326,30 +374,35 @@ describe("toolGuardDecision: makes no decision otherwise", () => {
   });
 
   it("the gaps spec I6 records: a program word built by glob or brace expansion, other than the tarball glob (review R-S3, round 12)", () => {
-    // Bash expands each of these to jubarteai before it runs, so they do run login; if one starts being denied, update I6.
-    for (const line of ["jubarteai* login", "/opt/homebrew/bin/jubarteai* login", "/opt/homebrew/bin/jubartea? login", "~/.local/bin/jub*ai login", "{jubarteai,} login", "jubarteai{,} login", "npx ./*.tgz login", "npx ./jubarte?i-0.1.0.tgz login"]) {
+    // Bash expands each of these to a jubarteai program word before it runs (where the glob matches the installed file),
+    // so they do run login; if one starts being denied, update I6.
+    for (const line of ["jubarteai* login", "/opt/homebrew/bin/jubarteai* login", "/opt/homebrew/bin/jubartea? login", "~/.local/bin/jub*ai login", "{jubarteai,} login", "{/usr/local/bin/jubarteai,} login", "npx ./*.tgz login", "npx ./jubarte?i-0.1.0.tgz login"]) {
       expect(toolGuardDecision(camel(line)), line).toEqual({});
     }
   });
 
+  it("a brace after the program name is not a gap: bash runs `jubarteai jubarteai login`, whose command is not login (review round 13 N1)", () => {
+    // `jubarteai{,}` expands to two words, `jubarteai jubarteai`, so the CLI's command is `jubarteai` (unknown), not login.
+    expect(toolGuardDecision(camel("jubarteai{,} login"))).toEqual({});
+  });
+
   it("the scan budget counts a fixed cost per value and per JSON parse attempt, not only characters (review R-S1, round 11)", () => {
     const argv = (items: string[]): string => JSON.stringify({ tool_name: "bash", tool_input: { command: "echo", args: items } });
-    const tooLarge = { permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") };
     // A thousand empty strings: a few characters, but a thousand values.
     expect(toolGuardDecision(argv(Array.from({ length: 1000 }, () => "")))).toEqual({});
-    expect(toolGuardDecision(argv(Array.from({ length: 1000 }, () => "")), false, 32_000)).toEqual(tooLarge);
+    expect(toolGuardDecision(argv(Array.from({ length: 1000 }, () => "")), false, 32_000)).toEqual(TOO_LARGE_OUT);
     // A hundred strings each: the same characters, but "[]]" is a parse attempt and "abc" is not.
     expect(toolGuardDecision(argv(Array.from({ length: 100 }, () => "abc")), false, 20_000)).toEqual({});
-    expect(toolGuardDecision(argv(Array.from({ length: 100 }, () => "[]]")), false, 20_000)).toEqual(tooLarge);
+    expect(toolGuardDecision(argv(Array.from({ length: 100 }, () => "[]]")), false, 20_000)).toEqual(TOO_LARGE_OUT);
   });
 
   it("the scan budget and depth: a shell call it can't scan whole is denied, a non-shell one is left alone", () => {
     const nested = JSON.stringify([JSON.stringify(["echo hi"])]);
     expect(toolGuardDecision(camel(nested))).toEqual({});
-    expect(toolGuardDecision(camel(nested), false, 40)).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+    expect(toolGuardDecision(camel(nested), false, 40)).toEqual(TOO_LARGE_OUT);
     let deep: unknown = "echo hi";
     for (let level = 0; level < 25; level += 1) deep = [deep];
-    expect(toolGuardDecision(JSON.stringify({ toolName: "bash", toolArgs: { command: "echo hi", extra: deep } }))).toMatchObject({ permissionDecision: "deny" });
+    expect(toolGuardDecision(JSON.stringify({ toolName: "bash", toolArgs: { command: "echo hi", extra: deep } }))).toEqual(TOO_LARGE_OUT);
     expect(toolGuardDecision(JSON.stringify({ toolName: "view", toolArgs: { path: "x", extra: deep } }))).toEqual({});
   });
 

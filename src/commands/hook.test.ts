@@ -362,6 +362,12 @@ describe("detection and per-harness output", () => {
 });
 
 describe("pre-tool-use (the shared Copilot file's guard)", () => {
+  /**
+   * The scan's own deny for `command`, matched from the reason's start: the too-large refusal also contains
+   * "jubarteai login", so a looser matcher passes on it too (review round 13 N3).
+   */
+  const denyFor = (command: string) => ({ permissionDecision: "deny", permissionDecisionReason: expect.stringMatching(new RegExp(`^jubarteai ${command} changes the saved account`)) });
+  const tooLarge = { permissionDecision: "deny", permissionDecisionReason: expect.stringMatching(/^This tool call is too large/) };
   const call = (command: string, toolName = "bash"): Record<string, unknown> => ({ sessionId: "s", cwd: sandbox.repo, toolName, toolArgs: JSON.stringify({ command }) });
 
   it("denies a shell call that runs a person command, with no binding, no login and no request", async () => {
@@ -369,9 +375,7 @@ describe("pre-tool-use (the shared Copilot file's guard)", () => {
     const result = await hook("pre-tool-use", call("jubarteai inbox && jubarteai \"login\" --with-token"), { harness: "vscode" });
     expect(result.code).toBe(0);
     expect(result.err).toBe("");
-    const out = JSON.parse(result.out) as Record<string, unknown>;
-    expect(out["permissionDecision"]).toBe("deny");
-    expect(out["permissionDecisionReason"]).toContain("jubarteai login");
+    expect(JSON.parse(result.out)).toEqual(denyFor("login"));
     expect(s.requests).toHaveLength(0);
   });
 
@@ -390,17 +394,17 @@ describe("pre-tool-use (the shared Copilot file's guard)", () => {
     expect(code).toBe(0);
     expect(err.text()).toBe("");
     expect(out.text().trim().split("\n")).toHaveLength(1);
-    expect(JSON.parse(out.text())).toMatchObject({ permissionDecision: "deny" });
+    expect(JSON.parse(out.text())).toEqual(denyFor("init"));
   });
 
   it("reads a payload past 1 MiB whole, so padding before the command can't hide it (review R-S14)", async () => {
     const before = JSON.stringify(call(`echo ${"x".repeat(1024 * 1024 + 100)}; jubarteai login`));
-    expect(JSON.parse((await hook("pre-tool-use", before, { harness: "vscode" })).out)).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("jubarteai login") });
+    expect(JSON.parse((await hook("pre-tool-use", before, { harness: "vscode" })).out)).toEqual(denyFor("login"));
     // A description padded ahead of the command in the arguments object, too.
     const padded = JSON.stringify({ toolName: "bash", toolArgs: JSON.stringify({ description: "y".repeat(1024 * 1024 + 100), command: "jubarteai logout" }) });
-    expect(JSON.parse((await hook("pre-tool-use", padded, { harness: "vscode" })).out)).toMatchObject({ permissionDecision: "deny" });
+    expect(JSON.parse((await hook("pre-tool-use", padded, { harness: "vscode" })).out)).toEqual(denyFor("logout"));
     const after = JSON.stringify(call(`jubarteai logout; echo ${"x".repeat(1024 * 1024 + 10)}`));
-    expect(JSON.parse((await hook("pre-tool-use", after, { harness: "vscode" })).out)).toMatchObject({ permissionDecision: "deny" });
+    expect(JSON.parse((await hook("pre-tool-use", after, { harness: "vscode" })).out)).toEqual(denyFor("logout"));
     const innocent = JSON.stringify(call(`echo ${"x".repeat(1024 * 1024 + 10)}; jubarteai inbox`));
     expect((await hook("pre-tool-use", innocent, { harness: "vscode" })).out).toBe("{}\n");
   });
@@ -410,7 +414,7 @@ describe("pre-tool-use (the shared Copilot file's guard)", () => {
     const over = JSON.stringify(call(`echo ${"x".repeat(cap)}`));
     const result = await hook("pre-tool-use", over, { harness: "vscode", deps: { guardMaxBytes: cap } });
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.out)).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: expect.stringContaining("too large") });
+    expect(JSON.parse(result.out)).toEqual(tooLarge);
     const under = JSON.stringify(call(`echo ${"x".repeat(cap / 2)}`));
     expect((await hook("pre-tool-use", under, { harness: "vscode", deps: { guardMaxBytes: cap } })).out).toBe("{}\n");
   });
