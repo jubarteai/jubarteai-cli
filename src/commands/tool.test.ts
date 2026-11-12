@@ -124,7 +124,7 @@ describe("the 15 tool commands", () => {
   it("--pretty indents the envelope", async () => {
     const server = await start();
     sandbox.signIn(server.origin);
-    const result = await run(["--pretty", "list-agents", "--agent", AGENT_A]);
+    const result = await run(["list-agents", "--pretty", "--agent", AGENT_A]);
     expect(result.out.split("\n").length).toBeGreaterThan(3);
     expect(JSON.parse(result.out)).toHaveProperty("messages");
   });
@@ -274,8 +274,8 @@ describe("the 15 tool commands", () => {
   it("uses --workspace to pick the seat", async () => {
     const server = await start();
     sandbox.signIn(server.origin);
-    expect((await run(["--workspace", "acme", "list-agents", "--agent", AGENT_A])).code).toBe(0);
-    const unknown = await run(["--workspace", "nope", "list-agents", "--agent", AGENT_A]);
+    expect((await run(["list-agents", "--workspace", "acme", "--agent", AGENT_A])).code).toBe(0);
+    const unknown = await run(["list-agents", "--workspace", "nope", "--agent", AGENT_A]);
     expect(unknown.code).toBe(5);
     expect(server.requests).toHaveLength(1);
   });

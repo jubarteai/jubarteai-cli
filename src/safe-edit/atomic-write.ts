@@ -130,15 +130,15 @@ export type AtomicWriteDeps = {
 export function writeFileAtomicWith(
   target: string,
   data: string,
-  opts: { mode: number; dirMode?: number; withinHome?: boolean },
+  opts: { mode: number; dirMode?: number; withinHome?: boolean; withinRoot?: string },
   deps: AtomicWriteDeps,
 ): void {
   const abs = path.resolve(target);
-  const check = assertSafeTargetWith(abs, { allowMissing: true, withinHome: opts.withinHome }, deps.guard);
+  const check = assertSafeTargetWith(abs, { allowMissing: true, withinHome: opts.withinHome, withinRoot: opts.withinRoot }, deps.guard);
   if (!check.ok) throw new SafeEditError(`Refusing to write ${abs}: ${REFUSALS[check.reason]}.`, check.reason);
 
-  // A symlinked config (withinHome) is written through: the link stays, the file it names is replaced.
-  const real = opts.withinHome === true ? realTarget(abs, deps.guard.fs) : abs;
+  // A symlinked config (withinHome, or withinRoot for a file inside a project) is written through: the link stays, the file it names is replaced.
+  const real = opts.withinHome === true || opts.withinRoot !== undefined ? realTarget(abs, deps.guard.fs) : abs;
   const dir = path.dirname(real);
   const posix = deps.guard.platform !== "win32";
   const { mode, dirMode = 0o700 } = opts;
@@ -187,12 +187,13 @@ export function writeFileAtomicWith(
  * whatever the umask. Throws SafeEditError, writing nothing, when
  * assertSafeTarget refuses the path; any other failure removes the temp file
  * and rethrows, leaving the old file as it was. `withinHome: true` writes
- * through a symlinked config to the file it names (see file-guards.ts).
+ * through a symlinked config to the file it names, as does `withinRoot: dir` for a link that stays inside
+ * `dir` (see file-guards.ts).
  */
 export function writeFileAtomic(
   target: string,
   data: string,
-  opts: { mode: number; dirMode?: number; withinHome?: boolean },
+  opts: { mode: number; dirMode?: number; withinHome?: boolean; withinRoot?: string },
 ): void {
   writeFileAtomicWith(target, data, opts, { guard: defaultGuardEnv() });
 }

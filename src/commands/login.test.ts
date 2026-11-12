@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -7,8 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startFakeAuthServer } from "../../test/helpers/fake-auth-server.js";
 import type { FakeAuthServer } from "../../test/helpers/fake-auth-server.js";
 import { readCredentials } from "../auth/credentials.js";
+import type { StoredSeat } from "../auth/credentials.js";
+import { keyDigest } from "../auth/key-digest.js";
+import { CODEX_REVOKED_HINT } from "../install/init-copy.js";
 import { routeWith } from "../cli/router.js";
 import { DEFAULT_ORIGIN } from "../constants.js";
+import { scriptedTty } from "../../test/helpers/init-sandbox.js";
 import { setTtyOpenerForTests } from "../prompt.js";
 import type { TtyHandle } from "../prompt.js";
 import { loginCommand } from "./login.js";
@@ -20,7 +24,7 @@ vi.mock("../auth/login-flow.js", async (importActual) => {
 });
 
 const KEY = "jba_DASHBOARDKEYDASHBOARDKEY01";
-const ENV_NAMES = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "JUBARTEAI_TOKEN", "JUBARTEAI_URL"] as const;
+const ENV_NAMES = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "JUBARTEAI_TOKEN", "JUBARTEAI_URL", "CODEX_HOME"] as const;
 
 let sandbox: string;
 let fake: FakeAuthServer;
@@ -33,6 +37,7 @@ beforeEach(async () => {
   process.env.USERPROFILE = sandbox;
   delete process.env.XDG_CONFIG_HOME;
   delete process.env.JUBARTEAI_URL;
+  delete process.env.CODEX_HOME;
   fake = await startFakeAuthServer();
   flowMock.loginFlow.mockReset();
 });
@@ -74,7 +79,7 @@ function piped(text: string): PassThrough {
 
 describe("login: browser flows", () => {
   it("runs the browser login at the default origin", async () => {
-    flowMock.loginFlow.mockResolvedValue({});
+    flowMock.loginFlow.mockResolvedValue({ seatId: "seat-1", seat: {}, replacedDigest: null });
     const result = await run(["login"]);
     expect(result.code).toBe(0);
     expect(flowMock.loginFlow).toHaveBeenCalledTimes(1);
@@ -82,7 +87,7 @@ describe("login: browser flows", () => {
   });
 
   it("passes --workspace, --paste and --no-browser through, and JUBARTEAI_URL as the origin", async () => {
-    flowMock.loginFlow.mockResolvedValue({});
+    flowMock.loginFlow.mockResolvedValue({ seatId: "seat-1", seat: {}, replacedDigest: null });
     process.env.JUBARTEAI_URL = "http://127.0.0.1:4010/some/path";
     const result = await run(["login", "--workspace", "acme", "--paste", "--no-browser"]);
     expect(result.code).toBe(0);
@@ -102,6 +107,105 @@ describe("login: browser flows", () => {
     const result = await run(["login", "extra"]);
     expect(result.code).toBe(2);
     expect(flowMock.loginFlow).not.toHaveBeenCalled();
+  });
+});
+
+describe("login: Codex's key after a re-login revoked the old one (R-M2)", () => {
+  const OLD = "jba_OLDCLIKEYOLDCLIKEYOLDCLI01";
+  const NEW = "jba_NEWCLIKEYNEWCLIKEYNEWCLI02";
+  const codexFile = (): string => join(sandbox, ".codex", "config.toml");
+
+  function entry(key: string, url: string = `${fake.origin}/api/mcp`): string {
+    return `model = "o4"\n\n[mcp_servers.jubarteai]\nurl = "${url}"\nhttp_headers = { "Authorization" = "Bearer ${key}" }\n`;
+  }
+
+  function plantCodex(text: string): void {
+    mkdirSync(join(sandbox, ".codex"), { recursive: true });
+    writeFileSync(codexFile(), text);
+  }
+
+  function signedIn(replaced: string | null): void {
+    const seat: StoredSeat = {
+      origin: fake.origin,
+      token: NEW,
+      minted_by: "cli",
+      key: { id: "k", prefix: NEW.slice(0, 12), name: "CLI" },
+      user: { id: "u", email: "ada@example.com" },
+      company: { id: "c", slug: "acme", name: "Acme Inc" },
+      saved_at: "2026-11-10T00:00:00.000Z",
+    };
+    flowMock.loginFlow.mockResolvedValue({ seatId: "seat-1", seat, replacedDigest: replaced === null ? null : keyDigest(replaced) });
+    process.env.JUBARTEAI_URL = fake.origin;
+  }
+
+  it("without a terminal or --yes, prints the fixed hint and leaves the entry alone", async () => {
+    plantCodex(entry(OLD));
+    signedIn(OLD);
+    const result = await run(["login"]);
+    expect(result.code).toBe(0);
+    expect(result.err).toContain(CODEX_REVOKED_HINT);
+    expect(readFileSync(codexFile(), "utf8")).toBe(entry(OLD));
+    expect(result.err + result.out).not.toMatch(/jba_[A-Za-z0-9]/);
+  });
+
+  it("with --yes, rewrites the entry to the new key through the shared step, and prints no key and no hint", async () => {
+    plantCodex(entry(OLD));
+    signedIn(OLD);
+    const result = await run(["login", "--yes"]);
+    expect(result.code, result.err).toBe(0);
+    expect(readFileSync(codexFile(), "utf8")).toBe(entry(NEW));
+    expect(result.err).not.toContain(CODEX_REVOKED_HINT);
+    expect(result.err + result.out).not.toMatch(/jba_[A-Za-z0-9]/);
+  });
+
+  it("still prints the hint when --yes cannot apply the step (inside an agent's shell)", async () => {
+    plantCodex(entry(OLD));
+    signedIn(OLD);
+    process.env.CLAUDECODE = "1";
+    try {
+      const result = await run(["login", "--yes"]);
+      expect(result.code, result.err).toBe(0);
+      expect(readFileSync(codexFile(), "utf8")).toBe(entry(OLD));
+      expect(result.err).toContain(CODEX_REVOKED_HINT);
+    } finally {
+      delete process.env.CLAUDECODE;
+    }
+  });
+
+  it("asks on a terminal (default yes) and rewrites on yes; a decline leaves it and prints the hint", async () => {
+    for (const [answer, rewritten] of [["", true], ["n", false]] as const) {
+      plantCodex(entry(OLD));
+      signedIn(OLD);
+      const tty = scriptedTty((prompt) => (prompt.startsWith("Proceed?") ? "y" : answer));
+      const result = await run(["login"]);
+      expect(tty.prompts.some((p) => p.startsWith('Apply "Update the key in Codex'))).toBe(true);
+      expect(readFileSync(codexFile(), "utf8")).toBe(rewritten ? entry(NEW) : entry(OLD));
+      expect(result.err.includes(CODEX_REVOKED_HINT)).toBe(!rewritten);
+      expect(result.err + tty.shown()).not.toMatch(/jba_[A-Za-z0-9]/);
+    }
+  });
+
+  it("does nothing when the entry holds a different key, another address, or nothing was revoked", async () => {
+    const cases: Array<[string, string | null]> = [
+      [entry("jba_SOMEOTHERKEYSOMEOTHERKEY001"), OLD],
+      [entry(OLD, "https://other.example/api/mcp"), OLD],
+      [entry(OLD), null],
+    ];
+    for (const [text, replaced] of cases) {
+      plantCodex(text);
+      signedIn(replaced);
+      const result = await run(["login", "--yes"]);
+      expect(result.code).toBe(0);
+      expect(readFileSync(codexFile(), "utf8")).toBe(text);
+      expect(result.err).not.toContain(CODEX_REVOKED_HINT);
+    }
+  });
+
+  it("does nothing without a Codex config", async () => {
+    signedIn(OLD);
+    const result = await run(["login", "--yes"]);
+    expect(result.code).toBe(0);
+    expect(result.err).toBe("");
   });
 });
 

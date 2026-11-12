@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
+    # Tag pushes are tested by release.yml, which calls this workflow.
+    branches: ["**"]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -11,13 +14,18 @@ jobs:
   test:
     name: ${{ matrix.os }} / Node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: ["22.23.4", "24.22.1", "26.12.1"]
+        # The three floors (keep in step with package.json "engines" and
+        # src/node-floor.ts), then the newest release of each line.
+        node: ["22.23.4", "24.22.1", "26.12.1", "22.x", "24.x", "26.x"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
@@ -27,5 +35,64 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm test
+      - name: Package contents are bin, dist, assets, README and LICENSE only
+        shell: bash
+        run: |
+          npm pack --dry-run --json --ignore-scripts > pack.json
+          node -e '
+            const [{ files }] = JSON.parse(require("node:fs").readFileSync("pack.json", "utf8"));
+            const allowed = (p) => /^(bin|dist|assets)\//.test(p) || ["package.json", "README.md", "LICENSE"].includes(p);
+            const stray = files.map((f) => f.path).filter((p) => !allowed(p) || /\.test\.(js|d\.ts)$/.test(p));
+            if (stray.length > 0 || files.length === 0) {
+              console.error("unexpected files in the package:", stray);
+              process.exit(1);
+            }
+            console.log(files.length + " files in the package");
+          '
+          rm pack.json
       - name: Smoke test the entry point
-        run: node bin/jubarteai.js --version
+        shell: bash
+        run: |
+          node bin/jubarteai.js --version
+          node bin/jubarteai.js --help
+
+  # Under a Node below the floor the entry point must refuse with the floor
+  # message (exit 1), except `hook`, which exits 0 and says nothing so a harness
+  # never sees an error from us (spec section 8, I7).
+  old-node:
+    name: ${{ matrix.os }} / Node 20 refuses
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20.x"
+      - name: The floor message and exit 1
+        shell: bash
+        run: |
+          node --version
+          set +e
+          node bin/jubarteai.js --version >stdout.txt 2>stderr.txt
+          code=$?
+          set -e
+          cat stderr.txt
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+          test ! -s stdout.txt || { echo "expected empty stdout"; exit 1; }
+          grep -Eq '^jubarteai needs Node 22\.23\.4 or newer \(you have 20\.[0-9.]+\)\. Upgrade: https://nodejs\.org/en/download' stderr.txt
+      - name: hook exits 0 and prints nothing
+        shell: bash
+        run: |
+          set +e
+          node bin/jubarteai.js hook session-start >stdout.txt 2>stderr.txt </dev/null
+          code=$?
+          set -e
+          test "$code" -eq 0 || { echo "expected exit 0, got $code"; exit 1; }
+          test ! -s stdout.txt || { echo "expected empty stdout"; exit 1; }
+          test ! -s stderr.txt || { echo "expected empty stderr"; exit 1; }

@@ -8,6 +8,7 @@ import { promptHidden } from "../prompt.js";
 import { startCallbackServer } from "./callback-server.js";
 import { readCredentials, saveSeat } from "./credentials.js";
 import type { Credentials, StoredSeat } from "./credentials.js";
+import { keyDigest, sameKey } from "./key-digest.js";
 import { openBrowser } from "./open-browser.js";
 import { createPkce, createState } from "./pkce.js";
 import { API_KEY_RE, AUTH_CODE_RE, exchangeCode } from "./token-exchange.js";
@@ -214,6 +215,12 @@ async function identityOf(
   return { email, slug, name };
 }
 
+/** The notice for a CLI-minted key of this workspace that a login did not revoke (browser login and pasted key share it). */
+function reportOldKeyStillActive(ctx: CommandContext, previous: StoredSeat): void {
+  const label = previous.company.name !== "" ? previous.company.name : previous.company.slug;
+  ctx.stderr.write(`Your previous CLI key for ${safeForDisplay(label, DISPLAY_MAX)} is still active; revoke it in Dashboard → API keys.\n`);
+}
+
 function reportSignedIn(ctx: CommandContext, seat: StoredSeat): void {
   const workspace = seat.company.name !== "" ? seat.company.name : seat.company.slug;
   ctx.stderr.write(`Signed in as ${safeForDisplay(seat.user.email, DISPLAY_MAX)} — ${safeForDisplay(workspace, DISPLAY_MAX)}\n`);
@@ -227,7 +234,7 @@ export async function loginFlow(
   ctx: CommandContext,
   opts: { origin: string; workspace?: string; noBrowser: boolean; paste: boolean },
   deps: LoginDeps = {},
-): Promise<{ seatId: string; seat: StoredSeat }> {
+): Promise<{ seatId: string; seat: StoredSeat; replacedDigest: Buffer | null }> {
   const credentials = readCredentials();
   const replaces = replacesKey(credentials, opts.origin, opts.workspace);
   const pkce = createPkce();
@@ -255,10 +262,10 @@ export async function loginFlow(
     ctx.stderr.write("Your previous CLI key for this workspace was revoked.\n");
   } else if (previous !== undefined && previous.minted_by === "cli" && previous.token !== replaces) {
     // The server only revokes the key we named; this seat's older CLI key is still live.
-    const label = previous.company.name !== "" ? previous.company.name : previous.company.slug;
-    ctx.stderr.write(`Your previous CLI key for ${safeForDisplay(label, DISPLAY_MAX)} is still active; revoke it in Dashboard → API keys.\n`);
+    reportOldKeyStillActive(ctx, previous);
   }
-  return { seatId: token.seat_id, seat };
+  // What the server revoked, as a digest only (the caller compares it with keys stored elsewhere, e.g. Codex's entry).
+  return { seatId: token.seat_id, seat, replacedDigest: token.replaced && replaces !== null ? keyDigest(replaces) : null };
 }
 
 /**
@@ -272,7 +279,7 @@ export async function loginWithToken(
   if (!API_KEY_RE.test(opts.token)) {
     throw new UsageError("That doesn't look like a JubarteAI key (it starts with jba_).");
   }
-  readCredentials();
+  const credentials = readCredentials();
   const who = await whoami(opts.origin, opts.token);
   if (who.user.email === null) {
     throw new CliError("JubarteAI couldn't confirm your account details. Try again in a moment.", ExitCode.SERVER_ERROR, "identity_unconfirmed");
@@ -286,7 +293,10 @@ export async function loginWithToken(
     company: { id: who.company.id, slug: who.company.slug, name: who.company.name },
     saved_at: new Date().toISOString(),
   };
+  const previous = credentials.seats[who.seat_id];
   saveSeat(who.seat_id, seat, { makeDefault: true });
   reportSignedIn(ctx, seat);
+  // The pasted key replaced a CLI-minted one for this seat in the store; nothing told the server to revoke it.
+  if (previous !== undefined && previous.minted_by === "cli" && !sameKey(previous.token, opts.token)) reportOldKeyStillActive(ctx, previous);
   return { seatId: who.seat_id, seat };
 }

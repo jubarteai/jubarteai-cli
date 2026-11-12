@@ -23,8 +23,15 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
   return { code, out: out.text(), err: err.text() };
 }
 
+const SETUP = ["init", "link", "doctor", "update"];
 const ACCOUNT = ["login", "logout", "status"];
 const TOOL_COMMAND_NAMES = TOOL_SPECS.map((spec) => spec.command);
+/** Every command of spec 5.3-5.5 a person sees in plain `--help` (hook is internal). */
+const PUBLIC_COMMANDS = [...SETUP, ...ACCOUNT, ...TOOL_COMMAND_NAMES, "call", "inbox"];
+
+function listed(out: string, name: string): boolean {
+  return new RegExp(`^  ${name} +\\S`, "m").test(out);
+}
 
 describe("COMMANDS", () => {
   it("has unique, well-formed names and a valid group", () => {
@@ -36,22 +43,42 @@ describe("COMMANDS", () => {
     }
   });
 
-  it("registers the account commands, connect, exactly the spec 5.3 tool commands, call and inbox, in help order", () => {
-    expect(COMMANDS.map((command) => command.name)).toEqual([...ACCOUNT, ...TOOL_COMMAND_NAMES, "call", "inbox"]);
+  it("registers setup, account, connect, exactly the spec 5.3 tool commands, call, inbox and hook, in help order", () => {
+    expect(COMMANDS.map((command) => command.name)).toEqual([...PUBLIC_COMMANDS, "hook"]);
     expect(TOOL_COMMAND_NAMES).toHaveLength(16);
     expect(TOOL_COMMAND_NAMES[0]).toBe("connect");
+    expect(COMMANDS.filter((command) => command.group === "setup").map((command) => command.name)).toEqual(SETUP);
     expect(COMMANDS.filter((command) => command.group === "account").map((command) => command.name)).toEqual(ACCOUNT);
+    expect(COMMANDS.filter((command) => command.group === "internal").map((command) => command.name)).toEqual(["hook"]);
   });
 
-  it("lists every registered command in --help", async () => {
+  it("lists every public command in --help, Setup first, and names hook under Internal on one line (spec 5.5)", async () => {
     const { code, out, err } = await run(["--help"]);
     expect(code).toBe(0);
     expect(err).toBe("");
-    for (const command of COMMANDS) {
-      expect(out).toMatch(new RegExp(`^  ${command.name} +\\S`, "m"));
-    }
+    for (const name of PUBLIC_COMMANDS) expect(listed(out, name), name).toBe(true);
+    expect(listed(out, "hook")).toBe(false);
+    const internal = out.split("\n").filter((line) => line.startsWith("Internal"));
+    expect(internal).toEqual(["Internal (used by hooks and shims): hook (not for direct use; details: jubarteai --help --all)"]);
+    expect(out.indexOf("Tools:")).toBeLessThan(out.indexOf("Internal"));
+    expect(out.indexOf("Internal")).toBeLessThan(out.indexOf("Global options:"));
+    expect(out.indexOf("Setup:")).toBeLessThan(out.indexOf("Account:"));
     expect(out.indexOf("Account:")).toBeLessThan(out.indexOf("Tools:"));
+    expect(out.indexOf("  init ")).toBeLessThan(out.indexOf("  link "));
+    expect(out.indexOf("  link ")).toBeLessThan(out.indexOf("  doctor "));
+    expect(out.indexOf("  doctor ")).toBeLessThan(out.indexOf("  update "));
     expect(renderHelp(COMMANDS, { all: false })).toBe(out);
+  });
+
+  it("--help --all adds hook under an Internal heading, after every other group", async () => {
+    const { code, out, err } = await run(["--help", "--all"]);
+    expect(code).toBe(0);
+    expect(err).toBe("");
+    for (const name of [...PUBLIC_COMMANDS, "hook"]) expect(listed(out, name), name).toBe(true);
+    expect(out).toContain("Internal");
+    expect(out.indexOf("Tools:")).toBeLessThan(out.indexOf("Internal"));
+    expect(out.indexOf("Internal")).toBeLessThan(out.indexOf("  hook "));
+    expect(renderHelp(COMMANDS, { all: true })).toBe(out);
   });
 
   it.each(COMMANDS.map((command) => command.name))("%s --help prints its usage and exits 0", async (name) => {
@@ -68,5 +95,22 @@ describe("COMMANDS", () => {
       if (flag.hidden !== true) expect(out).toContain(`--${flag.name}`);
     }
     expect(out).toContain("--json");
+  });
+
+  it("init --help documents every init flag", async () => {
+    const { code, out, err } = await run(["init", "--help"]);
+    expect(code).toBe(0);
+    expect(err).toBe("");
+    for (const flag of ["workspace", "no-browser", "paste", "share-binding", "private-binding", "keep-mcp", "no-hooks", "no-permissions", "yes"]) {
+      expect(out, flag).toContain(`--${flag}`);
+    }
+  });
+
+  it("link, doctor and update --help show their own flags", async () => {
+    expect((await run(["link", "--help"])).out).toContain("--share-binding");
+    expect((await run(["link", "--help"])).out).toContain("--private-binding");
+    expect((await run(["doctor", "--help"])).out).toContain("--json");
+    const update = (await run(["update", "--help"])).out;
+    for (const flag of ["check", "self-update", "keep-mcp"]) expect(update, flag).toContain(`--${flag}`);
   });
 });

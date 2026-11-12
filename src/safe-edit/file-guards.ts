@@ -16,7 +16,15 @@
 //   link that resolves outside the home directory is refused as "outside-home",
 //   so a link planted in a config directory cannot steer a write elsewhere.
 //
-// Both modes refuse a file owned by another uid (POSIX; a key written there
+// * `withinRoot: dir` (files inside a project the repo's own contents steer, such
+//   as AGENTS.md or .codex/config.toml): like `withinHome`, but the boundary is
+//   that directory instead of the home directory. A link (to the file or to any
+//   directory above it) is followed only when the file it really names stays
+//   inside the real path of `dir` (CLAUDE.md -> AGENTS.md keeps working); a link
+//   that leaves it, e.g. AGENTS.md -> ../../.zshrc, is refused as "symlink". It
+//   takes precedence over `withinHome`.
+//
+// Every mode refuses a file owned by another uid (POSIX; a key written there
 // could be read by that user) and a file with other hard links (a rewrite would
 // split it from them, and an in-place write would put the key in every copy).
 // Foreign owner is reported before hard links, as install.sh did.
@@ -190,16 +198,21 @@ function checkStrict(abs: string, opts: { allowMissing: boolean }, env: GuardEnv
   return checkOwnerAndLinks(st, env);
 }
 
-function checkThroughLinks(abs: string, opts: { allowMissing: boolean }, env: GuardEnv): GuardResult<RefusalReason | "missing"> {
+function checkThroughLinks(
+  abs: string,
+  opts: { allowMissing: boolean },
+  env: GuardEnv,
+  boundary: { dir: string; reason: RefusalReason },
+): GuardResult<RefusalReason | "missing"> {
   const real = realTarget(abs, env.fs);
-  const home = path.resolve(env.home());
-  let realHome = home;
+  const base = path.resolve(boundary.dir);
+  let realBase = base;
   try {
-    realHome = env.fs.realpathSync(home);
+    realBase = env.fs.realpathSync(base);
   } catch {
-    // an unresolvable home keeps its lexical form; the comparison below then fails closed for anything else
+    // an unresolvable boundary keeps its lexical form; the comparison below then fails closed for anything else
   }
-  if (!isInside(real, realHome)) return { ok: false, reason: "outside-home" };
+  if (!isInside(real, realBase)) return { ok: false, reason: boundary.reason };
 
   // The directory the real file sits in (or will be created in).
   for (let dir = path.dirname(real); ; dir = path.dirname(dir)) {
@@ -221,21 +234,22 @@ function checkThroughLinks(abs: string, opts: { allowMissing: boolean }, env: Gu
 /** assertSafeTarget with its environment injected (tests); assertSafeTarget is the production caller. */
 export function assertSafeTargetWith(
   target: string,
-  opts: { allowMissing: true; withinHome?: boolean },
+  opts: { allowMissing: true; withinHome?: boolean; withinRoot?: string },
   env: GuardEnv,
 ): GuardResult<RefusalReason>;
 export function assertSafeTargetWith(
   target: string,
-  opts: { allowMissing: boolean; withinHome?: boolean },
+  opts: { allowMissing: boolean; withinHome?: boolean; withinRoot?: string },
   env: GuardEnv,
 ): GuardResult<RefusalReason | "missing">;
 export function assertSafeTargetWith(
   target: string,
-  opts: { allowMissing: boolean; withinHome?: boolean },
+  opts: { allowMissing: boolean; withinHome?: boolean; withinRoot?: string },
   env: GuardEnv,
 ): GuardResult<RefusalReason | "missing"> {
   const abs = path.resolve(target);
-  return opts.withinHome === true ? checkThroughLinks(abs, opts, env) : checkStrict(abs, opts, env);
+  if (opts.withinRoot !== undefined) return checkThroughLinks(abs, opts, env, { dir: opts.withinRoot, reason: env.platform === "win32" ? "reparse-point" : "symlink" });
+  return opts.withinHome === true ? checkThroughLinks(abs, opts, env, { dir: env.home(), reason: "outside-home" }) : checkStrict(abs, opts, env);
 }
 
 /**
@@ -243,14 +257,14 @@ export function assertSafeTargetWith(
  * Pass allowMissing: true when the file may not exist yet (a first write); a
  * missing file is then fine, and the result can never be "missing".
  */
-export function assertSafeTarget(target: string, opts: { allowMissing: true; withinHome?: boolean }): GuardResult<RefusalReason>;
+export function assertSafeTarget(target: string, opts: { allowMissing: true; withinHome?: boolean; withinRoot?: string }): GuardResult<RefusalReason>;
 export function assertSafeTarget(
   target: string,
-  opts: { allowMissing: boolean; withinHome?: boolean },
+  opts: { allowMissing: boolean; withinHome?: boolean; withinRoot?: string },
 ): GuardResult<RefusalReason | "missing">;
 export function assertSafeTarget(
   target: string,
-  opts: { allowMissing: boolean; withinHome?: boolean },
+  opts: { allowMissing: boolean; withinHome?: boolean; withinRoot?: string },
 ): GuardResult<RefusalReason | "missing"> {
   return assertSafeTargetWith(target, opts, defaultGuardEnv());
 }

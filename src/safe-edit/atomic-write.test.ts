@@ -322,6 +322,37 @@ describe("writeFileAtomic: refusals write nothing", () => {
   });
 });
 
+describe.skipIf(isWindows)("writeFileAtomic withinRoot: a project file is written through a link only while it stays in the project", () => {
+  it("CLAUDE.md -> AGENTS.md: the link stays, AGENTS.md gets the content", () => {
+    const proj = path.join(home, "proj");
+    const agents = write(path.join(proj, "AGENTS.md"), "old\n", 0o644);
+    fs.symlinkSync("AGENTS.md", path.join(proj, "CLAUDE.md"));
+    writeFileAtomic(path.join(proj, "CLAUDE.md"), "NEW\n", { mode: 0o644, withinRoot: proj });
+    expect(fs.lstatSync(path.join(proj, "CLAUDE.md")).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(agents, "utf8")).toBe("NEW\n");
+  });
+
+  it("AGENTS.md -> ../.zshrc: refused as symlink, ~/.zshrc byte-identical", () => {
+    const proj = path.join(home, "proj");
+    fs.mkdirSync(proj, { recursive: true });
+    const zshrc = write(path.join(home, ".zshrc"), "export A=1\n", 0o644);
+    fs.symlinkSync("../.zshrc", path.join(proj, "AGENTS.md"));
+    expect(refusal(() => writeFileAtomic(path.join(proj, "AGENTS.md"), "x\n", { mode: 0o644, withinRoot: proj }))).toBe("symlink");
+    expect(fs.readFileSync(zshrc, "utf8")).toBe("export A=1\n");
+    expect(fs.readdirSync(home).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("a linked .codex directory leading out of the project: refused, nothing created in the target directory", () => {
+    const proj = path.join(home, "proj");
+    fs.mkdirSync(proj, { recursive: true });
+    const config = write(path.join(home, ".codex", "config.toml"), "a = 1\n", 0o600);
+    fs.symlinkSync("../.codex", path.join(proj, ".codex"));
+    expect(refusal(() => writeFileAtomic(path.join(proj, ".codex", "config.toml"), "x\n", { mode: 0o600, withinRoot: proj }))).toBe("symlink");
+    expect(fs.readFileSync(config, "utf8")).toBe("a = 1\n");
+    expect(fs.readdirSync(path.join(home, ".codex"))).toEqual(["config.toml"]);
+  });
+});
+
 describe.skipIf(isWindows)("writeFileAtomic withinHome: a user-managed config is written through its link", () => {
   it("a symlinked config: the link stays, the file it names is replaced, mode 0600, no stray file", () => {
     const target = write(path.join(home, "dotfiles", "cursor-mcp.json"), JSON.stringify({ other: 1 }), 0o644);

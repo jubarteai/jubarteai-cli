@@ -13,6 +13,7 @@ import { setTtyOpenerForTests } from "../prompt.js";
 import type { TtyHandle } from "../prompt.js";
 import { credentialsPath } from "../paths.js";
 import { readCredentials, saveSeat } from "./credentials.js";
+import { keyDigest } from "./key-digest.js";
 import type { StoredSeat } from "./credentials.js";
 import { loginFlow, loginWithToken } from "./login-flow.js";
 
@@ -334,6 +335,19 @@ describe("loginFlow: replaces", () => {
     expect(err()).not.toContain("still active");
   });
 
+  it("returns the digest of the key the server revoked (never the key), and null when nothing was revoked", async () => {
+    fake.addKey(OLD_CLI_KEY, "cli");
+    saveSeat(fake.identity.seat_id, seatOf(OLD_CLI_KEY), { makeDefault: true });
+    const { ctx } = context();
+    const first = await loginFlow(ctx, flowOpts(), { openBrowser: approvingBrowser().open });
+    expect(first.replacedDigest?.equals(keyDigest(OLD_CLI_KEY))).toBe(true);
+    expect(JSON.stringify(first)).not.toContain(OLD_CLI_KEY);
+    // A login with no stored CLI key replaces nothing.
+    rmSync(credentialsPath());
+    const second = await loginFlow(context().ctx, flowOpts(), { openBrowser: approvingBrowser().open });
+    expect(second.replacedDigest).toBeNull();
+  });
+
   it("never sends a dashboard key", async () => {
     fake.addKey(DASHBOARD_KEY, "dashboard");
     saveSeat(fake.identity.seat_id, seatOf(DASHBOARD_KEY, { minted_by: "dashboard" }), { makeDefault: true });
@@ -570,6 +584,30 @@ describe("loginWithToken", () => {
     expect(error.exitCode).toBe(3);
     expect(error.message).not.toContain(DASHBOARD_KEY);
     expect(() => readFileSync(credentialsPath())).toThrow();
+  });
+
+  it("says so when the pasted key replaces a stored CLI key for the same workspace (the old key stays live)", async () => {
+    fake.addKey(OLD_CLI_KEY, "cli");
+    fake.addKey(DASHBOARD_KEY, "dashboard");
+    saveSeat(fake.identity.seat_id, seatOf(OLD_CLI_KEY), { makeDefault: true });
+    const { ctx, err } = context();
+    await loginWithToken(ctx, { origin: fake.origin, token: DASHBOARD_KEY });
+    expect(err()).toContain("Your previous CLI key for Acme Inc is still active; revoke it in Dashboard → API keys.");
+    expect(err()).not.toContain(OLD_CLI_KEY);
+    expect(fake.isRevoked(OLD_CLI_KEY)).toBe(false);
+  });
+
+  it("is silent about a replaced dashboard key, and about re-pasting the same CLI key", async () => {
+    fake.addKey(DASHBOARD_KEY, "dashboard");
+    saveSeat(fake.identity.seat_id, seatOf("jba_ANOTHERDASHBOARDKEYANOTHER1", { minted_by: "dashboard" }), { makeDefault: true });
+    const first = context();
+    await loginWithToken(first.ctx, { origin: fake.origin, token: DASHBOARD_KEY });
+    expect(first.err()).not.toContain("still active");
+    fake.addKey(OLD_CLI_KEY, "cli");
+    saveSeat(fake.identity.seat_id, seatOf(OLD_CLI_KEY), { makeDefault: true });
+    const second = context();
+    await loginWithToken(second.ctx, { origin: fake.origin, token: OLD_CLI_KEY });
+    expect(second.err()).not.toContain("still active");
   });
 
   it("stores the origin it was verified against", async () => {

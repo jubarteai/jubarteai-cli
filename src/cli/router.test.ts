@@ -52,7 +52,7 @@ describe("routeWith: help and version", () => {
   ];
 
   it("prints the version for --version anywhere, exit 0", async () => {
-    for (const argv of [["--version"], ["-v"], ["search", "--version"], ["--pretty", "--version"]]) {
+    for (const argv of [["--version"], ["-v"], ["search", "--version"], ["-v", "search"], ["--version", "--help"]]) {
       const h = harness(registry);
       expect(await h.run(argv)).toBe(0);
       expect(h.out()).toBe(`${cliVersion()}\n`);
@@ -60,7 +60,7 @@ describe("routeWith: help and version", () => {
     }
   });
 
-  it("prints grouped help with no arguments and for --help, hiding internal commands", async () => {
+  it("prints grouped help with no arguments and for --help, naming internal commands on one line", async () => {
     for (const argv of [[], ["--help"], ["-h"]]) {
       const h = harness(registry);
       expect(await h.run(argv)).toBe(0);
@@ -69,11 +69,12 @@ describe("routeWith: help and version", () => {
       expect(text).toContain("Account:");
       expect(text).toContain("Tools:");
       expect(text).toContain("Setup:");
+      expect(text.indexOf("Setup:")).toBeLessThan(text.indexOf("Account:"));
       expect(text.indexOf("Account:")).toBeLessThan(text.indexOf("Tools:"));
-      expect(text.indexOf("Tools:")).toBeLessThan(text.indexOf("Setup:"));
       expect(text).toContain("Search knowledge");
       expect(text).toContain("--workspace <value>");
-      expect(text).not.toContain("Internal");
+      expect(text).toContain("\nInternal (used by hooks and shims): hook (not for direct use; details: jubarteai --help --all)\n");
+      expect(text).not.toContain("Internal (used by hooks and shims):\n");
       expect(text).not.toContain("Harness hook entry");
       expect(h.err()).toBe("");
     }
@@ -91,6 +92,7 @@ describe("routeWith: help and version", () => {
     expect(await h.run(["--help"])).toBe(0);
     expect(h.out()).toContain("Global options:");
     expect(h.out()).not.toContain("Account:");
+    expect(h.out()).not.toContain("Internal");
   });
 
   it("<cmd> --help prints that command's flags and does not run it", async () => {
@@ -131,10 +133,10 @@ describe("routeWith: help and version", () => {
 });
 
 describe("routeWith: dispatch", () => {
-  it("accepts global flags before and after the command and hands them to the command", async () => {
+  it("accepts global flags after the command and hands them to the command", async () => {
     const seen = { value: null as Seen };
     const h = harness([command({ name: "search", flags: [{ name: "query", type: "string", description: "q" }] }, seen)]);
-    expect(await h.run(["--workspace", "acme", "search", "--query", "x", "--pretty", "--agent=agent-1", "--yes", "extra"])).toBe(0);
+    expect(await h.run(["search", "--workspace", "acme", "--query", "x", "--pretty", "--agent=agent-1", "--yes", "extra"])).toBe(0);
     expect(seen.value?.globals).toEqual({ workspace: "acme", agent: "agent-1", pretty: true, yes: true });
     expect(seen.value?.args.flags.query).toBe("x");
     expect(seen.value?.args.positionals).toEqual(["extra"]);
@@ -152,11 +154,34 @@ describe("routeWith: dispatch", () => {
     expect(await h.run(["check"])).toBe(2);
   });
 
-  it("a global flag's value is not mistaken for the command name", async () => {
-    const seen = { value: null as Seen };
-    const h = harness([command({ name: "search" }, seen)]);
-    expect(await h.run(["--workspace", "search", "search"])).toBe(0);
-    expect(seen.value?.globals.workspace).toBe("search");
+  it("refuses a flag before the command name, so a rule on the command's name can't be slipped past (R-S8)", async () => {
+    for (const argv of [["--yes", "init"], ["--workspace", "acme", "init"], ["--pretty", "search"], ["--agent=a", "search"], ["--all", "search"], ["-h", "--yes", "init"]]) {
+      let ran = 0;
+      const h = harness([command({ name: "search", run: async () => ++ran }), command({ name: "init", run: async () => ++ran })]);
+      expect(await h.run(argv)).toBe(2);
+      expect(ran).toBe(0);
+      expect(h.err()).toMatch(/^Put flags after the command name: jubarteai (init|search) \[options\]\./);
+      expect(h.out()).toBe("");
+    }
+  });
+
+  it("a lone info flag before the command prints help or the version and runs nothing", async () => {
+    let ran = 0;
+    const registry = [command({ name: "init", summary: "Connect a repo", run: async () => ++ran })];
+    for (const argv of [["--help", "init", "--yes"], ["-h", "init"], ["--help", "--all", "init"], ["--version", "init", "--yes"]]) {
+      const h = harness(registry);
+      expect(await h.run(argv)).toBe(0);
+      expect(h.out().length).toBeGreaterThan(0);
+    }
+    expect(ran).toBe(0);
+  });
+
+  it("a global flag with no command → exit 2", async () => {
+    for (const argv of [["--pretty"], ["--yes"], ["--workspace", "acme"]]) {
+      const h = harness([command({ name: "search" })]);
+      expect(await h.run(argv)).toBe(2);
+      expect(h.err()).toContain("needs a command");
+    }
   });
 
   it("passes the process context through", async () => {
@@ -183,7 +208,7 @@ describe("routeWith: usage errors", () => {
   });
 
   it("an unknown command name is rendered without control characters", async () => {
-    for (const argv of [["bad\u001b[2Jname"], ["--pretty", "bad\u009bname\u007f"]]) {
+    for (const argv of [["bad\u001b[2Jname"], ["--help", "bad\u009bname\u007f"]]) {
       const h = harness([]);
       expect(await h.run(argv)).toBe(2);
       expect(h.err()).toContain('Unknown command "bad');
@@ -195,7 +220,6 @@ describe("routeWith: usage errors", () => {
   it("unknown flags (top level, before the command, after it) → exit 2 naming the flag", async () => {
     for (const [argv, flag] of [
       [["--nope"], "--nope"],
-      [["--nope", "search"], "--nope"],
       [["search", "--nope"], "--nope"],
     ] as const) {
       const h = harness([command({ name: "search" })]);

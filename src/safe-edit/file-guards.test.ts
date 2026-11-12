@@ -477,3 +477,54 @@ describe("assertSafeTarget: the directory the file sits in (unsafe-parent)", () 
     });
   });
 });
+
+describe.skipIf(isWindows)("assertSafeTarget withinRoot (a file inside a project the repo's contents steer)", () => {
+  function project(): string {
+    const dir = path.join(home, "proj");
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  it("a link whose target stays inside the project is followed (CLAUDE.md -> AGENTS.md)", () => {
+    const proj = project();
+    write(path.join(proj, "AGENTS.md"), "x\n");
+    fs.symlinkSync("AGENTS.md", path.join(proj, "CLAUDE.md"));
+    expect(assertSafeTarget(path.join(proj, "CLAUDE.md"), { allowMissing: false, withinRoot: proj })).toEqual({ ok: true });
+  });
+
+  it("a file link into the home directory (AGENTS.md -> ../.zshrc) is refused as symlink, even though home is allowed elsewhere", () => {
+    const proj = project();
+    const zshrc = write(path.join(home, ".zshrc"), "export A=1\n");
+    fs.symlinkSync("../.zshrc", path.join(proj, "AGENTS.md"));
+    expect(assertSafeTarget(path.join(proj, "AGENTS.md"), { allowMissing: true, withinRoot: proj })).toEqual({ ok: false, reason: "symlink" });
+    expect(assertSafeTarget(path.join(proj, "AGENTS.md"), { allowMissing: true, withinHome: true })).toEqual({ ok: true });
+    expect(fs.readFileSync(zshrc, "utf8")).toBe("export A=1\n");
+  });
+
+  it("a linked directory above the file (.codex -> ../.codex) is refused too, and a dangling link out of the project", () => {
+    const proj = project();
+    write(path.join(home, ".codex", "config.toml"), "a = 1\n");
+    fs.symlinkSync("../.codex", path.join(proj, ".codex"));
+    expect(assertSafeTarget(path.join(proj, ".codex", "config.toml"), { allowMissing: true, withinRoot: proj })).toEqual({ ok: false, reason: "symlink" });
+    fs.symlinkSync("../nothing-yet", path.join(proj, "dangling.md"));
+    expect(assertSafeTarget(path.join(proj, "dangling.md"), { allowMissing: true, withinRoot: proj })).toEqual({ ok: false, reason: "symlink" });
+  });
+
+  it("a project reached through a link is judged by its real path", () => {
+    const proj = project();
+    const alias = path.join(root, "alias");
+    fs.symlinkSync(proj, alias);
+    write(path.join(proj, "AGENTS.md"));
+    expect(assertSafeTarget(path.join(alias, "AGENTS.md"), { allowMissing: false, withinRoot: alias })).toEqual({ ok: true });
+    expect(assertSafeTarget(path.join(alias, "AGENTS.md"), { allowMissing: false, withinRoot: proj })).toEqual({ ok: true });
+  });
+
+  it("still refuses a hard-linked file and a foreign owner inside the project", () => {
+    const proj = project();
+    const file = write(path.join(proj, "AGENTS.md"));
+    fs.linkSync(file, path.join(proj, "copy.md"));
+    expect(assertSafeTarget(file, { allowMissing: false, withinRoot: proj })).toEqual({ ok: false, reason: "hardlink" });
+    const other = write(path.join(proj, "OTHER.md"));
+    expect(assertSafeTargetWith(other, { allowMissing: false, withinRoot: proj }, foreignFile(other))).toEqual({ ok: false, reason: "foreign-owner" });
+  });
+});

@@ -2,7 +2,7 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CliError } from "./errors.js";
-import { choose, confirm, controllingTtyPaths, isInteractive, promptHidden, promptLine, setTtyOpenerForTests } from "./prompt.js";
+import { choose, confirm, controllingTtyPaths, isInteractive, promptHidden, setTtyOpenerForTests } from "./prompt.js";
 import type { TtyHandle } from "./prompt.js";
 
 type FakeInput = PassThrough & { isTTY: boolean; setRawMode: (mode: boolean) => unknown };
@@ -44,8 +44,6 @@ describe("with no terminal reachable", () => {
     expect(isInteractive()).toBe(false);
     expect(await confirm("Sure?", { defaultYes: true })).toBe(true);
     expect(await confirm("Sure?", { defaultYes: false })).toBe(false);
-    expect(await promptLine("Name?", { default: "bob" })).toBe("bob");
-    expect(await promptLine("Name?")).toBeNull();
     expect(await promptHidden("Key?")).toBeNull();
     expect(await choose("Pick", [{ label: "a", value: "A" }, { label: "b", value: "B" }], { defaultIndex: 1 })).toBe("B");
   });
@@ -104,29 +102,18 @@ describe("confirm", () => {
   });
 });
 
-describe("promptLine", () => {
-  it("returns the trimmed answer, the default on empty, and shows the default", async () => {
-    const tty = fakeTty();
-    tty.input.write("  alice  \n");
-    expect(await promptLine("Name?", { default: "bob" })).toBe("alice");
-    expect(tty.shown()).toContain("Name? (bob) ");
-    tty.input.write("\n");
-    expect(await promptLine("Name?", { default: "bob" })).toBe("bob");
-    tty.input.write("\n");
-    expect(await promptLine("Name?")).toBe("");
-  });
-
+describe("visible answers (the shared line reader)", () => {
   it("serves two prompts from one burst of typed input", async () => {
     const tty = fakeTty();
-    tty.input.write("y\nbob\n");
+    tty.input.write("y\nn\n");
     expect(await confirm("Go?", { defaultYes: false })).toBe(true);
-    expect(await promptLine("Name?")).toBe("bob");
+    expect(await confirm("Sure?", { defaultYes: true })).toBe(false);
   });
 
   it("rejects an over-long answer", async () => {
     const tty = fakeTty();
     tty.input.write(`${"x".repeat(9000)}\n`);
-    await expect(promptLine("Name?")).rejects.toMatchObject({ exitCode: 2 });
+    await expect(confirm("Go?", { defaultYes: true })).rejects.toMatchObject({ exitCode: 2 });
   });
 });
 
@@ -203,7 +190,6 @@ describe("promptHidden", () => {
     const controller = new AbortController();
     controller.abort();
     expect(await promptHidden("Key:", { signal: controller.signal })).toBeNull();
-    expect(await promptLine("Name?", { signal: controller.signal })).toBeNull();
     expect(tty.shown()).toBe("");
     expect(tty.rawCalls()).toEqual([]);
   });
@@ -218,11 +204,11 @@ describe("promptHidden", () => {
   });
 });
 
-describe("promptLine signal", () => {
+describe("promptHidden signal", () => {
   it("an aborted signal resolves null and removes the listeners", async () => {
     const tty = fakeTty();
     const controller = new AbortController();
-    const pending = promptLine("Name?", { signal: controller.signal });
+    const pending = promptHidden("Key:", { signal: controller.signal });
     controller.abort();
     expect(await pending).toBeNull();
     expect(tty.input.listenerCount("data")).toBe(0);
