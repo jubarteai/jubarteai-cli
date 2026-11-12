@@ -10,9 +10,11 @@ import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import { harnessGroup } from "../safe-edit/plan.js";
+import { jsonRemovalStep, removeFromStringList, removeNestedHooks } from "./uninstall.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { hookCommand as commandFor, hooksPreview, inspectCommandHooks, mergeCommandHooks, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
+import { shownPath } from "./mcp-cleanup.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 
 const HARNESS = "gemini-cli" as const;
@@ -166,7 +168,7 @@ function permissionStep(file: string, done: boolean, legacy: boolean): PlanStep 
     preview: [
       file,
       `  tools.allowed += ${SHELL_TOOL_ENTRIES.map((e) => `"${e}"`).join(", ")}`,
-      "  (login, logout, link, init and update are left out: they ask first)",
+      `  (${PERSON_COMMAND_LIST} are left out: they ask first)`,
       ...(legacy ? [`  tools.allowed -= "${LEGACY_SHELL_TOOL_ENTRY}" (it also pre-approves those five)`] : []),
     ].join("\n"),
     flag: "--yes",
@@ -204,6 +206,33 @@ export const geminiCliAdapter: HarnessAdapter = {
   // Hooks get GEMINI_SESSION_ID, but the agent's shell commands do not: the identity line's --agent is the path.
   sessionVar: null,
   promptInjection: true,
+
+  /** Removes our tools.allowed entries and our three hooks (found by their `hook <event> --harness gemini-cli` suffix). */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const file = settingsPath(ctx.home);
+    const shown = shownPath(file, ctx.home);
+    const permission = jsonRemovalStep({
+      harness: HARNESS,
+      id: `${HARNESS}:uninstall-permission`,
+      label: `Remove the jubarteai tool entries from ${shown}`,
+      file,
+      home: ctx.home,
+      preview: [`${shown}:`, ...[...SHELL_TOOL_ENTRIES, LEGACY_SHELL_TOOL_ENTRY].map((e) => `  tools.allowed -= "${e}"`)].join("\n"),
+      byHand: [...SHELL_TOOL_ENTRIES, LEGACY_SHELL_TOOL_ENTRY].map((e) => `"${e}" (tools.allowed)`),
+      edit: (doc) => removeFromStringList(doc, ["tools", "allowed"], [...SHELL_TOOL_ENTRIES, LEGACY_SHELL_TOOL_ENTRY]),
+    });
+    const hooks = jsonRemovalStep({
+      harness: HARNESS,
+      id: `${HARNESS}:uninstall-hooks`,
+      label: `Remove the JubarteAI session hooks from ${shown}`,
+      file,
+      home: ctx.home,
+      preview: [`${shown}:`, ...EVENTS.map((e) => `  hooks.${e.name}: the entry running "hook ${e.arg} --harness ${HARNESS}"`)].join("\n"),
+      byHand: EVENTS.map((e) => `the hooks.${e.name} entry that runs "hook ${e.arg} --harness ${HARNESS}"`),
+      edit: (doc) => removeNestedHooks(doc, EVENTS, HARNESS),
+    });
+    return [permission, hooks].filter((item): item is PlanStep | ManualInstructions => item !== null);
+  },
 
   async detect(env: DetectEnv): Promise<boolean> {
     return env.which("gemini") !== null || existsSync(geminiDir(env.home));
@@ -255,7 +284,7 @@ export const geminiCliAdapter: HarnessAdapter = {
     const hooks = inspectCommandHooks(doc, hooksSpec(ctx));
     const notes: string[] = [];
     if (Array.isArray(list) && list.includes(LEGACY_SHELL_TOOL_ENTRY)) {
-      notes.push(`tools.allowed holds "${LEGACY_SHELL_TOOL_ENTRY}", which also pre-approves login, logout, link, init and update; run init again to replace it`);
+      notes.push(`tools.allowed holds "${LEGACY_SHELL_TOOL_ENTRY}", which also pre-approves ${PERSON_COMMAND_LIST}; run init again to replace it`);
     }
     const config = doc["hooksConfig"];
     if (isObject(config) && config["enabled"] === false) notes.push("hooksConfig.enabled is false in settings.json, so Gemini CLI skips every hook");

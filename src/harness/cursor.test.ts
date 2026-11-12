@@ -208,7 +208,7 @@ describe("cursor inspect", () => {
     expect(state.permission).toBe("manual");
     const notes = state.notes.join(" ");
     expect(notes).toContain("Shell(jubarteai) is in permissions.allow");
-    expect(notes).toContain("login, logout, link, init and update");
+    expect(notes).toContain("login, logout, link, init, update and uninstall");
     expect(notes).toContain("CURSOR_AGENT");
   });
 

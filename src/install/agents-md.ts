@@ -15,6 +15,8 @@ import { basename, dirname, join, parse, resolve } from "node:path";
 import { homeDir } from "../paths.js";
 import { SafeEditError, writeFileAtomic } from "../safe-edit/atomic-write.js";
 import { defaultGuardEnv, realTarget, type RefusalReason } from "../safe-edit/file-guards.js";
+import { removeFileSafely } from "../binding/gitignore.js";
+import type { ManualInstructions } from "../harness/types.js";
 import { repoGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENTS_MD_MARKERS, SKILL_REPO, agentsMdSnippet, agentsMdSnippetHistory } from "./constants.js";
@@ -515,4 +517,106 @@ export function planInstructionSteps(root: string, opts: InstructionOptions): Pl
     steps.push({ ...CLAUDE_IMPORT_STEP, group: repoGroup(root), files: [join(root, "CLAUDE.md")], sensitive: false, apply: () => applyClaudeImport(root, bound, fresh) });
   }
   return steps;
+}
+
+// --- removing (uninstall) ---------------------------------------------------------------------------------------
+
+/** AGENTS.md without our marked section: the blank line init put before it goes too; null when the markers aren't a clean pair. */
+function withoutSection(text: string): string | null {
+  const { begin, end } = AGENTS_MD_MARKERS;
+  if (count(text, begin) !== 1 || count(text, end) !== 1) return null;
+  const b = text.indexOf(begin);
+  const e = text.indexOf(end);
+  if (e < b) return null;
+  let before = text.slice(0, b);
+  let after = text.slice(e + end.length);
+  if (after.startsWith("\r\n")) after = after.slice(2);
+  else if (after.startsWith("\n")) after = after.slice(1);
+  // init wrote `${text}\n\n${section}\n` after existing content.
+  if (before.endsWith("\r\n\r\n")) before = before.slice(0, -4);
+  else if (before.endsWith("\n\n")) before = before.slice(0, -2);
+  return before + after;
+}
+
+/** A write or a delete of one instruction file, as a fixed result. */
+async function rewrite(root: string, file: string, name: string, next: string): Promise<Outcome> {
+  if (next.trim() === "") {
+    try {
+      removeFileSafely(file);
+    } catch {
+      return { status: "failed", detail: `could not remove ${name}` };
+    }
+    return { status: "configured", detail: `removed ${name}, which held only the JubarteAI lines` };
+  }
+  return attempt(root, file, name, next, "removed the JubarteAI lines");
+}
+
+/**
+ * The steps that take back what init wrote in the project's instruction files, the inverse of planInstructionSteps: the
+ * marked section out of AGENTS.md (the file goes when it held only that), and the @AGENTS.md line out of CLAUDE.md (the file
+ * goes when init made it). A section someone edited, or markers that aren't a clean pair, are printed instructions: the CLI
+ * deletes only text it can prove it wrote. Empty for `~` and `/`. Every step is sensitive.
+ */
+export function planInstructionRemoval(root: string): Array<PlanStep | ManualInstructions> {
+  if (notProjectReason(root) !== null) return [];
+  const p = loadProject(root, sectionTexts(deriveSlug(root)));
+  const out: Array<PlanStep | ManualInstructions> = [];
+
+  const agents = p.agents;
+  if (agents.exists && agents.state !== "missing" && agents.state !== "linked") {
+    const removable = agents.state === "current" || agents.state === "known-old";
+    if (removable && withoutSection(agents.text) !== null) {
+      const { id, label } = { id: "uninstall-agents-md", label: "Remove the JubarteAI section from AGENTS.md" };
+      out.push({
+        id,
+        label,
+        group: repoGroup(root),
+        files: [agents.file],
+        sensitive: true,
+        preview: `${agents.file}: remove the text between ${AGENTS_MD_MARKERS.begin} and ${AGENTS_MD_MARKERS.end}`,
+        flag: "--yes",
+        apply: async (): Promise<StepResult> => {
+          const fresh = loadFile(root, "AGENTS.md", p.texts);
+          const next = fresh.state === "current" || fresh.state === "known-old" ? withoutSection(fresh.text) : null;
+          if (next === null) return { id, label, status: "skipped", detail: "the section changed since it was planned, left as it is" };
+          return result(id, label, await rewrite(root, fresh.file, fresh.name, next));
+        },
+      });
+    } else if (agents.state === "custom" || agents.state === "mention" || agents.state === "current" || agents.state === "known-old") {
+      out.push({
+        kind: "manual",
+        harness: "claude-code",
+        title: "AGENTS.md: the JubarteAI section",
+        lines: [`Open ${agents.name} and delete the section ${AGENTS_MD_MARKERS.begin} … ${AGENTS_MD_MARKERS.end}, or the "JubarteAI Agent Identity" heading and what follows it.`],
+        reason: "the section was edited or isn't a pair of markers, so the CLI doesn't delete it",
+      });
+    }
+  }
+
+  const claude = p.claude;
+  if (claude.exists && claude.state !== "linked" && claude.state !== "unreadable") {
+    const only = claude.text === "@AGENTS.md\n" || claude.text === "@AGENTS.md\r\n" || claude.text === "@AGENTS.md";
+    const trailing = /\r?\n@AGENTS\.md\r?\n?$/.exec(claude.text);
+    if (only || trailing !== null) {
+      const { id, label } = { id: "uninstall-claude-md", label: only ? "Remove CLAUDE.md (it only imports AGENTS.md)" : "Remove the @AGENTS.md line from CLAUDE.md" };
+      out.push({
+        id,
+        label,
+        group: repoGroup(root),
+        files: [claude.file],
+        sensitive: true,
+        preview: only ? `${claude.file}: delete the file (it holds only @AGENTS.md)` : `${claude.file}: remove the last line, @AGENTS.md`,
+        flag: "--yes",
+        apply: async (): Promise<StepResult> => {
+          const fresh = loadFile(root, "CLAUDE.md", p.texts);
+          if (fresh.state === "unreadable") return { id, label, status: "skipped", detail: "could not read CLAUDE.md, left as it is" };
+          const match = /\r?\n@AGENTS\.md\r?\n?$/.exec(fresh.text);
+          const bare = fresh.text.trim() === "@AGENTS.md";
+          if (!bare && match === null) return { id, label, status: "already configured", detail: "no @AGENTS.md line to remove" };
+          return result(id, label, await rewrite(root, fresh.file, fresh.name, bare ? "" : fresh.text.slice(0, match?.index ?? fresh.text.length)));
+        },
+      });
+    }
+  }
+  return out;
 }

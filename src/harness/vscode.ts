@@ -40,7 +40,8 @@ import {
 } from "./cursor.js";
 import { PRE_TOOL_USE, SHELL_TOOL_MATCHER } from "../hooks/tool-guard.js";
 import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
-import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
+import { findMcpEntries, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
+import { jsonRemovalStep, removeFlatHooks } from "./uninstall.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "vscode" as const;
@@ -65,6 +66,7 @@ export const COPILOT_HOOKS_STEP_ID = "copilot:hooks";
  * also reports as "vscode". Both take the same `{"additionalContext"}` output, so only the label in connect's description is shared.
  */
 const COPILOT_HINT: HarnessId = "vscode";
+export const COPILOT_UNINSTALL_STEP_ID = "copilot:uninstall-hooks";
 
 const EVENTS: ReadonlyArray<{ copilot: string; event: "session-start" | "session-end"; timeoutS: number }> = [
   { copilot: "sessionStart", event: "session-start", timeoutS: START_TIMEOUT_S },
@@ -252,7 +254,7 @@ export function copilotHooksStep(ctx: CopilotCtx): PlanStep {
     // One file serves VS Code and Copilot CLI; the step shows under VS Code.
     harness: "vscode",
     id: COPILOT_HOOKS_STEP_ID,
-    label: "GitHub Copilot (VS Code and Copilot CLI): session hooks and the guard that denies an agent login, logout, link, init and update",
+    label: `GitHub Copilot (VS Code and Copilot CLI): session hooks and the guard that denies an agent ${PERSON_COMMAND_LIST}`,
     file: copilotHooksFile(ctx),
     preview: [
       ...EVENTS.map((e) => `  hooks.${e.copilot}: ${hookCommand(program, e.event, COPILOT_HINT)}`),
@@ -279,6 +281,43 @@ export function copilotHooksPlan(ctx: CopilotCtx, harness: HarnessId): PlanStep[
     );
   }
   return [copilotHooksStep(ctx)];
+}
+
+/**
+ * The step that removes our entries from the shared Copilot hook file (VS Code and Copilot CLI both return it with
+ * this id, so the caller runs it once). The file is wholly ours: when nothing else is left in it the file goes too
+ * (jsonRemovalStep deletes a file left with only a version marker).
+ */
+export function copilotHooksRemoval(ctx: CopilotCtx): PlanStep | ManualInstructions | null {
+  const file = copilotHooksFile(ctx);
+  const shown = shownPath(file, ctx.home);
+  const keys = EVENTS.map((e) => ({ key: e.copilot, arg: e.event }));
+  const edit = (doc: Obj): boolean => {
+    const hooksRemoved = removeFlatHooks(doc, keys, COPILOT_HINT);
+    const hooks = doc["hooks"];
+    let guardRemoved = false;
+    if (isObject(hooks) && Array.isArray(hooks[GUARD_KEY])) {
+      const kept = hooks[GUARD_KEY].filter((entry) => !isOurGuard(entry));
+      if (kept.length !== hooks[GUARD_KEY].length) {
+        guardRemoved = true;
+        if (kept.length === 0) delete hooks[GUARD_KEY];
+        else hooks[GUARD_KEY] = kept;
+        if (Object.keys(hooks).length === 0) delete doc["hooks"];
+      }
+    }
+    return hooksRemoved || guardRemoved;
+  };
+  const step = jsonRemovalStep({
+    harness: "vscode",
+    id: COPILOT_UNINSTALL_STEP_ID,
+    label: `Remove the GitHub Copilot session hooks and guard from ${shown}`,
+    file,
+    home: ctx.home,
+    preview: [`${shown}:`, ...EVENTS.map((e) => `  hooks.${e.copilot}: the entry running "hook ${e.event} --harness ${COPILOT_HINT}"`), `  hooks.${GUARD_KEY}: the guard running "hook ${PRE_TOOL_USE} --harness ${COPILOT_HINT}"`].join("\n"),
+    byHand: [`the file ${shown} (it holds only JubarteAI's entries)`],
+    edit,
+  });
+  return step;
 }
 
 /** Whether the shared hook file holds exactly our three entries (read-only, for doctor and update's refresh). */
@@ -342,6 +381,39 @@ export const vscodeAdapter: HarnessAdapter = {
   // `userPromptSubmitted` output is dropped, so only session-start injects.
   promptInjection: false,
 
+  /** Removes the terminal auto-approve rules and the shared Copilot hooks and guard. */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const dir = userDirs(ctx.home, ctx.env, ctx.platform)[0] ?? "";
+    const file = join(dir, "settings.json");
+    const shown = shownPath(file, ctx.home);
+    const permission = jsonRemovalStep({
+      harness: HARNESS,
+      id: `${HARNESS}:uninstall-permission`,
+      label: `Remove the jubarteai terminal rules from ${shown}`,
+      file,
+      home: ctx.home,
+      preview: [`${shown}:`, `  ${AUTO_APPROVE_KEY}["${AGENT_RULE}"] removed`, `  ${AUTO_APPROVE_KEY}["${PERSON_RULE}"] removed`].join("\n"),
+      byHand: [`${AUTO_APPROVE_KEY}["${AGENT_RULE}"]`, `${AUTO_APPROVE_KEY}["${PERSON_RULE}"]`],
+      edit: (doc) => {
+        const rules = doc[AUTO_APPROVE_KEY];
+        if (!isObject(rules)) return false;
+        let changed = false;
+        if (rules[AGENT_RULE] === true) {
+          delete rules[AGENT_RULE];
+          changed = true;
+        }
+        if (rules[PERSON_RULE] === false) {
+          delete rules[PERSON_RULE];
+          changed = true;
+        }
+        if (changed && Object.keys(rules).length === 0) delete doc[AUTO_APPROVE_KEY];
+        return changed;
+      },
+    });
+    const hooks = copilotHooksRemoval(ctx);
+    return [permission, hooks].filter((item): item is PlanStep | ManualInstructions => item !== null);
+  },
+
   async detect(env: DetectEnv): Promise<boolean> {
     if (env.which("code") !== null) return true;
     if (userDirs(env.home, env.env, env.platform).some((dir) => existsSync(dir))) return true;
@@ -382,7 +454,7 @@ export const vscodeAdapter: HarnessAdapter = {
       file,
       preview: [
         `  ${AUTO_APPROVE_KEY}["${AGENT_RULE}"]: true   (agent commands: connect, search-knowledge, inbox, ...)`,
-        `  ${AUTO_APPROVE_KEY}["${PERSON_RULE}"]: false  (login, logout, link, init, update keep asking)`,
+        `  ${AUTO_APPROVE_KEY}["${PERSON_RULE}"]: false  (${PERSON_COMMAND_LIST} keep asking)`,
         ...(legacy ? [`  removes ${AUTO_APPROVE_KEY}["${LEGACY_RULE}"]: true  (it also pre-approves a quoted spelling such as jubarteai "login")`] : []),
       ].join("\n"),
       createIfMissing: true,

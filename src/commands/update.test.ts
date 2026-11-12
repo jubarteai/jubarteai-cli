@@ -667,6 +667,7 @@ describe.skipIf(!posix)("update: Codex instructions are read by their code, neve
       hooks: async () => null,
       inspect: async () => ({ permission: "n/a", hooks: "n/a", mcpEntries: [], notes: [] }),
       mcpCleanup: async () => [cleanup],
+      uninstall: async () => [],
       extras: async () => [
         manual("Network access, reworded", "a reason worded some new way", CODEX_CODES.networkManual),
         manual("Hooks, reworded", "trust them some new way", CODEX_CODES.trustHooks),

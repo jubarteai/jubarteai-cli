@@ -209,7 +209,7 @@ describe("permission: agent commands only (review R-M1)", () => {
     put(JSON.stringify({ tools: { allowed: [LEGACY] } }));
     const legacy = await geminiCliAdapter.inspect(ctx());
     expect(legacy.permission).toBe("missing");
-    expect(legacy.notes.join(" ")).toContain("login, logout, link, init and update");
+    expect(legacy.notes.join(" ")).toContain("login, logout, link, init, update and uninstall");
     put(JSON.stringify({ tools: { allowed: [LEGACY, ...ENTRIES] } }));
     const both = await geminiCliAdapter.inspect(ctx());
     expect(both.permission).toBe("configured");

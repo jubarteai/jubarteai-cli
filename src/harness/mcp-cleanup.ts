@@ -9,6 +9,7 @@
 // reported when the command ran from ~ or / (no single project is meant there).
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { removeFileSafely } from "../binding/gitignore.js";
 import { runCommand } from "../install/run.js";
 import { safeForDisplay } from "../output.js";
 import { editJsonFile, readConfigText, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
@@ -480,6 +481,11 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
       if (target.format === "toml") {
         try {
           result = editTomlFile(target.file, (text) => removeTomlTable(text, CODEX_TABLE), { createIfMissing: false, ...rules });
+          // A config that held only that table (init made it for Codex's fallback) goes with it.
+          if (result.status === "changed") {
+            const left = readConfigText(target.file);
+            if (left.status === "ok" && left.text.trim() === "") removeFileSafely(target.file);
+          }
         } catch (e) {
           if (e instanceof TomlConflictError) return skippedResult({ id, label }, `it sets jubarteai inline or with dotted keys, remove it by hand: ${shown}`);
           throw e;

@@ -5,15 +5,16 @@
 // entry, because without network access its shell can't reach the CLI).
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ensureIgnoreBlock } from "../binding/gitignore.js";
+import { ensureIgnoreBlock, removeFileSafely, removeIgnoreBlock } from "../binding/gitignore.js";
 import { runCommand } from "../install/run.js";
 import { safeForDisplay } from "../output.js";
-import { editTomlFile, readTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
+import { TomlConflictError, editTomlFile, readTomlKey, removeTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
 import { readConfigText } from "../safe-edit/json-edit.js";
 import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { HOOK_EVENTS, hooksPreview, readSettings, hooksStep, inspectCommandHooks, mergeCommandHooks, unreadableInstructions, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
 import { codexHome, findMcpEntries, mcpCleanupFor, shownPath, type CleanupGate } from "./mcp-cleanup.js";
+import { jsonRemovalStep, removeNestedHooks } from "./uninstall.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const ID = "codex";
@@ -384,6 +385,61 @@ async function mcpCleanup(scope: CleanupScope, deps: CodexDeps): Promise<Array<P
   return items.flatMap((item): Array<PlanStep | ManualInstructions> => (isKeptUserEntry(item) ? (inEffect ? [{ ...item, code: CODEX_CODES.keptUser }] : []) : [item]));
 }
 
+/**
+ * What init wrote for Codex that uninstall takes back: the hook entries, and the project's network opt-in key (with the
+ * .gitignore block that kept the file private). The user-level MCP entry is the cleanup step's (it holds a key).
+ */
+async function uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+  const out: Array<PlanStep | ManualInstructions> = [];
+  const file = hooksFile(ctx);
+  const shown = shownPath(file, ctx.home);
+  const hooks = jsonRemovalStep({
+    harness: ID,
+    id: `${ID}:uninstall-hooks`,
+    label: `Remove the JubarteAI session hooks from ${shown}`,
+    file,
+    home: ctx.home,
+    preview: [`${shown}:`, ...CODEX_EVENTS.map((e) => `  hooks.${e.name}: the entry running "hook ${e.arg} --harness ${ID}"`)].join("\n"),
+    byHand: CODEX_EVENTS.map((e) => `the hooks.${e.name} entry that runs "hook ${e.arg} --harness ${ID}"`),
+    edit: (doc) => removeNestedHooks(doc, CODEX_EVENTS, ID),
+  });
+  if (hooks !== null) out.push(hooks);
+
+  const root = ctx.projectRoot;
+  if (root !== null) {
+    const config = path.join(root, ".codex", "config.toml");
+    const gitignore = path.join(root, ".gitignore");
+    const text = readText(config);
+    if (text !== null && readTomlKey(text, NETWORK_TABLE, NETWORK_KEY) === true) {
+      const id = `${ID}:uninstall-network`;
+      const label = `Remove the network opt-in for jubarteai from ${shownPath(config, ctx.home)}`;
+      out.push({
+        id,
+        label,
+        group: harnessGroup(ID),
+        files: [config, gitignore],
+        sensitive: true,
+        preview: [`${shownPath(config, ctx.home)} (this project only):`, `  [${NETWORK_TABLE}] ${NETWORK_KEY} removed`, "  and the private .gitignore line init added, if it is there"].join("\n"),
+        flag: "--yes",
+        async apply(): Promise<StepResult> {
+          try {
+            const result = editTomlFile(config, (current) => removeTomlKey(current, NETWORK_TABLE, NETWORK_KEY, true), { createIfMissing: false, withinRoot: root });
+            if (result.status === "refused") return { id, label, status: "failed", detail: `could not write (${result.reason ?? "refused"})` };
+            const after = readText(config);
+            if (after !== null && after.trim() === "") removeFileSafely(config);
+            removeIgnoreBlock(gitignore, IGNORE_BLOCK, { deleteWhenEmpty: true });
+            return result.status === "changed" ? { id, label, status: "configured", detail: "removed" } : { id, label, status: "already configured", detail: "nothing to remove" };
+          } catch (error) {
+            if (error instanceof TomlConflictError) return { id, label, status: "skipped", detail: "it is set inline in that file, remove it by hand" };
+            return { id, label, status: "failed", detail: "could not update .gitignore" };
+          }
+        },
+      });
+    }
+  }
+  return out;
+}
+
 /** A Codex adapter with its machine-facing parts injected (tests); `codexAdapter` is the production one. */
 export function createCodexAdapter(overrides: Partial<CodexDeps> = {}): HarnessAdapter {
   const deps: CodexDeps = { ...defaultDeps, ...overrides };
@@ -401,6 +457,7 @@ export function createCodexAdapter(overrides: Partial<CodexDeps> = {}): HarnessA
     inspect: (ctx) => inspect(ctx, deps),
     mcpCleanup: (scope) => mcpCleanup(scope, deps),
     extras: (ctx) => extras(ctx, deps),
+    uninstall,
   };
 }
 

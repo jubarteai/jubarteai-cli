@@ -9,6 +9,7 @@ import { loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
 import { statusCommand } from "../commands/status.js";
 import { TOOL_COMMANDS } from "../commands/tool.js";
+import { uninstallCommand } from "../commands/uninstall.js";
 import { updateCommand } from "../commands/update.js";
 import type { ParsedArgs, FlagSpec } from "./args.js";
 
@@ -41,6 +42,7 @@ export const COMMANDS: CommandDef[] = [
   linkCommand,
   doctorCommand,
   updateCommand,
+  uninstallCommand,
   loginCommand,
   logoutCommand,
   statusCommand,

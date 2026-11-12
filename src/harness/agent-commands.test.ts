@@ -68,7 +68,7 @@ describe("agent and person commands", () => {
     for (const word of AGENT_RULE_WORDS) {
       for (const person of PERSON_COMMANDS) expect(person.startsWith(word), `${word} / ${person}`).toBe(false);
     }
-    expect(PERSON_COMMAND_LIST).toBe("login, logout, link, init and update");
+    expect(PERSON_COMMAND_LIST).toBe("login, logout, link, init, update and uninstall");
   });
 
   it("no OpenCode glob matches a person command line (`*` matches any characters, none included)", () => {

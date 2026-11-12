@@ -14,11 +14,13 @@ import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
 import { harnessGroup } from "../safe-edit/plan.js";
+import { jsonRemovalStep, removeFlatHooks } from "./uninstall.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import type { HarnessId } from "../session/harness-env.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { isOurHookCommand } from "./claude-code.js";
 import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
+import { shownPath } from "./mcp-cleanup.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 
 export type Obj = Record<string, unknown>;
@@ -247,6 +249,23 @@ export const cursorAdapter: HarnessAdapter = {
   sessionVar: null,
   // beforeSubmitPrompt cannot add context, so only session-start injects.
   promptInjection: false,
+
+  /** Removes our two hook entries from ~/.cursor/hooks.json (no permission rule is ever written for Cursor). */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const file = hooksPath(ctx.home);
+    const shown = shownPath(file, ctx.home);
+    const step = jsonRemovalStep({
+      harness: HARNESS,
+      id: `${HARNESS}:uninstall-hooks`,
+      label: `Remove the JubarteAI session hooks from ${shown}`,
+      file,
+      home: ctx.home,
+      preview: [`${shown}:`, ...EVENTS.map((e) => `  hooks.${e.cursor}: the entry running "hook ${e.event} --harness ${HARNESS}"`)].join("\n"),
+      byHand: EVENTS.map((e) => `the hooks.${e.cursor} entry that runs "hook ${e.event} --harness ${HARNESS}"`),
+      edit: (doc) => removeFlatHooks(doc, EVENTS.map((e) => ({ key: e.cursor, arg: e.event })), HARNESS),
+    });
+    return step === null ? [] : [step];
+  },
 
   async detect(env: DetectEnv): Promise<boolean> {
     return existsSync(cursorDir(env.home)) || hasCli(env);

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, rmdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { BINDING_VERSION } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
@@ -317,6 +317,44 @@ function applyBinding(root: string, input: BindingInput, reason?: "tracked" | "e
   changed = removeFileSafely(localPath).changed || changed;
   changed = removeIgnoreBlock(localIgnorePath, LOCAL_IGNORE_BLOCK, { deleteWhenEmpty: true }).changed || changed;
   return { changed, form: "private" };
+}
+
+/**
+ * Whether git tracks `.jubarteai/config.json` in `root`: a committed (shared) binding is removed in a commit, not here.
+ * Same fail-closed answer as the writer's.
+ */
+export function bindingIsTracked(root: string): boolean {
+  return isTrackedByGit(resolve(root));
+}
+
+/** True when `<root>/.jubarteai/config.json` exists (valid or not): there is a binding to take away. */
+export function hasBindingFiles(root: string): boolean {
+  try {
+    return lstatSync(join(root, BINDING_DIR, CONFIG_FILE)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Removes the binding init or link wrote in `root`: config.json, config.local.json, the folder's own .gitignore block, the
+ * folder once empty, and the private-binding lines in the repo's .gitignore. Every other file in `.jubarteai/` stays.
+ */
+export function removeBinding(root: string): { changed: boolean } {
+  const absolute = resolve(root);
+  const dir = join(absolute, BINDING_DIR);
+  let changed = false;
+  changed = removeFileSafely(join(dir, CONFIG_FILE)).changed || changed;
+  changed = removeFileSafely(join(dir, LOCAL_FILE)).changed || changed;
+  changed = removeIgnoreBlock(join(dir, LOCAL_IGNORE_FILE), LOCAL_IGNORE_BLOCK, { deleteWhenEmpty: true }).changed || changed;
+  // A .gitignore that held only init's lines goes with them.
+  changed = removePrivateGitignore(absolute, { deleteWhenEmpty: true }).changed || changed;
+  try {
+    rmdirSync(dir);
+  } catch {
+    // Not empty (someone's own file) or already gone: leave it.
+  }
+  return { changed };
 }
 
 /**

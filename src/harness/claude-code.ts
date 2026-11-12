@@ -8,6 +8,7 @@ import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
 import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { findMcpEntries, isUnderHome, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
+import { jsonRemovalStep, removeFromStringList, removeNestedHooks, sameRule } from "./uninstall.js";
 import type { HarnessId } from "../session/harness-env.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 import { PERSON_COMMANDS } from "./agent-commands.js";
@@ -416,6 +417,38 @@ async function mcpCleanup(scope: CleanupScope): Promise<Array<PlanStep | ManualI
   return mcpCleanupFor(ID, scope);
 }
 
+/** Removes our permission rules (both the Bash and the PowerShell spellings, whatever this platform) and our three hooks. */
+async function uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+  const file = settingsPath(ctx.home, ctx.env);
+  const shown = shownPath(file, ctx.home);
+  const rules = permissionRules({ cliCommand: ctx.cliCommand, platform: "win32" });
+  const permission = jsonRemovalStep({
+    harness: ID,
+    id: `${ID}:uninstall-permission`,
+    label: `Remove the jubarteai permission rules from ${shown}`,
+    file,
+    home: ctx.home,
+    preview: [`${shown}:`, ...rules.allow.map((r) => `  permissions.allow -= "${r}"`), ...rules.ask.map((r) => `  permissions.ask -= "${r}"`)].join("\n"),
+    byHand: [...rules.allow, ...rules.ask].map((r) => `"${r}" (permissions.allow / permissions.ask)`),
+    edit: (doc) => {
+      const allowed = removeFromStringList(doc, ["permissions", "allow"], rules.allow, sameRule);
+      const asked = removeFromStringList(doc, ["permissions", "ask"], rules.ask, sameRule);
+      return allowed || asked;
+    },
+  });
+  const hooks = jsonRemovalStep({
+    harness: ID,
+    id: `${ID}:uninstall-hooks`,
+    label: `Remove the JubarteAI session hooks from ${shown}`,
+    file,
+    home: ctx.home,
+    preview: [`${shown}:`, ...HOOK_EVENTS.map((e) => `  hooks.${e.name}: the entry running "hook ${e.arg} --harness ${ID}"`)].join("\n"),
+    byHand: HOOK_EVENTS.map((e) => `the hooks.${e.name} entry that runs "hook ${e.arg} --harness ${ID}"`),
+    edit: (doc) => removeNestedHooks(doc, HOOK_EVENTS, ID),
+  });
+  return [permission, hooks].filter((item): item is PlanStep | ManualInstructions => item !== null);
+}
+
 export const claudeCodeAdapter: HarnessAdapter = {
   id: ID,
   label: "Claude Code",
@@ -427,4 +460,5 @@ export const claudeCodeAdapter: HarnessAdapter = {
   hooks,
   inspect,
   mcpCleanup,
+  uninstall,
 };

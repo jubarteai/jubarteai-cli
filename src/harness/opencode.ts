@@ -287,6 +287,29 @@ export const opencodeAdapter: HarnessAdapter = {
   sessionVar: null,
   promptInjection: false,
 
+  /** OpenCode's permission syntax differs between 1.x and 2.x, so the removal is printed, not written. */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const dir = opencodeDir(ctx.env, ctx.home);
+    const names = [...new Set([...V2_FILES, ...V1_FILES])];
+    const holding = names.map((name) => join(dir, name)).filter((file) => {
+      const read = readConfig(file);
+      return read.status === "ok" ? allowsCommand(read.doc) : read.status !== "missing" && existsSync(file);
+    });
+    if (holding.length === 0) return [];
+    return [
+      {
+        kind: "manual",
+        harness: HARNESS,
+        title: "OpenCode: remove the jubarteai permission rules",
+        lines: [
+          ...holding.map((file) => `Open ${file} and delete the allow rules for ${COMMAND_PATTERNS.map((p) => `"${p}"`).join(", ")} (under permission.bash, or the permissions list in OpenCode 2.x).`),
+          "JubarteAI wrote no OpenCode hooks, so there is nothing else to remove.",
+        ],
+        reason: "OpenCode's permission syntax differs between 1.x and 2.x, so the CLI doesn't rewrite it",
+      },
+    ];
+  },
+
   async detect(env: DetectEnv): Promise<boolean> {
     return env.which("opencode") !== null || existsSync(opencodeDir(env.env, env.home));
   },

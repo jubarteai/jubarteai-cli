@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { PlanStep } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
-import { copilotGuardMissingNote, copilotHooksFile, copilotHooksPlan, copilotHooksState } from "./vscode.js";
+import { copilotGuardMissingNote, copilotHooksFile, copilotHooksPlan, copilotHooksRemoval, copilotHooksState } from "./vscode.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "copilot-cli" as const;
@@ -70,6 +70,12 @@ export const copilotCliAdapter: HarnessAdapter = {
     const guardNote = copilotGuardMissingNote(ctx);
     if (guardNote !== null) notes.push(guardNote);
     return { permission: "manual", hooks: copilotHooksState(ctx), mcpEntries: [], notes };
+  },
+
+  /** The shared hook file, the same step VS Code returns (the caller runs it once). */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const step = copilotHooksRemoval(ctx);
+    return step === null ? [] : [step];
   },
 
   // install.sh never wrote a Copilot CLI MCP entry.

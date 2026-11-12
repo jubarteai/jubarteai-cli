@@ -245,10 +245,13 @@ Global options on every command: `--workspace <slug>`, `--agent <uuid>`, `--pret
 ## Uninstall
 
 ```sh
-npm uninstall -g jubarteai
+jubarteai uninstall
+npm uninstall -g jubarteai     # the program itself; uninstall prints this line, it never runs it
 ```
 
-This removes the program. `init` leaves a few things you can delete by hand: the hook entries in your harnesses' hook files (search for `hook session-start --harness`, see Hook entries), the `[mcp_servers.jubarteai]` table in `~/.codex/config.toml` if `init` added one (it holds a key, so delete it and revoke the key in Dashboard → API keys if you no longer want it to work), the `jubarteai` permission rule in each harness's settings (see the table above), the section between `<!-- jubarteai:begin -->` and `<!-- jubarteai:end -->` in AGENTS.md, the skill, and `.jubarteai/` in your repos (plus the `/.jubarteai/` line `init` added to `.gitignore`, for a private binding). `jubarteai logout` only forgets the saved login on this machine: the key keeps working until you revoke it in Dashboard → API keys.
+`uninstall` takes back what `init` wrote, behind one checklist like `init`'s (Enter applies everything, Space leaves a row out, `d` shows the exact entries): the session hooks and permission rules of every harness, Codex's network opt-in and its fallback MCP entry (with the `.gitignore` line that kept it private), any leftover `jubarteai` MCP entry, the AGENTS.md section and the `@AGENTS.md` line in CLAUDE.md (a file `init` made and nothing else is deleted), the repo's `.jubarteai/` binding, the skill (through `claude plugin uninstall` and `npx skills remove`), and the saved logins on this machine. It removes only entries it can recognise as its own and leaves every other tool's entries and every other key as they were; a file it cannot rewrite faithfully (comments, no permission) is reported with the lines to delete by hand, and so is a hand-copied skill folder or a binding git tracks (`git rm -r .jubarteai` in a commit).
+
+Signing out is local: **the key keeps working until you revoke it** in Dashboard → API keys, and the command says so. The sign-out row removes every saved login on the machine and says so; uncheck it, or pass `--keep-login`, to keep them. Without a terminal nothing is removed unless you pass `--yes`, and it refuses inside a coding agent's shell. Other options: `--skip-harness <id>` and `--show-changes`.
 
 ## License
 

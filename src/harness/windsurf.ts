@@ -31,6 +31,11 @@ export const windsurfAdapter: HarnessAdapter = {
   sessionVar: null,
   promptInjection: false,
 
+  /** The CLI never wrote a Windsurf rule or hook (they are printed), so there is nothing to remove. */
+  async uninstall(): Promise<Array<PlanStep | ManualInstructions>> {
+    return [];
+  },
+
   async detect(env: DetectEnv): Promise<boolean> {
     return existsSync(windsurfDir(env.home));
   },

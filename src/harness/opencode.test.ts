@@ -211,7 +211,7 @@ describe.skipIf(!POSIX)("permission, OpenCode 2.x", () => {
     stubOpencode("2.1.3");
     const mine = { action: "shell", resource: "git *", effect: "allow" };
     put(jsonc(), JSON.stringify({ permissions: [mine, LEGACY_V2] }));
-    expect((await opencodeAdapter.inspect(ctx())).notes.join(" ")).toContain("login, logout, link, init and update");
+    expect((await opencodeAdapter.inspect(ctx())).notes.join(" ")).toContain("login, logout, link, init, update and uninstall");
     const s = await step();
     expect(s.sensitive).toBe(true);
     expect(s.preview).toContain('removes the "jubarteai *" allow rule');
@@ -301,7 +301,7 @@ describe.skipIf(!POSIX)("permission, OpenCode 1.x", () => {
   it("removes the legacy `jubarteai *` key, keeps the user's keys, and is idempotent", async () => {
     stubOpencode("1.19.5");
     put(json(), JSON.stringify({ permission: { bash: { "git *": "allow", "jubarteai *": "allow" } } }));
-    expect((await opencodeAdapter.inspect(ctx())).notes.join(" ")).toContain("login, logout, link, init and update");
+    expect((await opencodeAdapter.inspect(ctx())).notes.join(" ")).toContain("login, logout, link, init, update and uninstall");
     const s = await step();
     expect(s.sensitive).toBe(true);
     expect(s.preview).toContain('removes the "jubarteai *" allow rule');

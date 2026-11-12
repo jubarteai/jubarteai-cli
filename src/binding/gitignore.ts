@@ -109,8 +109,8 @@ export function ensurePrivateGitignore(root: string): { changed: boolean } {
 }
 
 /** Removes exactly the two marked lines from `<root>/.gitignore`; every other line stays. */
-export function removePrivateGitignore(root: string): { changed: boolean } {
-  return removeIgnoreBlock(join(root, ".gitignore"), PRIVATE_BLOCK, { deleteWhenEmpty: false });
+export function removePrivateGitignore(root: string, opts: { deleteWhenEmpty?: boolean } = {}): { changed: boolean } {
+  return removeIgnoreBlock(join(root, ".gitignore"), PRIVATE_BLOCK, { deleteWhenEmpty: opts.deleteWhenEmpty === true });
 }
 
 /** Removes a file the CLI wrote, through the same guards as a write. A missing file is not an error. */
