@@ -180,6 +180,10 @@ describe("login", () => {
     expect(authorize.searchParams.get("mode")).toBe("paste");
     expect(authorize.searchParams.has("port")).toBe(false);
 
+    // Type only once the hidden prompt is up and has switched the terminal's echo off: a code written earlier is
+    // echoed back by the pty (a race that showed on a slow macOS runner).
+    await running.waitFor("stdout", /Code \(input hidden\):/);
+    await new Promise((resolve) => setTimeout(resolve, 300));
     // The browser would show this code after Approve; the person types it at the prompt.
     running.write(`${fake.mintCode(authorize.searchParams.get("challenge") as string)}\n`);
     running.end();
