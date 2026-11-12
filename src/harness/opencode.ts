@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { runCommand } from "../install/run.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
@@ -228,6 +229,7 @@ function permissionStep(file: string, major: Major, done: boolean, legacy: boole
   return {
     id,
     label: LABEL,
+    group: harnessGroup(HARNESS),
     files: [file],
     sensitive: !done,
     preview: [

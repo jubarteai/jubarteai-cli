@@ -6,6 +6,7 @@ import { API_KEY_RE } from "../auth/token-exchange.js";
 import { INIT_COPY, codexActsAs } from "../install/init-copy.js";
 import { safeForDisplay } from "../output.js";
 import { readConfigText } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { TomlConflictError, editTomlFile, getTomlTable, readTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
 import { codexHome, isUnderHome, shownPath } from "./mcp-cleanup.js";
@@ -124,6 +125,7 @@ export function codexUpdateStep(where: { home: string; env: NodeJS.ProcessEnv },
   return {
     id,
     label,
+    group: harnessGroup("codex"),
     files: [file],
     sensitive: true,
     preview: `${shown}:\n[${CODEX_MCP_TABLE}]\nhttp_headers = { "Authorization" = "Bearer <your key>" }\n${codexActsAs(safeForDisplay(seat.user.email, DISPLAY_MAX), workspaceLabel(seat))}`,

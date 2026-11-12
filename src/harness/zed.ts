@@ -125,6 +125,7 @@ export const zedAdapter: HarnessAdapter = {
       );
     }
     return jsonEditStep({
+      harness: HARNESS,
       id: `${HARNESS}:permission`,
       label: LABEL_PERMISSION,
       file,

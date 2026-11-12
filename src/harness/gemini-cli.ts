@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import { hookCommand as commandFor, hooksPreview, inspectCommandHooks, mergeCommandHooks, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
@@ -159,6 +160,7 @@ function permissionStep(file: string, done: boolean, legacy: boolean): PlanStep 
   return {
     id,
     label,
+    group: harnessGroup(HARNESS),
     files: [file],
     sensitive: !done,
     preview: [
@@ -182,6 +184,7 @@ function hooksStep(file: string, spec: HooksEditSpec, done: boolean): PlanStep {
   return {
     id,
     label,
+    group: harnessGroup(HARNESS),
     files: [file],
     sensitive: !done,
     preview: `${file}\n${EVENTS.map((e) => `  hooks.${e.name}: ${commandFor(spec.cliCommand, e.arg, HARNESS)}`).join("\n")}`,

@@ -292,12 +292,19 @@ process.exit(${opts.exitCode ?? 0});
 
   it("recognises npm's permission error (EACCES) so the caller can print the --prefix hint", async () => {
     stubNpm({ exitCode: 243, stderr: "npm error code EACCES\nnpm error syscall mkdir\n" });
-    expect(await installCliVersion("1.4.2", prefix)).toEqual({ ok: false, eacces: true, timedOut: false, notFound: false });
+    expect(await installCliVersion("1.4.2", prefix)).toEqual({
+      ok: false,
+      eacces: true,
+      timedOut: false,
+      notFound: false,
+      log: ["npm error code EACCES", "npm error syscall mkdir"],
+    });
   });
 
   it("reports any other npm failure without the permission flag", async () => {
-    stubNpm({ exitCode: 1, stderr: "npm error code E404\n" });
-    expect(await installCliVersion("1.4.2", prefix)).toEqual({ ok: false, eacces: false, timedOut: false, notFound: false });
+    stubNpm({ exitCode: 1, stderr: "npm error code E404\nkey jba_FAKESECRETSECRETSECRET1\n" });
+    const outcome = await installCliVersion("1.4.2", prefix);
+    expect(outcome).toEqual({ ok: false, eacces: false, timedOut: false, notFound: false, log: ["npm error code E404", "key [redacted]"] });
   });
 
   it("reports a missing npm", async () => {

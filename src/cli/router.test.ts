@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { runCommand } from "../install/run.js";
 import type { ParsedArgs } from "./args.js";
 import type { CommandContext, CommandDef } from "./commands.js";
 import { renderCommandHelp, renderHelp, routeWith } from "./router.js";
@@ -140,6 +141,46 @@ describe("routeWith: dispatch", () => {
     expect(seen.value?.globals).toEqual({ workspace: "acme", agent: "agent-1", pretty: true, yes: true });
     expect(seen.value?.args.flags.query).toBe("x");
     expect(seen.value?.args.positionals).toEqual(["extra"]);
+  });
+
+  it("hands --plain and --verbose to the command, and --plain before the command name is still refused", async () => {
+    const seen = { value: null as Seen };
+    const h = harness([command({ name: "init" }, seen)]);
+    expect(await h.run(["init", "--plain", "--verbose"])).toBe(0);
+    expect(seen.value?.globals).toEqual({ pretty: false, yes: false, plain: true, verbose: true });
+    expect(await h.run(["--plain", "init"])).toBe(2);
+    expect(h.err()).toContain("Put flags after the command name");
+  });
+
+  it("--verbose streams child output to stderr for the command's run only", async () => {
+    const h = harness([
+      {
+        name: "init",
+        summary: "s",
+        group: "setup",
+        flags: [],
+        async run() {
+          await runCommand(process.execPath, ["-e", "console.log('npm says hi')"], { timeoutMs: 10_000 });
+          return 0;
+        },
+      },
+    ]);
+    await h.run(["init", "--verbose"]);
+    expect(h.err()).toContain("    npm says hi");
+    const quiet = harness([
+      {
+        name: "init",
+        summary: "s",
+        group: "setup",
+        flags: [],
+        async run() {
+          await runCommand(process.execPath, ["-e", "console.log('npm says hi')"], { timeoutMs: 10_000 });
+          return 0;
+        },
+      },
+    ]);
+    await quiet.run(["init"]);
+    expect(quiet.err()).not.toContain("npm says hi");
   });
 
   it("defaults the globals", async () => {

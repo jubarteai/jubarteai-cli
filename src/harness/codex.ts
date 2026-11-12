@@ -7,10 +7,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureIgnoreBlock } from "../binding/gitignore.js";
 import { runCommand } from "../install/run.js";
-import { confirm } from "../prompt.js";
 import { safeForDisplay } from "../output.js";
 import { editTomlFile, readTomlKey, setTomlKey } from "../safe-edit/toml-edit.js";
 import { readConfigText } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { HOOK_EVENTS, hooksPreview, readSettings, hooksStep, inspectCommandHooks, mergeCommandHooks, unreadableInstructions, type HookEventSpec, type HooksEditSpec } from "./claude-code.js";
 import { codexHome, findMcpEntries, mcpCleanupFor, shownPath, type CleanupGate } from "./mcp-cleanup.js";
@@ -50,8 +50,6 @@ const CODEX_EVENTS: readonly HookEventSpec[] = HOOK_EVENTS.map((e) => (e.name ==
 export type CodexDeps = {
   /** The text `codex --version` prints, or null when Codex can't be run. */
   codexVersion(env: DetectEnv): Promise<string | null>;
-  /** The "share it?" question of D6; default answer is no (private). */
-  ask(question: string): Promise<boolean>;
   /** Whether git tracks `rel` in `cwd`. */
   isTracked(cwd: string, rel: string): Promise<boolean>;
 };
@@ -62,7 +60,6 @@ const defaultDeps: CodexDeps = {
     const result = await runCommand("codex", ["--version"], { timeoutMs: VERSION_TIMEOUT_MS });
     return result.code === 0 ? result.stdout : null;
   },
-  ask: (question) => confirm(question, { defaultYes: false }),
   async isTracked(cwd, rel) {
     const result = await runCommand("git", ["ls-files", "--error-unmatch", "--", rel], { cwd, timeoutMs: GIT_TIMEOUT_MS });
     return result.code === 0;
@@ -243,7 +240,7 @@ async function hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | nu
   if (plan.kind === "by-hand") {
     return manual("Codex hooks", [`Edit ${shown} by hand and add these hooks:`, ...hooksPreview(spec).split("\n"), TRUST_INSTRUCTION], `${shown}: ${plan.reason}`);
   }
-  return [hooksStep({ id: `${ID}:hooks`, label: `Add the JubarteAI session hooks to ${shown}`, file, home: ctx.home, spec, alreadyDone: plan.kind === "configured" })];
+  return [hooksStep({ id: `${ID}:hooks`, label: `Add the JubarteAI session hooks to ${shown}`, file, home: ctx.home, spec, alreadyDone: plan.kind === "configured", harness: ID })];
 }
 
 /**
@@ -261,18 +258,33 @@ async function optInStep(ctx: InitCtx, projectRoot: string, alreadySet: boolean,
   const interactive = ctx.tty === true && ctx.yes !== true;
   const lines = [`${shown} (this project only):`, `[${NETWORK_TABLE}]`, `${NETWORK_KEY} = true`];
   if (!tracked) {
-    lines.push(interactive ? "You will be asked whether to share this file with the repo; if not, it is added to .gitignore." : "Kept private: /.codex/config.toml is added to .gitignore.");
+    lines.push(interactive ? "Asked before the checklist whether to share this file with the repo; if not, it is added to .gitignore." : "Kept private: /.codex/config.toml is added to .gitignore.");
   }
+  // D6's "share it?" is asked once, before the checklist, and only where a person can answer (the command checks that).
+  let shared = false;
   return {
     id,
     label,
+    group: harnessGroup(ID),
     files: tracked ? [file] : [file, gitignore],
     sensitive: !alreadySet,
     preview: lines.join("\n"),
     flag: "--yes",
+    ...(tracked || alreadySet || !interactive
+      ? {}
+      : {
+          question: {
+            id: "share-codex" as const,
+            text: "Share the Codex network setting with everyone who clones the repo?",
+            defaultYes: false as const,
+            set: (answer: boolean) => {
+              shared = answer;
+            },
+          },
+        }),
     async apply(): Promise<StepResult> {
       if (alreadySet) return { id, label, status: "already configured" };
-      const share = tracked || (interactive && (await deps.ask("Share the Codex network setting with everyone who clones the repo?")));
+      const share = tracked || shared;
       // The repo's own contents steer this path: a link out of the project (.codex -> ../.codex) is never followed.
       const result = editTomlFile(file, (text) => setTomlKey(text, NETWORK_TABLE, NETWORK_KEY, true), { createIfMissing: true, withinRoot: projectRoot });
       if (result.status === "refused") return { id, label, status: "failed", detail: `could not write (${result.reason ?? "refused"})` };

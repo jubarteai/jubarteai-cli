@@ -192,7 +192,7 @@ export function scriptedTty(answer: (prompt: string) => string): ScriptedTty {
       const text = chunk.toString("utf8");
       shown += text;
       block += text;
-      if (/(\[(Y\/n|y\/N)\] |\(\d+\): )$/.test(block)) {
+      if (/(\[(Y\/n|y\/N)(\/d)?\] |\(\d+\): |press Enter for all: )$/.test(block)) {
         const asked = block;
         block = "";
         prompts.push(asked);

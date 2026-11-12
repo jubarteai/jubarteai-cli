@@ -16,11 +16,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyPlan, summarize, type StepResult } from "../safe-edit/plan.js";
 import { AGENTS_MD_MARKERS, agentsMdSnippet, agentsMdSnippetHistory } from "./constants.js";
 import { inspectInstructions, notProjectReason, planInstructionSteps, type InstructionOptions } from "./agents-md.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 // The scenarios below are ported from the app's update.sh and install.sh tests
 // (src/lib/update-script/instructions.test.ts, src/lib/install-script.test.ts). Each carries a
@@ -684,8 +684,7 @@ describe("init", () => {
   });
 
   it("reports every step through applyPlan and summarize, in plan order, without prompting a non-TTY run", async () => {
-    const out = new PassThrough();
-    const results = await applyPlan(planInstructionSteps(proj, { mode: "init" }), { tty: false, yes: false, out });
+    const results = await applyPlan(planInstructionSteps(proj, { mode: "init" }), { tty: false, yes: false, ...applyUi() });
     expect(summarize(results)).toEqual([
       expect.stringMatching(/^AGENTS\.md section: configured/),
       expect.stringMatching(/^CLAUDE\.md import: configured/),

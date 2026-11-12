@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyPlan, type PlanStep } from "../safe-edit/plan.js";
 import { codexAdapter, createCodexAdapter, CODEX_CODES, CODEX_NETWORK_MIN_VERSION } from "./codex.js";
 import type { DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 let root: string;
 let home: string;
@@ -28,7 +29,6 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-const sink = { write: () => true } as unknown as NodeJS.WritableStream;
 const isStep = (x: unknown): x is PlanStep => typeof x === "object" && x !== null && "apply" in x;
 const isManual = (x: unknown): x is ManualInstructions => typeof x === "object" && x !== null && "kind" in x;
 
@@ -47,17 +47,16 @@ const trusted = (p = proj): string => `[projects.${JSON.stringify(p)}]\ntrust_le
 const OPT_IN = `[sandbox_workspace_write]\nnetwork_access = true\n`;
 
 type Overrides = { version?: string | null; share?: boolean; tracked?: boolean };
-function adapter(o: Overrides = {}): HarnessAdapter & { asked: string[] } {
-  const asked: string[] = [];
-  const a = createCodexAdapter({
+function adapter(o: Overrides = {}): HarnessAdapter {
+  return createCodexAdapter({
     codexVersion: async () => (o.version === undefined ? "codex-cli 0.162.1" : o.version),
-    ask: async (q) => {
-      asked.push(q);
-      return o.share ?? false;
-    },
     isTracked: async () => o.tracked ?? false,
   });
-  return Object.assign(a, { asked });
+}
+/** What a command does with the step's pre-approval question: answer it with `share`, as the person would. */
+function answered(step: PlanStep, share: boolean): PlanStep {
+  step.question?.set(share);
+  return step;
 }
 async function extrasOf(a: HarnessAdapter, c: InitCtx = ctx()): Promise<Array<PlanStep | ManualInstructions>> {
   return (await a.extras?.(c)) ?? [];
@@ -88,7 +87,7 @@ describe("hooks", () => {
   async function apply(c: InitCtx = ctx()): Promise<string[]> {
     const hooks = await codexAdapter.hooks(c);
     expect(Array.isArray(hooks)).toBe(true);
-    return (await applyPlan(hooks as PlanStep[], { tty: false, yes: true, out: sink })).map((r) => r.status);
+    return (await applyPlan(hooks as PlanStep[], { tty: false, yes: true, ...applyUi() })).map((r) => r.status);
   }
 
   it("writes the three hooks into ~/.codex/hooks.json, SessionEnd with timeout 3", async () => {
@@ -160,14 +159,14 @@ describe("the trust instruction", () => {
   it("is printed, with its code, while the hooks step has something to write, and gone once they are in place", async () => {
     const a = adapter();
     expect(trust(await extrasOf(a)).map((m) => m.lines)).toEqual([["Trust the new hooks once in Codex: run /hooks"]]);
-    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, out: sink });
+    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, ...applyUi() });
     expect(trust(await extrasOf(a))).toEqual([]);
     expect(manuals(await extrasOf(a)).flatMap((m) => m.lines)).not.toContain("Trust the new hooks once in Codex: run /hooks");
   });
 
   it("comes back when a re-run would rewrite the hooks (another program path)", async () => {
     const a = adapter();
-    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, out: sink });
+    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, ...applyUi() });
     expect(trust(await extrasOf(a, ctx({ hookCommand: '"/new/node" "/opt/jubarteai/bin/jubarteai.js"' })))).toHaveLength(1);
   });
 
@@ -191,7 +190,7 @@ describe("network opt-in (D4–D6)", () => {
     expect(step?.preview).toBe(
       `~/proj/.codex/config.toml (this project only):\n[sandbox_workspace_write]\nnetwork_access = true\nKept private: /.codex/config.toml is added to .gitignore.`,
     );
-    const [result] = await applyPlan([step as PlanStep], { tty: false, yes: true, out: sink });
+    const [result] = await applyPlan([step as PlanStep], { tty: false, yes: true, ...applyUi() });
     expect(result?.status).toBe("configured");
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
     expect(fs.readFileSync(userConfig(), "utf8")).toBe(userBefore);
@@ -201,55 +200,64 @@ describe("network opt-in (D4–D6)", () => {
   const PRIVATE_BLOCK = "# jubarteai: private Codex network setting\n/.codex/config.toml\n";
   const QUESTION = "Share the Codex network setting with everyone who clones the repo?";
 
-  it("D6: an interactive run asks, and 'no' (the default) adds the project file to .gitignore", async () => {
+  it("D6: an interactive run carries the share question (asked before approval), and 'no' (the default) adds the project file to .gitignore", async () => {
     write(userConfig(), trusted());
-    const a = adapter({ share: false });
+    const a = adapter();
     const [step] = steps(await extrasOf(a, ctx({ tty: true })));
-    expect(step?.preview).toContain("You will be asked whether to share this file with the repo");
-    await applyPlan([step as PlanStep], { tty: false, yes: true, out: sink });
-    expect(a.asked).toEqual([QUESTION]);
+    expect(step?.preview).toContain("Asked before the checklist whether to share this file with the repo");
+    expect(step?.question).toMatchObject({ id: "share-codex", text: QUESTION, defaultYes: false });
+    // Nothing is asked inside apply(): with the question unanswered the file stays private.
+    await applyPlan([step as PlanStep], { tty: false, yes: true, ...applyUi() });
     expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
   });
 
-  it("D6: an interactive 'yes' leaves .gitignore alone", async () => {
+  it("D6: an answered 'yes' leaves .gitignore alone", async () => {
     write(userConfig(), trusted());
     write(path.join(proj, ".gitignore"), "node_modules\n");
-    const a = adapter({ share: true });
-    await applyPlan(steps(await extrasOf(a, ctx({ tty: true }))), { tty: false, yes: true, out: sink });
-    expect(a.asked).toEqual([QUESTION]);
+    const a = adapter();
+    const [step] = steps(await extrasOf(a, ctx({ tty: true })));
+    await applyPlan([answered(step as PlanStep, true)], { tty: false, yes: true, ...applyUi() });
     expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe("node_modules\n");
   });
 
-  it("D6: under --yes nothing is asked, even on a TTY: the file is private and ignored", async () => {
+  it("D6: an answered 'no' ignores the file", async () => {
     write(userConfig(), trusted());
-    const a = adapter({ share: true });
-    const [step] = steps(await extrasOf(a, ctx({ tty: true, yes: true })));
-    expect(step?.preview).toContain("Kept private");
-    await applyPlan([step as PlanStep], { tty: true, yes: true, out: sink });
-    expect(a.asked).toEqual([]);
+    const [step] = steps(await extrasOf(adapter(), ctx({ tty: true })));
+    await applyPlan([answered(step as PlanStep, false)], { tty: false, yes: true, ...applyUi() });
     expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
   });
 
-  it("D6: without a TTY nothing is asked either (no /dev/tty prompt from inside apply)", async () => {
+  it("D6: under --yes there is no question, even on a TTY: the file is private and ignored", async () => {
     write(userConfig(), trusted());
-    const a = adapter({ share: true });
-    await applyPlan(steps(await extrasOf(a, ctx({ tty: false, yes: true }))), { tty: false, yes: true, out: sink });
-    expect(a.asked).toEqual([]);
+    const [step] = steps(await extrasOf(adapter(), ctx({ tty: true, yes: true })));
+    expect(step?.preview).toContain("Kept private");
+    expect(step?.question).toBeUndefined();
+    await applyPlan([step as PlanStep], { tty: true, yes: true, ...applyUi() });
+    expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
+  });
+
+  it("D6: without a TTY there is no question either", async () => {
+    write(userConfig(), trusted());
+    const a = adapter();
+    const [first] = steps(await extrasOf(a, ctx({ tty: false, yes: true })));
+    expect(first?.question).toBeUndefined();
+    await applyPlan([first as PlanStep], { tty: false, yes: true, ...applyUi() });
     expect(fs.readFileSync(path.join(proj, ".gitignore"), "utf8")).toBe(PRIVATE_BLOCK);
     // A context that never says (an older caller) is not interactive.
     fs.rmSync(path.join(proj, ".gitignore"));
     fs.rmSync(projectConfig());
-    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
-    expect(a.asked).toEqual([]);
+    const [second] = steps(await extrasOf(a));
+    expect(second?.question).toBeUndefined();
+    await applyPlan([second as PlanStep], { tty: false, yes: true, ...applyUi() });
   });
 
-  it("D6: a file git already tracks is not asked about and not ignored", async () => {
+  it("D6: a file git already tracks has no question and is not ignored", async () => {
     write(userConfig(), trusted());
     const a = adapter({ tracked: true });
     const [step] = steps(await extrasOf(a, ctx({ tty: true })));
     expect(step?.files).toEqual([projectConfig()]);
-    await applyPlan([step as PlanStep], { tty: false, yes: true, out: sink });
-    expect(a.asked).toEqual([]);
+    expect(step?.question).toBeUndefined();
+    await applyPlan([step as PlanStep], { tty: false, yes: true, ...applyUi() });
     expect(fs.existsSync(path.join(proj, ".gitignore"))).toBe(false);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
   });
@@ -257,25 +265,25 @@ describe("network opt-in (D4–D6)", () => {
   it("keeps the project file's other content and replaces an explicit false", async () => {
     write(userConfig(), trusted());
     write(projectConfig(), `model = "p"\n\n[sandbox_workspace_write]\nwritable_roots = ["/a"]\nnetwork_access = false # no\n`);
-    await applyPlan(steps(await extrasOf(adapter())), { tty: false, yes: true, out: sink });
+    await applyPlan(steps(await extrasOf(adapter())), { tty: false, yes: true, ...applyUi() });
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(`model = "p"\n\n[sandbox_workspace_write]\nwritable_roots = ["/a"]\nnetwork_access = true # no\n`);
   });
 
   it("a second run: the step is non-sensitive and reports already configured", async () => {
     write(userConfig(), trusted());
     const a = adapter();
-    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
+    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, ...applyUi() });
     const before = fs.readFileSync(projectConfig(), "utf8");
     const [step] = steps(await extrasOf(a));
     expect(step?.sensitive).toBe(false);
-    const [result] = await applyPlan([step as PlanStep], { tty: false, yes: false, out: sink });
+    const [result] = await applyPlan([step as PlanStep], { tty: false, yes: false, ...applyUi() });
     expect(result?.status).toBe("already configured");
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
   });
 
   it("without a TTY and without --yes the step is skipped and nothing is written", async () => {
     write(userConfig(), trusted());
-    const [result] = await applyPlan(steps(await extrasOf(adapter())), { tty: false, yes: false, out: sink });
+    const [result] = await applyPlan(steps(await extrasOf(adapter())), { tty: false, yes: false, ...applyUi() });
     expect(result).toMatchObject({ status: "skipped", detail: "needs confirmation", flag: "--yes" });
     expect(fs.existsSync(projectConfig())).toBe(false);
   });
@@ -354,7 +362,7 @@ describe("network opt-in (D4–D6)", () => {
   it("never writes the user-level key, whatever the answers", async () => {
     write(userConfig(), trusted());
     const before = fs.readFileSync(userConfig(), "utf8");
-    await applyPlan(steps(await extrasOf(adapter({ share: true }))), { tty: false, yes: true, out: sink });
+    await applyPlan(steps(await extrasOf(adapter())), { tty: false, yes: true, ...applyUi() });
     expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
   });
 
@@ -362,7 +370,7 @@ describe("network opt-in (D4–D6)", () => {
     write(userConfig(), `${trusted()}\n${OPT_IN}`);
     const [step] = steps(await extrasOf(adapter()));
     expect(step?.sensitive).toBe(false);
-    const [result] = await applyPlan([step as PlanStep], { tty: false, yes: false, out: sink });
+    const [result] = await applyPlan([step as PlanStep], { tty: false, yes: false, ...applyUi() });
     expect(result?.status).toBe("already configured");
     expect(fs.existsSync(projectConfig())).toBe(false);
   });
@@ -407,7 +415,7 @@ describe("network opt-in (D4–D6)", () => {
     const before = fs.readFileSync(userConfig(), "utf8");
     fs.symlinkSync("../.codex", path.join(proj, ".codex"));
     const items = await extrasOf(adapter());
-    const [result] = await applyPlan(steps(items), { tty: false, yes: true, out: sink });
+    const [result] = await applyPlan(steps(items), { tty: false, yes: true, ...applyUi() });
     expect(result).toMatchObject({ status: "failed", detail: "could not write (symlink)" });
     expect(fs.readFileSync(userConfig(), "utf8")).toBe(before);
     expect(fs.existsSync(path.join(proj, ".gitignore"))).toBe(false);
@@ -436,7 +444,7 @@ describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place"
     write(projectConfig(), `${entry}\n[mcp_servers.other]\nurl = "x"\n`);
     const a = adapter();
     const userBefore = fs.readFileSync(userConfig(), "utf8");
-    const results = await applyPlan(await plan(a), { tty: false, yes: true, out: sink });
+    const results = await applyPlan(await plan(a), { tty: false, yes: true, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["configured", "configured"]);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(`[mcp_servers.other]\nurl = "x"\n\n${OPT_IN}`);
     expect(fs.readFileSync(userConfig(), "utf8")).toBe(userBefore);
@@ -471,7 +479,7 @@ describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place"
   it("untrusted project: the project's entry stays and the cleanup step says it was kept", async () => {
     write(projectConfig(), entry);
     const before = fs.readFileSync(projectConfig(), "utf8");
-    const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, out: sink });
+    const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, ...applyUi() });
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({ status: "skipped", detail: "kept: Codex keeps its jubarteai MCP entry until its network opt-in is in place" });
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
@@ -482,7 +490,7 @@ describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place"
     write(projectConfig(), entry);
     const before = fs.readFileSync(projectConfig(), "utf8");
     const a = adapter();
-    const results = await applyPlan(steps(await a.mcpCleanup(scopeOf())), { tty: false, yes: true, out: sink });
+    const results = await applyPlan(steps(await a.mcpCleanup(scopeOf())), { tty: false, yes: true, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["skipped"]);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
   });
@@ -491,7 +499,7 @@ describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place"
     write(userConfig(), trusted());
     write(projectConfig(), `${OPT_IN}\n${entry}`);
     const before = fs.readFileSync(projectConfig(), "utf8");
-    const results = await applyPlan(steps(await adapter({ version: "codex-cli 0.150.0" }).mcpCleanup(scopeOf())), { tty: false, yes: true, out: sink });
+    const results = await applyPlan(steps(await adapter({ version: "codex-cli 0.150.0" }).mcpCleanup(scopeOf())), { tty: false, yes: true, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["skipped"]);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
   });
@@ -500,7 +508,7 @@ describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place"
     write(userConfig(), OPT_IN);
     write(projectConfig(), entry);
     const before = fs.readFileSync(projectConfig(), "utf8");
-    const results = await applyPlan(steps(await adapter().mcpCleanup(scopeOf())), { tty: false, yes: true, out: sink });
+    const results = await applyPlan(steps(await adapter().mcpCleanup(scopeOf())), { tty: false, yes: true, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["skipped"]);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(before);
   });
@@ -508,7 +516,7 @@ describe("D5: Codex keeps its MCP entry unless the project's opt-in is in place"
   it("a later run with the opt-in already there removes a leftover project entry", async () => {
     write(userConfig(), trusted());
     write(projectConfig(), `${OPT_IN}\n${entry}`);
-    const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, out: sink });
+    const results = await applyPlan(await plan(adapter()), { tty: false, yes: true, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["already configured", "configured"]);
     expect(fs.readFileSync(projectConfig(), "utf8")).toBe(OPT_IN);
   });
@@ -528,8 +536,8 @@ describe("inspect", () => {
     let state = await a.inspect(ctx());
     expect(state).toMatchObject({ permission: "n/a", hooks: "missing", mcpEntries: [] });
     expect(state.notes).toEqual(["Codex hooks are turned off ([features] hooks = false)", "the network opt-in is not written yet: run jubarteai init"]);
-    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, out: sink });
-    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, out: sink });
+    await applyPlan((await a.hooks(ctx())) as PlanStep[], { tty: false, yes: true, ...applyUi() });
+    await applyPlan(steps(await extrasOf(a)), { tty: false, yes: true, ...applyUi() });
     state = await a.inspect(ctx());
     expect(state.hooks).toBe("configured");
     expect(state.notes).toContain("Trust the new hooks once in Codex: run /hooks");

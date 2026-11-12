@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import type { HarnessId } from "../session/harness-env.js";
 import { PERSON_COMMAND_LIST } from "./agent-commands.js";
@@ -54,6 +55,7 @@ function alreadyInPlace(file: string, edit: (doc: Obj) => EditOutcome): boolean 
  * non-sensitive and reports "already configured", so re-running init never prompts (spec §6.1).
  */
 export function jsonEditStep(o: {
+  harness: HarnessId;
   id: string;
   label: string;
   file: string;
@@ -64,6 +66,7 @@ export function jsonEditStep(o: {
   return {
     id: o.id,
     label: o.label,
+    group: harnessGroup(o.harness),
     files: [o.file],
     sensitive: !alreadyInPlace(o.file, o.edit),
     preview: `${o.file}\n${o.preview}`,
@@ -266,6 +269,7 @@ export const cursorAdapter: HarnessAdapter = {
     }
     return [
       jsonEditStep({
+        harness: HARNESS,
         id: `${HARNESS}:hooks`,
         label: "Cursor: session hooks",
         file,

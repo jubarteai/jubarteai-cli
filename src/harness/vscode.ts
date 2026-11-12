@@ -249,6 +249,8 @@ function copilotHooksJson(program: string): string[] {
 export function copilotHooksStep(ctx: CopilotCtx): PlanStep {
   const program = hookProgram(ctx);
   return jsonEditStep({
+    // One file serves VS Code and Copilot CLI; the step shows under VS Code.
+    harness: "vscode",
     id: COPILOT_HOOKS_STEP_ID,
     label: "GitHub Copilot (VS Code and Copilot CLI): session hooks and the guard that denies an agent login, logout, link, init and update",
     file: copilotHooksFile(ctx),
@@ -374,6 +376,7 @@ export const vscodeAdapter: HarnessAdapter = {
     const rules = current.status === "ok" ? current.doc[AUTO_APPROVE_KEY] : undefined;
     const legacy = isObject(rules) && rules[LEGACY_RULE] === true;
     return jsonEditStep({
+      harness: HARNESS,
       id: `${HARNESS}:permission`,
       label: PERMISSION_LABEL,
       file,

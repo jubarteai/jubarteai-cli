@@ -25,6 +25,9 @@ import { meetsNodeFloor } from "../node-floor.js";
 import { safeForDisplay, writeJson } from "../output.js";
 import { envOrigin, takeEnvToken } from "../process-env.js";
 import { readJsonObject } from "../safe-edit/json-edit.js";
+import { truncate } from "../ui/display.js";
+import { createUi } from "../ui/index.js";
+import type { Ui } from "../ui/index.js";
 import { statusCommand } from "./status.js";
 
 // `jubarteai doctor` (spec section 5.5): `status`, then live checks. Output is plain text for people (stdout), or
@@ -452,8 +455,15 @@ async function captureStatus(ctx: CommandContext, json: boolean): Promise<string
 
 const MARKERS: Readonly<Record<Level, string>> = { ok: "ok  ", warn: "warn", fail: "fail" };
 
-function renderChecks(checks: Check[]): string {
-  return checks.map((check) => `${MARKERS[check.level]}  ${check.label}: ${check.detail}`).join("\n");
+/** One line per check: the words `ok`/`warn`/`fail` in plain mode, a coloured glyph on a rich terminal. */
+function renderChecks(checks: Check[], ui: Ui): string {
+  if (!ui.mode.rich) return checks.map((check) => `${MARKERS[check.level]}  ${check.label}: ${check.detail}`).join("\n");
+  const glyph: Record<Level, string> = {
+    ok: ui.paint("ok", ui.glyphs.done),
+    warn: ui.paint("warn", ui.glyphs.warn),
+    fail: ui.paint("fail", ui.glyphs.fail),
+  };
+  return checks.map((check) => truncate(`${glyph[check.level]}  ${check.label}: ${check.detail}`, ui.mode.columns)).join("\n");
 }
 
 async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
@@ -485,7 +495,8 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (json) {
     writeJson(ctx.stdout, { ok: !failed, checks, status: JSON.parse(status) as unknown }, { pretty: ctx.globals.pretty });
   } else {
-    ctx.stdout.write(`${status}\nChecks:\n${renderChecks(checks)}\n`);
+    const ui = createUi(ctx.stdout, { ...(ctx.globals.plain === true ? { plain: true } : {}) });
+    ctx.stdout.write(`${status}\nChecks:\n${renderChecks(checks, ui)}\n`);
   }
   return failed ? ExitCode.SERVER_ERROR : ExitCode.OK;
 }

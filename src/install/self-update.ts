@@ -9,7 +9,7 @@ import { posix, resolve, win32 } from "node:path";
 import { CLI_NAME } from "../constants.js";
 import { homeDir } from "../paths.js";
 import { childEnv } from "../process-env.js";
-import { runCommand } from "./run.js";
+import { logTail, runCommand } from "./run.js";
 
 /** The registry document for the `latest` dist-tag of the package. */
 export const CLI_REGISTRY_LATEST_URL = "https://registry.npmjs.org/jubarteai/latest";
@@ -246,7 +246,7 @@ function samePath(a: string, b: string): boolean {
 
 export type CliInstallOutcome =
   | { ok: true }
-  | { ok: false; eacces: boolean; timedOut: boolean; notFound: boolean };
+  | { ok: false; eacces: boolean; timedOut: boolean; notFound: boolean; log?: string[] };
 
 /**
  * `npm install -g jubarteai@<version>` into `prefix`, the prefix the running CLI was installed under: when that is
@@ -266,7 +266,8 @@ export async function installCliVersion(version: string, prefix: string): Promis
     timeoutMs: CLI_INSTALL_TIMEOUT_MS,
   });
   if (res.code === 0 && !res.timedOut) return { ok: true };
-  return { ok: false, eacces: PERMISSION_CODES.test(`${res.stderr}\n${res.stdout}`), timedOut: res.timedOut, notFound: res.notFound };
+  const log = logTail(res);
+  return { ok: false, eacces: PERMISSION_CODES.test(`${res.stderr}\n${res.stdout}`), timedOut: res.timedOut, notFound: res.notFound, ...(log.length === 0 ? {} : { log }) };
 }
 
 export type ReexecOutcome = { started: true; code: number } | { started: false; reason: "not-found" | "spawn-failed" };

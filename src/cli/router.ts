@@ -1,5 +1,6 @@
 import { CLI_NAME, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { setChildOutput } from "../install/run.js";
 import { redactSecrets, safeForDisplay, transportErrorEnvelope, writeJson } from "../output.js";
 import { GLOBAL_FLAGS, parseArgs } from "./args.js";
 import type { FlagSpec, ParsedArgs } from "./args.js";
@@ -123,9 +124,17 @@ export async function routeWith(commands: readonly CommandDef[], argv: string[],
     const globals: CommandContext["globals"] = { pretty, yes: flags.yes === true };
     if (typeof flags.workspace === "string") globals.workspace = flags.workspace;
     if (typeof flags.agent === "string") globals.agent = flags.agent;
+    if (flags.plain === true) globals.plain = true;
+    if (flags.verbose === true) {
+      globals.verbose = true;
+      // The programs a command starts (npm, the skills installer) show their output, one dim indented line at a time.
+      setChildOutput((line) => ctx.stderr.write(`    ${line}\n`));
+    }
     return await command.run({ ...ctx, globals }, { flags, positionals: parsed.positionals });
   } catch (error) {
     return reportError(error, command, ctx, pretty);
+  } finally {
+    setChildOutput(null);
   }
 }
 

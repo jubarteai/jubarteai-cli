@@ -31,14 +31,16 @@ cd my-project
 jubarteai init
 ```
 
-`init` is the one command to run. It signs you in (or reuses a saved login), binds the repo to a workspace, installs the JubarteAI skill and the AGENTS.md section, and configures each agent harness it finds on the machine. It prints every step and the files it touches, then asks `Proceed? [Y/n]`. Running it again is safe: every step detects what is already done.
+`init` is the one command to run. It signs you in (or reuses a saved login), binds the repo to a workspace, installs the JubarteAI skill and the AGENTS.md section, and configures each agent harness it finds on the machine. It shows the JubarteAI banner, a short header (project, account, harnesses found, Node), and then **one checklist** with everything checked: press Enter to apply it all, Space to leave a row (or a whole harness) out, `d` to see the exact entries first. That checklist is the only approval; there is no prompt per harness or per file. Running it again is safe: every step detects what is already done.
 
 1. **Account.** `JUBARTEAI_TOKEN` in the environment is used as a pasted key and saved as a login on this machine, the same as `login --with-token`. Otherwise a saved login is offered (`Use <email> - <workspace>? [Y/n]`), and otherwise the browser sign-in runs.
 2. **Binding.** Writes `.jubarteai/config.json` at the repo's top level so every command, hook and shell in the repo resolves to the same workspace. By default the binding is private (the folder is added to `.gitignore`); you can instead commit it for everyone who clones the repo, in which case your email stays in an ignored local file and only the workspace is committed. The binding never holds a key or a server address.
 3. **Skill.** Installs the JubarteAI skill for the detected harnesses with the pinned `skills` installer (project scope; global when run from your home folder).
 4. **AGENTS.md.** Adds the JubarteAI section between `<!-- jubarteai:begin -->` and `<!-- jubarteai:end -->`, and the `@AGENTS.md` import in CLAUDE.md.
-5. **Sensitive writes**, each prompted on its own with the exact entry shown: the permission rule that lets agents run the `jubarteai` tool commands without asking (never `login`, `logout`, `link`, `init` or `update`), moving a bound repo to another workspace, the session hooks, the Codex network opt-in (or, when that cannot be applied, the Codex MCP registration), and the cleanup of leftover `jubarteai` MCP entries. Without a terminal these are skipped and listed with the flag that applies them, unless you pass `--yes`. Run from inside a coding agent's shell, they are not applied and not prompted, even with `--yes`: an agent can type the flag, or answer a prompt in its terminal, as easily as you can, so they wait for you to run `init` in your own terminal.
-6. A summary of every step (`configured`, `already configured`, `skipped`, `failed`) and a reminder to restart your editor or agent. The exit code is 1 when a step failed.
+5. **Sensitive writes**, each a row of the checklist (`d` shows its exact entry): the permission rule that lets agents run the `jubarteai` tool commands without asking (never `login`, `logout`, `link`, `init` or `update`), moving a bound repo to another workspace, the session hooks, the Codex network opt-in (or, when that cannot be applied, the Codex MCP registration), and the cleanup of leftover `jubarteai` MCP entries. Without a terminal these are skipped and listed with the flag that applies them, unless you pass `--yes`. Run from inside a coding agent's shell, they are not applied and no checklist is shown, even with `--yes`: an agent can type the flag, or answer a prompt in its terminal, as easily as you can, so they wait for you to run `init` in your own terminal.
+6. Each row reports as it finishes (`configured`, `already configured`, `skipped`, `failed`) under the harness it belongs to, then a closing tally (`Done in 14s — 9 ok · 1 skipped · 1 failed`) and a reminder to restart your editor or agent. The exit code is 1 when a step failed. If you uncheck everything, or answer No, nothing changes and it ends with `Aborted.` (exit 0).
+
+Two choices are asked before the checklist, only on your own terminal: whether to share the workspace binding with everyone who clones the repo (default no) and whether to share Codex's project network setting (default no). With `--yes`, no terminal or inside an agent's shell they take the private default.
 
 Run from your home folder or `/`, `init` does the global steps only (no binding, no project skill, no AGENTS.md).
 
@@ -52,6 +54,9 @@ Run from your home folder or `/`, `init` does the global steps only (no binding,
 | `--keep-mcp` | Keep the `jubarteai` MCP entries in your editors' configs. |
 | `--no-hooks` | Do not add the session hooks. |
 | `--no-permissions` | Do not add the permission rule. |
+| `--skip-harness <id>` | Leave a harness out entirely (repeat for several): `claude-code`, `codex`, `cursor`, `vscode`, `windsurf`, `zed`, `gemini-cli`, `opencode`, `copilot-cli`. |
+| `--show-changes` | Print the exact entries to be written before asking. |
+| `--plain`, `--verbose` | Output modes, see below. |
 | `--yes` | Accept every default, including the sensitive writes. |
 
 ### What `init` configures per harness
@@ -110,7 +115,7 @@ jubarteai doctor --json    # the same as one JSON object
 jubarteai update
 ```
 
-Checks npm for a newer CLI first (and offers `npm install -g jubarteai@<version>`, then continues with the new version), then refreshes the skill through the channel it was installed with, updates the AGENTS.md section that `init` wrote, refreshes the command of the session hooks `init` wrote (after a Node upgrade moved the paths they name; shown and asked like `init`'s hook step, and reported by `--check`), and offers to remove leftover `jubarteai` MCP entries. It never reads or prints a key. Or, without the CLI on the machine yet:
+Checks npm for a newer CLI first (and asks `Install jubarteai@<version>?` with Yes preselected, then continues with the new version), then refreshes the skill through the channel it was installed with, updates the AGENTS.md section that `init` wrote, refreshes the command of the session hooks `init` wrote (after a Node upgrade moved the paths they name; reported by `--check`), and offers to remove leftover `jubarteai` MCP entries. Everything it would change is asked once (`Apply these changes?` Yes / No / Show the exact changes), and its report goes to stderr. It never reads or prints a key. Or, without the CLI on the machine yet:
 
 ```sh
 curl -fsSL https://jubarte.ai/update.sh | bash        # Windows: irm https://jubarte.ai/update.ps1 | iex
@@ -122,6 +127,7 @@ curl -fsSL https://jubarte.ai/update.sh | bash        # Windows: irm https://jub
 | `--yes` | Accept every default. |
 | `--no-self-update` | Skip the check for a newer CLI. |
 | `--keep-mcp` | Keep the `jubarteai` MCP entries in your editors' configs. |
+| `--show-changes` | Print the exact entries to be written before asking. |
 
 Exit codes for `update`: `0` done or advisory, `1` a step failed, `2` `--check` found changes.
 
@@ -206,6 +212,10 @@ jubarteai inbox --watch --minutes 90
 
 ## Output and exit codes
 
+**Modes.** Commands that talk to a person (`init`, `update`, `doctor`, `login`, `link`, `logout`) look like the install script did: a teal banner, a timeline with a spinner while npm or the skills installer runs, and a closing tally. That only happens when the stream is a terminal. It is plain text when you pass `--plain`, when `NO_COLOR` is set to anything non-empty, when `TERM=dumb`, or when the output is a pipe or a file; `JUBARTEAI_UI=plain` or `rich` forces either, and `FORCE_COLOR=1`/`2`/`3` asks for colours on a pipe (never animation). Glyphs fall back to ASCII off a UTF-8 locale and on plain Windows consoles. `--verbose` prints the output of the programs a command starts (npm, `skills`), and `JUBARTEAI_BANNER=off` hides the banner (the install scripts print their own and set it). Tool commands, `--json` output and hooks never print an escape code.
+
+**Streams.** Progress and messages (`init`, `update`, `login`, `link`, `logout`, errors) go to stderr; reports go to stdout: `--help`, `--version`, `status`, `doctor`.
+
 - Tool commands print the server's answer to stdout as one line of compact JSON, `messages` first: `{"messages":[…],"result":…}` or `{"messages":[…],"error":"…"}`. `--pretty` indents it. Nothing else goes to stdout.
 - Network and sign-in failures also print one JSON line, `{"messages":[],"error":"…","code":"…"}`, so a script always parses the same shape. Human-readable diagnostics go to stderr.
 
@@ -220,7 +230,7 @@ jubarteai inbox --watch --minutes 90
 
 Setup commands (`init`, `link`, `doctor`, `update`) print text for people rather than JSON. `doctor` exits 1 when a check failed; `update` uses `0`, `1` and `2` as described above.
 
-Global options on every command: `--workspace <slug>`, `--agent <uuid>`, `--pretty`, `--yes`, `--help`, `--version`. They go after the command name (`jubarteai list-agents --workspace acme`); only `--help` and `--version` may come first.
+Global options on every command: `--workspace <slug>`, `--agent <uuid>`, `--pretty`, `--yes`, `--plain`, `--verbose`, `--help`, `--version`. They go after the command name (`jubarteai list-agents --workspace acme`); only `--help` and `--version` may come first.
 
 ## Security
 
@@ -230,7 +240,7 @@ Global options on every command: `--workspace <slug>`, `--agent <uuid>`, `--pret
 - For CI and containers, set `JUBARTEAI_TOKEN` to a key from the dashboard. Tool commands use it for that process only, never save it, and remove it from the process environment before anything else runs, so child processes cannot see it. `init` is the exception: with `JUBARTEAI_TOKEN` set it saves the key as a login in `credentials.json` (mode 0600), the same as `login --with-token`. `JUBARTEAI_URL` points it at another server (`https://`, or `http://` on a loopback address for local development).
 - Hooks do nothing outside a repo you bound with `init` or `link`, never prompt, and always exit 0.
 - `update` never reads the key.
-- `init` writes only the files listed above: the repo binding, the skill, the AGENTS.md section and the harness settings in the table. The one harness file that holds a key is Codex's user-level `~/.codex/config.toml` entry, mode 0600, written only when the network opt-in is not available. Anything that changes what an agent may run (the permission rule, the hooks, the MCP cleanup) is shown and prompted on its own; without a terminal it is skipped unless you pass `--yes`, and `--yes` given from inside a coding agent's shell doesn't count. The permission rule, written or printed, lets agents run the tool commands without asking but never pre-approves `login`, `logout`, `link`, `init` or `update` (where a harness can only name the whole program, or matches a subcommand rule only for other programs as Copilot CLI does, nothing is written and the printed lines say what a whole-program rule or approval would also approve); moving a bound repo to another workspace asks first like the other sensitive writes; inside an agent's shell `login --with-token`, `link`, `logout` and `init` with `JUBARTEAI_TOKEN` refuse, so an agent can't switch the account or workspace your fleet writes to. Copilot CLI and VS Code set no variable that marks an agent's shell, so there a `preToolUse` hook in `~/.copilot/hooks/jubarteai.json` denies an agent's shell call that names one of those five, whatever was approved; it never approves anything, fails open if the program is missing, and is best effort (a command hidden in a script file or a variable, for example, isn't seen). Harness files are edited with a safe-edit layer that merges rather than replaces, refuses files it cannot rewrite faithfully and reports them instead.
+- `init` writes only the files listed above: the repo binding, the skill, the AGENTS.md section and the harness settings in the table. The one harness file that holds a key is Codex's user-level `~/.codex/config.toml` entry, mode 0600, written only when the network opt-in is not available. Anything that changes what an agent may run (the permission rule, the hooks, the MCP cleanup) is a row of the one checklist, approved by you (`d` shows the exact entry); without a terminal it is skipped unless you pass `--yes`, and `--yes` given from inside a coding agent's shell doesn't count. The permission rule, written or printed, lets agents run the tool commands without asking but never pre-approves `login`, `logout`, `link`, `init` or `update` (where a harness can only name the whole program, or matches a subcommand rule only for other programs as Copilot CLI does, nothing is written and the printed lines say what a whole-program rule or approval would also approve); moving a bound repo to another workspace asks first like the other sensitive writes; inside an agent's shell `login --with-token`, `link`, `logout` and `init` with `JUBARTEAI_TOKEN` refuse, so an agent can't switch the account or workspace your fleet writes to. Copilot CLI and VS Code set no variable that marks an agent's shell, so there a `preToolUse` hook in `~/.copilot/hooks/jubarteai.json` denies an agent's shell call that names one of those five, whatever was approved; it never approves anything, fails open if the program is missing, and is best effort (a command hidden in a script file or a variable, for example, isn't seen). Harness files are edited with a safe-edit layer that merges rather than replaces, refuses files it cannot rewrite faithfully and reports them instead.
 
 ## Uninstall
 

@@ -4,6 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import * as nodePath from "node:path";
+import { redactSecrets, safeForDisplay } from "../output.js";
 import { childEnv } from "../process-env.js";
 
 export type RunResult = {
@@ -25,6 +26,50 @@ export type RunOptions = {
   /** Written to the child's stdin, then stdin is closed. Without it stdin is closed at once (like `</dev/null`). */
   input?: string;
 };
+
+let childOutput: ((line: string) => void) | null = null;
+const STREAM_LINE_LIMIT = 400;
+
+/**
+ * While set (by --verbose), every line a child prints is passed to `handler`, already redacted and with control
+ * characters replaced, so a progress view can show npm's and the skills installer's output as it happens. Null turns it off.
+ */
+export function setChildOutput(handler: ((line: string) => void) | null): void {
+  childOutput = handler;
+}
+
+/** The text a child printed, as the last `lines` non-empty lines, each redacted and safe to print. For a failure's log tail. */
+export function logTail(res: { stdout: string; stderr: string }, lines = 15): string[] {
+  return `${res.stdout}\n${res.stderr}`
+    .split(/\r?\n/)
+    .map((line) => safeForDisplay(line.trim(), STREAM_LINE_LIMIT))
+    .filter((line) => line !== "")
+    .slice(-lines);
+}
+
+/** Passes complete lines to the handler as chunks arrive; `flush` emits a last partial line. */
+function lineStreamer(): { push(chunk: string): void; flush(): void } {
+  let pending = "";
+  const emit = (line: string): void => {
+    const handler = childOutput;
+    if (handler === null) return;
+    const safe = safeForDisplay(redactSecrets(line).trim(), STREAM_LINE_LIMIT);
+    if (safe !== "") handler(safe);
+  };
+  return {
+    push(chunk) {
+      if (childOutput === null) return;
+      pending += chunk;
+      const parts = pending.split(/\r?\n/);
+      pending = parts.pop() ?? "";
+      for (const part of parts) emit(part);
+    },
+    flush() {
+      if (pending !== "") emit(pending);
+      pending = "";
+    },
+  };
+}
 
 /** The most output kept per stream; a child that writes more is still drained, the rest is dropped. */
 export const MAX_OUTPUT_CHARS = 1024 * 1024;
@@ -183,10 +228,13 @@ export async function runCommand(cmd: string, args: string[], opts: RunOptions):
     let timedOut = false;
     let settled = false;
     const timers: NodeJS.Timeout[] = [];
+    const streams = { out: lineStreamer(), err: lineStreamer() };
 
     const finish = (result: Omit<RunResult, "stdout" | "stderr" | "timedOut">): void => {
       if (settled) return;
       settled = true;
+      streams.out.flush();
+      streams.err.flush();
       for (const t of timers) clearTimeout(t);
       done({ ...result, stdout, stderr, timedOut });
     };
@@ -212,9 +260,11 @@ export async function runCommand(cmd: string, args: string[], opts: RunOptions):
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout = take(stdout, chunk);
+      streams.out.push(chunk);
     });
     child.stderr?.on("data", (chunk: string) => {
       stderr = take(stderr, chunk);
+      streams.err.push(chunk);
     });
     if (child.stdin !== null) {
       child.stdin.on("error", () => {

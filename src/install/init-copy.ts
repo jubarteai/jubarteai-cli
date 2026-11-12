@@ -12,7 +12,10 @@ export const INIT_COPY = {
 
   // What the plan runner (src/safe-edit/plan.ts) prints. init-copy.test.ts runs a real plan and checks each of
   // these against it, so a change there is caught here before it reaches the email.
-  proceedPrompt: "Proceed? [Y/n]",
+  // The one approval: a checklist with every row checked, where Enter applies what is checked.
+  checklistTitle: "Choose what to set up",
+  notSelected: "not selected",
+  declined: "declined",
   statusConfigured: "configured",
   statusAlreadyConfigured: "already configured",
   statusSkipped: "skipped",
@@ -34,7 +37,6 @@ export const INIT_COPY = {
 
   // Binding (spec section 3.2).
   shareBindingQuestion: "Share this workspace binding with everyone who clones the repo?",
-  shareBindingPrompt: "Share this workspace binding with everyone who clones the repo? [y/N]",
   bindingConflict: "Use either --share-binding or --private-binding, not both.",
   bindingPrivate: "The binding is private: .jubarteai/ is listed in .gitignore.",
   bindingShared: "The binding is shared: commit .jubarteai/config.json. Your address stays in .jubarteai/config.local.json, which is ignored.",
@@ -91,11 +93,6 @@ export function rebindStepLabel(from: string, to: string): string {
 /** The detail of a step that a flag turned off. */
 export function flagSkipDetail(flag: string): string {
   return `turned off by ${flag}`;
-}
-
-/** Said once the account is chosen, before the plan. */
-export function usingAccount(email: string, workspace: string): string {
-  return `Using ${email} — ${workspace}`;
 }
 
 /** A repo already bound to a workspace this machine has no login for: init signs in to that workspace. */

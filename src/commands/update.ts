@@ -2,7 +2,7 @@
 // (docs/plans/update-sh-grill.md D1–D32) in TypeScript, plus two things update.sh could not do:
 //
 //   1. Self-update first (skip with --no-self-update): when the npm registry's `latest` is newer than this CLI,
-//      offer `npm install -g jubarteai@<v>` (Proceed? [Y/n]) and hand over to the new binary with
+//      offer `npm install -g jubarteai@<v>` (Yes / No / Show the exact command) and hand over to the new binary with
 //      `jubarteai update --no-self-update <same flags>`. An offline lookup is one advisory line.
 //   2. MCP: where update.sh only reported install.sh's leftover MCP entries, update offers their removal (D3), as
 //      sensitive steps (`--keep-mcp` keeps them). Codex keeps its entry unless its network opt-in is already in
@@ -49,19 +49,21 @@ import {
   checkClosingLines,
   cliInstallFailedLines,
   cliVersionRow,
-  closingLines,
+  closingNotes,
   countResults,
-  formatRow,
   infoRow,
   nothingInstalledLines,
-  resultLines,
   todoRow,
   updateExitCode,
   type ReportRow,
 } from "../install/update-report.js";
 import { credentialsPath, homeDir } from "../paths.js";
-import { confirm, isInteractive } from "../prompt.js";
-import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
+import { agentSessionVar } from "../agent-session.js";
+import { isInteractive } from "../prompt.js";
+import { DECLINED, applyPlan, type ApplyOptions, type PlanStep, type StepResult } from "../safe-edit/plan.js";
+import { choice } from "../ui/choice.js";
+import { createUi, type Ui } from "../ui/index.js";
+import type { Timeline } from "../ui/timeline.js";
 
 const GIT_TIMEOUT_MS = 10_000;
 const CLAUDE_VERSION_TIMEOUT_MS = 10_000;
@@ -106,7 +108,10 @@ export type UpdateDeps = {
   /** What a hook's command line starts with for the running install (cliCommandInfo; tests inject). */
   cliCommand(): CliCommandInfo;
   isTty(): boolean;
-  confirm: typeof confirm;
+  /** The self-update question (Yes / No / Show the exact command); tests inject. */
+  choice: typeof choice;
+  /** Test seam: answers the plan's one question without a terminal. */
+  approve?: ApplyOptions["approve"];
   detect(): Promise<HarnessAdapter[]>;
   /** The newest skill, when already known (tests); undefined: looked up on GitHub by the skill module. */
   latestSkill?: LatestSkill | null;
@@ -122,21 +127,33 @@ const defaultDeps: UpdateDeps = {
   reexec: reexecCli,
   cliCommand: () => cliCommandInfo(),
   isTty: isInteractive,
-  confirm,
+  choice,
   detect: () => detectHarnesses(),
 };
 
 type Options = { check: boolean; selfUpdate: boolean; keepMcp: boolean; yes: boolean };
 
+/** The rows `update` finds, as timeline lines; counts the warnings for the closing tally. */
 class Printer {
   warnings = 0;
-  constructor(private readonly out: NodeJS.WritableStream) {}
+  okRows = 0;
+  constructor(
+    readonly ui: Ui,
+    readonly timeline: Timeline,
+  ) {}
+  /** Fixed sentences between rows. */
   line(text: string): void {
-    this.out.write(`${text}\n`);
+    this.timeline.note([text]);
   }
   row(r: ReportRow): void {
     if (r.level === "warn") this.warnings += 1;
-    this.line(formatRow(r));
+    if (r.level === "ok") this.okRows += 1;
+    // What this machine and project are shown as header rows; findings and changes are rows.
+    if ((r.level === "ok" || r.level === "info") && (r.name === "CLI" || r.name === "Project" || r.name === "Claude Code" || r.name === "Status")) {
+      this.timeline.header(r.name, r.text);
+      return;
+    }
+    this.timeline.row(r.level, r.name, r.text);
   }
 }
 
@@ -172,20 +189,25 @@ async function selfUpdate(p: Printer, opts: Options, deps: UpdateDeps, tty: bool
   p.row(cliVersionRow({ kind: "newer", current, latest }));
   if (opts.check) return { done: false, pending: 1, failed: 0 };
 
-  p.line(`This will run: npm install -g jubarteai@${latest} (into ${install.prefix})`);
-  // D28 (update-sh grill): with no terminal to ask and no --yes, update proceeds, the self-update included.
-  const go = tty && !opts.yes ? await deps.confirm("Proceed?", { defaultYes: true }) : true;
+  // D28 (update-sh grill): with no terminal to ask and no --yes, update proceeds, the self-update included. An agent's shell
+  // is asked nothing either: the install changes no harness or security file, and a prompt there could be answered by the agent.
+  const command = `npm install -g jubarteai@${latest} (into ${install.prefix})`;
+  const go =
+    tty && !opts.yes && agentSessionVar() === null
+      ? (await deps.choice(p.ui, { question: `Install jubarteai@${latest}?`, options: ["yes", "no", "show"], defaultIndex: 0, details: () => [`This will run: ${command}`] })) === "yes"
+      : true;
   if (!go) {
     p.row({ level: "warn", name: "CLI", text: `${UPDATE_COPY.cliInstallDeclined} (${current}); update it later with: npm install -g jubarteai@${latest}` });
     return { done: false, pending: 0, failed: 0 };
   }
-  const installed = await deps.installCli(latest, install.prefix);
+  const installed = await p.timeline.run(`Installing jubarteai@${latest}`, () => deps.installCli(latest, install.prefix));
   if (!installed.ok) {
-    p.line(`  CLI: failed: npm install -g jubarteai@${latest}`);
+    p.timeline.row("fail", "CLI", `failed: npm install -g jubarteai@${latest}`);
+    if (installed.log !== undefined) p.timeline.note(installed.log.map((line) => `  ${line}`));
     for (const line of cliInstallFailedLines(latest, { eacces: installed.eacces, timedOut: installed.timedOut, platform: process.platform })) p.line(line);
     return { done: false, pending: 0, failed: 1 };
   }
-  p.line(`  CLI: installed ${latest}; continuing with it`);
+  p.timeline.row("ok", "CLI", `installed ${latest}; continuing with it`);
   // The file npm just replaced in place, never a PATH lookup (a stale copy elsewhere on PATH would run instead).
   const handed = await deps.reexec(install.entry, reexecArgs(opts));
   if (handed.started) return { done: true, code: handed.code };
@@ -280,8 +302,12 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
     yes: ctx.globals.yes,
   };
   const tty = deps.isTty();
-  const p = new Printer(ctx.stdout);
-  p.line(UPDATE_COPY.title);
+  const ui = createUi(ctx.stderr, { ...(ctx.globals.plain === true ? { plain: true } : {}), ...(ctx.globals.verbose === true ? { verbose: true } : {}) });
+  const timeline = ui.timeline();
+  const p = new Printer(ui, timeline);
+  const started = Date.now();
+  ui.banner("updater");
+  timeline.open(UPDATE_COPY.title);
 
   // --- 1. the CLI itself ---------------------------------------------------------------------------------------
   const self = await selfUpdate(p, opts, deps, tty);
@@ -323,7 +349,8 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
 
   const hooksFound = hookRefresh.steps.length > 0 || hookRefresh.manuals.length > 0 || hookRefresh.incomplete.length > 0;
   if (skillSteps.length === 0 && !mcp.found && !hooksFound) {
-    for (const line of nothingInstalledLines()) p.line(line);
+    timeline.note(nothingInstalledLines());
+    timeline.close({ ok: p.okRows, skipped: 0, failed: 0, warnings: p.warnings }, Date.now() - started);
     return updateExitCode({ check: opts.check, pending, failed: 0 });
   }
 
@@ -361,9 +388,10 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
   if (opts.check) {
     for (const s of changes) p.row(todoRow(s.label));
     for (const r of kept) p.row({ level: "info", name: r.label, text: UPDATE_COPY.mcpKept });
-    for (const line of byHandLines(manuals)) p.line(line);
+    timeline.note(byHandLines(manuals));
     pending += changes.length;
-    for (const line of checkClosingLines(pending, p.warnings)) p.line(line);
+    timeline.note(checkClosingLines(pending, p.warnings));
+    timeline.close({ ok: p.okRows, skipped: 0, failed: 0, warnings: p.warnings }, Date.now() - started);
     return updateExitCode({ check: true, pending, failed: 0 });
   }
 
@@ -372,14 +400,26 @@ async function runUpdate(ctx: CommandContext, args: ParsedArgs, deps: UpdateDeps
   if (changes.length === 0) {
     p.row({ level: "ok", name: "Status", text: UPDATE_COPY.upToDate });
   } else {
-    results = await applyPlan(changes, { tty, yes: opts.yes, out: ctx.stdout, confirmFn: deps.confirm });
+    results = await applyPlan(changes, {
+      tty,
+      yes: opts.yes,
+      ui,
+      timeline,
+      approval: "confirm",
+      title: UPDATE_COPY.applyQuestion,
+      showChanges: args.flags["show-changes"] === true,
+      ...(deps.approve === undefined ? {} : { approve: deps.approve }),
+    });
+    if (results.length > 0 && results.every((r) => r.status === "skipped" && r.detail === DECLINED)) return updateExitCode({ check: false, pending: 0, failed: self.failed });
   }
-  results = [...results, ...kept];
-  for (const line of resultLines(results)) p.line(line);
-  for (const line of byHandLines(manuals)) p.line(line);
+  const keptResults = kept;
+  for (const r of keptResults) timeline.result(r, "");
+  results = [...results, ...keptResults];
+  timeline.note(byHandLines(manuals));
 
   const counts = countResults(results, p.warnings, self.failed);
-  for (const line of closingLines(counts, { changed: results.some((r) => r.status === "configured") })) p.line(line);
+  timeline.note(closingNotes(counts, { changed: results.some((r) => r.status === "configured") }));
+  timeline.close(counts, Date.now() - started);
   return updateExitCode({ check: false, pending: 0, failed: counts.failed });
 }
 
@@ -390,11 +430,12 @@ export function createUpdateCommand(overrides: Partial<UpdateDeps> = {}): Comman
     name: "update",
     summary: "Update the CLI, the skill, the AGENTS.md section and the hook commands, and remove leftover MCP entries (never reads a key)",
     group: "setup",
-    usage: "update [--check] [--yes] [--no-self-update] [--keep-mcp]",
+    usage: "update [--check] [--yes] [--no-self-update] [--keep-mcp] [--show-changes]",
     flags: [
       { name: "check", type: "boolean", description: "Report what would change and change nothing (exit 2 when something would)" },
       { name: "self-update", type: "boolean", description: "Check npm for a newer CLI first (default; --no-self-update skips it)" },
       { name: "keep-mcp", type: "boolean", description: "Keep the jubarteai MCP entries in your editors' configs" },
+      { name: "show-changes", type: "boolean", description: "Print the exact entries to be written before asking" },
     ],
     run: (ctx, args) => runUpdate(ctx, args, deps),
   };

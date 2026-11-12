@@ -15,6 +15,7 @@ import { basename, dirname, join, parse, resolve } from "node:path";
 import { homeDir } from "../paths.js";
 import { SafeEditError, writeFileAtomic } from "../safe-edit/atomic-write.js";
 import { defaultGuardEnv, realTarget, type RefusalReason } from "../safe-edit/file-guards.js";
+import { repoGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENTS_MD_MARKERS, SKILL_REPO, agentsMdSnippet, agentsMdSnippetHistory } from "./constants.js";
 import { runCommand, runCommandSync } from "./run.js";
@@ -503,15 +504,15 @@ export function planInstructionSteps(root: string, opts: InstructionOptions): Pl
   const agentsFile = join(root, "AGENTS.md");
   const agentsWork = p.agents.state === "missing" || p.agents.state === "known-old";
   if (init || agentsWork) {
-    steps.push({ ...AGENTS_STEP, files: [agentsFile], sensitive: false, apply: () => applyAgentsSection(root, bound.slug) });
+    steps.push({ ...AGENTS_STEP, group: repoGroup(root), files: [agentsFile], sensitive: false, apply: () => applyAgentsSection(root, bound.slug) });
   }
   if (p.claude.state === "known-old") {
-    steps.push({ ...CLAUDE_SECTION_STEP, files: [p.claude.file], sensitive: false, apply: () => applyClaudeSection(root, bound.slug) });
+    steps.push({ ...CLAUDE_SECTION_STEP, group: repoGroup(root), files: [p.claude.file], sensitive: false, apply: () => applyClaudeSection(root, bound.slug) });
   }
   const fresh = p.agents.state === "missing";
   const action = importAction(p, family, opts, fresh);
   if (action === "append" || action === "create" || (init && action === "covered")) {
-    steps.push({ ...CLAUDE_IMPORT_STEP, files: [join(root, "CLAUDE.md")], sensitive: false, apply: () => applyClaudeImport(root, bound, fresh) });
+    steps.push({ ...CLAUDE_IMPORT_STEP, group: repoGroup(root), files: [join(root, "CLAUDE.md")], sensitive: false, apply: () => applyClaudeImport(root, bound, fresh) });
   }
   return steps;
 }

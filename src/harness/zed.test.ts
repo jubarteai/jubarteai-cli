@@ -2,11 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { agentCommandPattern } from "./agent-commands.js";
 import { zedAdapter } from "./zed.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 let home: string;
 let savedHome: string | undefined;
@@ -228,10 +228,10 @@ describe("zed re-run (spec 6.1: re-running init is safe)", () => {
   it("re-plans the permission as a non-sensitive step that reports already configured without a TTY", async () => {
     const first = (await zedAdapter.permission(ctx())) as PlanStep;
     expect(first.sensitive).toBe(true);
-    await applyPlan([first], { tty: false, yes: true, out: new PassThrough() });
+    await applyPlan([first], { tty: false, yes: true, ...applyUi() });
     const again = (await zedAdapter.permission(ctx())) as PlanStep;
     expect(again.sensitive).toBe(false);
-    const results = await applyPlan([again], { tty: false, yes: false, out: new PassThrough() });
+    const results = await applyPlan([again], { tty: false, yes: false, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["already configured"]);
   });
 });

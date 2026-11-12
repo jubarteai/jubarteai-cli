@@ -31,6 +31,8 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "agent", type: "string", description: "Agent id to act as (default: this session's agent)" },
   { name: "pretty", type: "boolean", description: "Indent the JSON output" },
   { name: "yes", type: "boolean", description: "Accept every default without asking" },
+  { name: "plain", type: "boolean", description: "Plain text output: no colours, banner or animation (also NO_COLOR, TERM=dumb)" },
+  { name: "verbose", type: "boolean", description: "Show the output of the programs the command runs (npm, the skills installer)" },
   { name: "help", type: "boolean", description: "Show help" },
   { name: "version", type: "boolean", description: "Print the version" },
 ];

@@ -17,7 +17,7 @@ export type CommandContext = {
   stderr: NodeJS.WritableStream;
   stdin: NodeJS.ReadableStream;
   cwd: string;
-  globals: { workspace?: string; agent?: string; pretty: boolean; yes: boolean };
+  globals: { workspace?: string; agent?: string; pretty: boolean; yes: boolean; plain?: boolean; verbose?: boolean };
 };
 
 export type CommandGroup = "account" | "tools" | "setup" | "internal";

@@ -1,6 +1,6 @@
-import { join, resolve as resolvePath } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
 
-import { refuseInAgentSession } from "../agent-session.js";
+import { agentSessionVar, refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentials } from "../auth/credentials.js";
@@ -15,6 +15,7 @@ import { CliError, ExitCode, UsageError } from "../errors.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import { CODEX_MCP_TABLE, bearerIs, codexUpdateStep, codexUserFile, readCodexEntry, seatForBearer, workspaceLabel } from "../harness/codex-entry.js";
 import { defaultDetectEnv, detectHarnesses } from "../harness/detect.js";
+import { HARNESS_LABELS } from "../harness/labels.js";
 import { codexHome, findMcpEntries, isUnderHome, shownPath } from "../harness/mcp-cleanup.js";
 import { ADAPTERS } from "../harness/registry.js";
 import type { CleanupScope, HarnessAdapter, InitCtx, ManualInstructions } from "../harness/types.js";
@@ -31,16 +32,22 @@ import {
   noLoginForWorkspace,
   repoUsesWorkspace,
   useAccountQuestion,
-  usingAccount,
 } from "../install/init-copy.js";
 import { cliCommandInfo } from "../install/cli-command.js";
 import { runCommandSync } from "../install/run.js";
 import { planSkillSteps } from "../install/skill.js";
+import { homeDir } from "../paths.js";
 import { safeForDisplay } from "../output.js";
 import { envOrigin, takeEnvToken } from "../process-env.js";
 import { choose, confirm, isInteractive } from "../prompt.js";
+import { HARNESS_IDS } from "../session/harness-env.js";
+import type { HarnessId } from "../session/harness-env.js";
+import { suggest } from "../cli/suggest.js";
+import { choice } from "../ui/choice.js";
+import { displayPath } from "../ui/display.js";
+import { createUi } from "../ui/index.js";
 import { TomlConflictError, editTomlFile, getTomlTable, setTomlKey } from "../safe-edit/toml-edit.js";
-import { applyPlan, summarize } from "../safe-edit/plan.js";
+import { DECLINED, applyPlan, harnessGroup, repoGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 
 // `jubarteai init` (spec section 6.1): sign in (or reuse a saved login), bind this repo to the workspace, install the
@@ -202,8 +209,7 @@ async function chooseAccount(ctx: CommandContext, root: string | null, opts: Acc
   return chosen === null ? signIn(ctx, undefined, opts, deps) : useStored(ctx, chosen.seat);
 }
 
-function useStored(ctx: CommandContext, seat: StoredSeat): StoredSeat {
-  ctx.stderr.write(`${usingAccount(safeForDisplay(seat.user.email, DISPLAY_MAX), workspaceName(seat))}\n`);
+function useStored(_ctx: CommandContext, seat: StoredSeat): StoredSeat {
   return seat;
 }
 
@@ -261,6 +267,8 @@ function bindingStep(
   form: { share: boolean | undefined; ask: boolean },
   notes: string[],
 ): PlanStep {
+  /** The answer to the share question, asked before approval; private until a person says otherwise. */
+  let asked = false;
   const slug = safeForDisplay(seat.company.slug, DISPLAY_MAX);
   const existing = bindingAt(root);
   // Moving a bound repo to another workspace decides where every hook and command from it writes, the same change
@@ -271,16 +279,28 @@ function bindingStep(
   return {
     id: BINDING_STEP_ID,
     label,
+    group: repoGroup(root),
     files: [join(root, ".jubarteai"), join(root, ".gitignore")],
     sensitive: moves,
+    ...(existing === null && form.share === undefined && form.ask
+      ? {
+          question: {
+            id: "share-binding" as const,
+            text: INIT_COPY.shareBindingQuestion,
+            defaultYes: false as const,
+            set: (answer: boolean) => {
+              asked = answer;
+            },
+          },
+        }
+      : {}),
     ...(moves ? { preview: `${join(root, ".jubarteai", "config.json")}
   workspace: ${safeForDisplay(existing.workspace.slug, DISPLAY_MAX)} → ${slug}`, flag: "--yes" } : {}),
     async apply(): Promise<StepResult> {
       let shared: boolean;
       if (form.share !== undefined) shared = form.share;
       else if (existing !== null) shared = existing.shared;
-      else if (form.ask) shared = await confirm(INIT_COPY.shareBindingQuestion, { defaultYes: false });
-      else shared = false;
+      else shared = asked;
       try {
         const written = writeBinding(root, { workspace: { id: seat.company.id, slug: seat.company.slug }, email: seat.user.email, shared });
         if (written.reason === "tracked") notes.push(INIT_COPY.bindingKeptSharedTracked);
@@ -313,6 +333,7 @@ function codexRegisterStep(ctx: InitCtx, seat: StoredSeat, optInInEffect: () => 
   return {
     id,
     label,
+    group: harnessGroup("codex"),
     files: [file],
     sensitive: true,
     preview: `${shown}:\n[${CODEX_MCP_TABLE}]\nurl = ${JSON.stringify(url)}\nhttp_headers = { "Authorization" = "Bearer <your key>" }`,
@@ -371,10 +392,12 @@ type PlanInputs = {
   yes: boolean;
   cwd: string;
   notes: string[];
+  /** Harnesses left out with --skip-harness: no skill agent, hooks, permission rule or cleanup row for them. */
+  skip: ReadonlySet<HarnessId>;
 };
 
 /** Steps 4 to 7 of spec section 6.1, in order, as one list. */
-async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; manuals: ManualInstructions[] }> {
+async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; manuals: ManualInstructions[]; harnesses: HarnessId[] }> {
   const { root, seat, gates } = inputs;
   const plan = new PlanBuilder();
   const detectEnv = defaultDetectEnv();
@@ -382,11 +405,13 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
   // `"<node>" "<bin>"` (cliCommandInfo), so a hook works from an editor whose PATH lacks the CLI.
   const cli = cliCommandInfo();
   if (cli.npx) inputs.notes.push(INIT_COPY.npxNote);
-  const ctx: InitCtx = { ...detectEnv, projectRoot: root, cliCommand: CLI_NAME, hookCommand: cli.command, yes: inputs.yes, tty: inputs.tty };
-  const detected = await detectHarnesses(detectEnv);
+  // A question is only ever asked on a person's terminal, never in an agent's shell (U8), so the plan says "asked" only then.
+  const person = inputs.tty && agentSessionVar() === null;
+  const ctx: InitCtx = { ...detectEnv, projectRoot: root, cliCommand: CLI_NAME, hookCommand: cli.command, yes: inputs.yes, tty: person };
+  const detected = (await detectHarnesses(detectEnv)).filter((adapter) => !inputs.skip.has(adapter.id));
 
   // 4. Binding.
-  if (root !== null) plan.step(bindingStep(bindingRootFor(root), seat, { share: inputs.share, ask: inputs.tty && !inputs.yes }, inputs.notes));
+  if (root !== null) plan.step(bindingStep(bindingRootFor(root), seat, { share: inputs.share, ask: person && !inputs.yes }, inputs.notes));
 
   // 5. Skill, for every detected harness (deduped by skills agent id).
   const agents = [...new Set(detected.flatMap((adapter) => (adapter.skillAgent === null ? [] : [adapter.skillAgent])))];
@@ -473,7 +498,7 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
   }
 
   // MCP cleanup (D3), for every harness: a stale entry in a committed project file matters whether or not the editor is installed here.
-  for (const adapter of ADAPTERS) {
+  for (const adapter of ADAPTERS.filter((a) => !inputs.skip.has(a.id))) {
     const cleanup = await plan.guarded(`mcp-cleanup:${adapter.id}`, `${adapter.label} MCP cleanup`, () => adapter.mcpCleanup(scope));
     for (const item of cleanup ?? []) {
       if (isManual(item)) {
@@ -488,16 +513,34 @@ async function buildPlan(inputs: PlanInputs): Promise<{ entries: PlanEntry[]; ma
       }
     }
   }
-  return { entries: plan.entries, manuals: plan.manuals };
+  return { entries: plan.entries, manuals: plan.manuals, harnesses: detected.map((adapter) => adapter.id) };
 }
 
-function writeManuals(ctx: CommandContext, manuals: ManualInstructions[]): void {
-  if (manuals.length === 0) return;
-  ctx.stderr.write(`\n${INIT_COPY.manualHeading}\n`);
-  for (const item of manuals) {
-    ctx.stderr.write(`  ${safeForDisplay(item.title, MANUAL_LINE_MAX)}\n`);
-    for (const line of item.lines) ctx.stderr.write(`    ${safeForDisplay(line, MANUAL_LINE_MAX)}\n`);
+/** The group a result row sits under: the harness its id names (`claude-code:hooks`, `mcp-cleanup:cursor:…`), else none. */
+function groupTitleOf(id: string): string {
+  const parts = id.split(":");
+  const named = parts[0] === "mcp-cleanup" ? parts[1] : parts[0];
+  const harness = HARNESS_IDS.find((candidate) => candidate === named);
+  if (harness !== undefined) return HARNESS_LABELS[harness];
+  return named === "copilot" ? HARNESS_LABELS.vscode : id === BINDING_STEP_ID || id.startsWith("agents-md") || id.startsWith("claude-md") ? "Repo" : "";
+}
+
+/** `--skip-harness a --skip-harness b`: known harness ids, or a usage error that suggests the nearest. */
+function skippedHarnesses(raw: unknown): Set<HarnessId> {
+  const out = new Set<HarnessId>();
+  if (!Array.isArray(raw)) return out;
+  for (const value of raw) {
+    const wanted = typeof value === "string" ? value.trim().toLowerCase() : "";
+    const known = HARNESS_IDS.find((id) => id === wanted);
+    if (known === undefined) {
+      const near = suggest(wanted, HARNESS_IDS);
+      throw new UsageError(
+        `Unknown harness "${safeForDisplay(String(value))}".${near === null ? "" : ` Did you mean "${near}"?`} Known: ${HARNESS_IDS.join(", ")}.`,
+      );
+    }
+    out.add(known);
   }
+  return out;
 }
 
 /** The command, with the sign-in's test seams. */
@@ -507,10 +550,19 @@ export async function runInit(ctx: CommandContext, args: ParsedArgs, deps: InitD
   if (flag("share-binding") && flag("private-binding")) throw new UsageError(INIT_COPY.bindingConflict);
   const share = flag("share-binding") ? true : flag("private-binding") ? false : undefined;
   const gates: Gates = { keepMcp: flag("keep-mcp"), noHooks: flag("no-hooks"), noPermissions: flag("no-permissions") };
+  const skip = skippedHarnesses(args.flags["skip-harness"]);
   const yes = ctx.globals.yes;
 
+  const ui = createUi(ctx.stderr, { ...(ctx.globals.plain === true ? { plain: true } : {}), ...(ctx.globals.verbose === true ? { verbose: true } : {}) });
+  const timeline = ui.timeline();
+  const started = Date.now();
+  ui.banner("installer");
+  timeline.open("JubarteAI installer");
+
   const { root, reason } = projectRootOf(ctx.cwd);
-  if (root === null && reason !== null) ctx.stderr.write(`${INIT_COPY.globalOnly}\n`);
+  const home = homeDir();
+  if (root === null && reason !== null) timeline.header("Project", INIT_COPY.globalOnly, { warn: true });
+  else if (root !== null) timeline.header("Project", `${basename(root).toLowerCase()}  ${displayPath(root, { home })}`);
   const tty = isInteractive();
 
   const seat = await chooseAccount(
@@ -520,26 +572,70 @@ export async function runInit(ctx: CommandContext, args: ParsedArgs, deps: InitD
     tty,
     deps,
   );
+  timeline.header("Account", `${safeForDisplay(seat.user.email, DISPLAY_MAX)} — ${workspaceName(seat)}`);
 
   const notes: string[] = [];
-  const { entries, manuals } = await buildPlan({ root, seat, gates, share, tty, yes, cwd: ctx.cwd, notes });
+  const planned = await ui.spin("Looking at your setup", () => buildPlan({ root, seat, gates, share, tty, yes, cwd: ctx.cwd, notes, skip }));
+  const { entries, manuals } = planned;
+  timeline.header("Harnesses", planned.harnesses.length === 0 ? "none found on this machine" : planned.harnesses.map((id) => HARNESS_LABELS[id]).join(" · "), { warn: planned.harnesses.length === 0 });
+  timeline.header("Node", process.version);
   const steps = entries.flatMap((entry) => (entry.kind === "step" ? [entry.step] : []));
-  const applied = await applyPlan(steps, { tty, yes, out: ctx.stderr });
+
+  // Choices come first, so the checklist that follows is the only approval. Only a person's terminal is asked (U8):
+  // in an agent's shell, under --yes or with no terminal, the private default stands.
+  if (tty && !yes && agentSessionVar() === null) {
+    for (const step of steps) {
+      const question = step.question;
+      if (question === undefined) continue;
+      question.set((await choice(ui, { question: question.text, options: ["yes", "no"], defaultIndex: 1 })) === "yes");
+    }
+  }
+
+  const applied = await applyPlan(steps, {
+    tty,
+    yes,
+    ui,
+    timeline,
+    approval: "checklist",
+    title: INIT_COPY.checklistTitle,
+    showChanges: flag("show-changes"),
+  });
+  if (applied.length > 0 && applied.every((result) => result.status === "skipped" && result.detail === DECLINED)) {
+    // Nothing was approved: applyPlan already closed the timeline with "Aborted."; nothing changed.
+    return ExitCode.OK;
+  }
   const byId = new Map(applied.map((result) => [result.id, result]));
+  for (const entry of entries) {
+    if (entry.kind === "result") {
+      timeline.result(entry.result, groupTitleOf(entry.result.id));
+    }
+  }
   const results = entries.flatMap((entry): StepResult[] => {
     if (entry.kind === "result") return [entry.result];
     const result = byId.get(entry.step.id);
     return result === undefined ? [] : [result];
   });
 
-  ctx.stderr.write("\n");
-  for (const line of summarize(results)) ctx.stderr.write(`${line}\n`);
-  for (const note of notes) ctx.stderr.write(`${note}\n`);
-  if (results.some((result) => result.id.endsWith(":hooks") && result.status === "configured")) ctx.stderr.write(`${INIT_COPY.hooksRefresh}\n`);
-  if (!tty && !yes && results.some((result) => result.status === "skipped" && result.flag !== undefined)) ctx.stderr.write(`${INIT_COPY.noTerminal}\n`);
-  writeManuals(ctx, manuals);
-  ctx.stderr.write(`\n${INIT_COPY.restart}\n`);
-  return results.some((result) => result.status === "failed") ? ExitCode.SERVER_ERROR : ExitCode.OK;
+  const lines: string[] = [...notes];
+  if (results.some((result) => result.id.endsWith(":hooks") && result.status === "configured")) lines.push(INIT_COPY.hooksRefresh);
+  if (!tty && !yes && results.some((result) => result.status === "skipped" && result.flag !== undefined)) lines.push(INIT_COPY.noTerminal);
+  if (manuals.length > 0) {
+    lines.push("", INIT_COPY.manualHeading);
+    for (const item of manuals) {
+      lines.push(`  ${safeForDisplay(item.title, MANUAL_LINE_MAX)}`);
+      for (const line of item.lines) lines.push(`    ${safeForDisplay(line, MANUAL_LINE_MAX)}`);
+    }
+  }
+  lines.push("", INIT_COPY.restart);
+  timeline.note(lines);
+  const counts = { ok: 0, skipped: 0, failed: 0 };
+  for (const result of results) {
+    if (result.status === "failed") counts.failed += 1;
+    else if (result.status === "skipped") counts.skipped += 1;
+    else counts.ok += 1;
+  }
+  timeline.close(counts, Date.now() - started);
+  return counts.failed > 0 ? ExitCode.SERVER_ERROR : ExitCode.OK;
 }
 
 export const initCommand: CommandDef = {
@@ -547,7 +643,7 @@ export const initCommand: CommandDef = {
   summary: "Connect this repo to JubarteAI: sign in, bind the workspace, install the skill and configure your agents",
   group: "setup",
   usage:
-    "init [--workspace <slug>] [--no-browser] [--paste] [--share-binding | --private-binding] [--keep-mcp] [--no-hooks] [--no-permissions] [--yes]",
+    "init [--workspace <slug>] [--no-browser] [--paste] [--share-binding | --private-binding] [--keep-mcp] [--no-hooks] [--no-permissions] [--skip-harness <id>]... [--show-changes] [--yes]",
   flags: [
     { name: "no-browser", type: "boolean", description: "Print the sign-in URL instead of opening a browser" },
     { name: "paste", type: "boolean", description: "Paste the code from the browser (no local listener)" },
@@ -556,6 +652,8 @@ export const initCommand: CommandDef = {
     { name: "keep-mcp", type: "boolean", description: "Keep the jubarteai MCP entries in your editors' configs" },
     { name: "no-hooks", type: "boolean", description: "Don't add the session hooks" },
     { name: "no-permissions", type: "boolean", description: "Don't add the permission rule that lets agents run jubarteai" },
+    { name: "skip-harness", type: "string[]", description: "Leave a harness out (repeat for several): claude-code, codex, cursor, vscode, windsurf, zed, gemini-cli, opencode, copilot-cli" },
+    { name: "show-changes", type: "boolean", description: "Print the exact entries to be written before asking" },
   ],
   run: (ctx, args) => runInit(ctx, args),
 };

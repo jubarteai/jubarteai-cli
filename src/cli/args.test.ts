@@ -216,12 +216,14 @@ describe("parseArgs: --x-file", () => {
 });
 
 describe("GLOBAL_FLAGS", () => {
-  it("are exactly workspace, agent, pretty, yes, help, version", () => {
+  it("are exactly workspace, agent, pretty, yes, plain, verbose, help, version", () => {
     expect(GLOBAL_FLAGS.map((spec) => `${spec.name}:${spec.type}`)).toEqual([
       "workspace:string",
       "agent:string",
       "pretty:boolean",
       "yes:boolean",
+      "plain:boolean",
+      "verbose:boolean",
       "help:boolean",
       "version:boolean",
     ]);

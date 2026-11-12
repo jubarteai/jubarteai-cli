@@ -14,6 +14,7 @@ import { safeForDisplay } from "../output.js";
 import { editJsonFile, readConfigText, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import { editTomlFile, removeTomlTable, TomlConflictError } from "../safe-edit/toml-edit.js";
 import { assertSafeTarget, type RefusalReason } from "../safe-edit/file-guards.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import type { CleanupScope, ManualInstructions } from "./types.js";
 import type { HarnessId } from "../session/harness-env.js";
@@ -468,6 +469,7 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
   return {
     id,
     label,
+    group: harnessGroup(target.harness),
     files: [target.file],
     sensitive: true,
     preview,

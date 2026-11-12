@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { claudeCodeAdapter, HOOK_EVENTS, inspectCommandHooks, isOurHookCommand, mergeCommandHooks, settingsPath } from "./claude-code.js";
 import type { DetectEnv, InitCtx, ManualInstructions } from "./types.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 const isWindows = process.platform === "win32";
 
@@ -28,7 +29,6 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-const sink = { write: () => true } as unknown as NodeJS.WritableStream;
 
 function ctx(over: Partial<InitCtx> = {}): InitCtx {
   return { home, env: {}, platform: "linux", which: () => null, projectRoot: path.join(home, "proj"), cliCommand: "jubarteai", ...over };
@@ -47,7 +47,7 @@ async function applyAll(c: InitCtx): Promise<StepResult[]> {
   if (isStep(perm)) steps.push(perm);
   const hooks = await claudeCodeAdapter.hooks(c);
   if (Array.isArray(hooks)) steps.push(...hooks);
-  return applyPlan(steps, { tty: false, yes: true, out: sink });
+  return applyPlan(steps, { tty: false, yes: true, ...applyUi() });
 }
 
 // No rule for a leading flag: the router refuses one before the command name, and `jubarteai --help` must stay
@@ -244,7 +244,7 @@ describe("permission and hooks", () => {
   it("without a TTY and without --yes the sensitive steps are skipped, nothing is written", async () => {
     const perm = (await claudeCodeAdapter.permission(ctx())) as PlanStep;
     const [hooks] = (await claudeCodeAdapter.hooks(ctx())) as PlanStep[];
-    const results = await applyPlan([perm, hooks as PlanStep], { tty: false, yes: false, out: sink });
+    const results = await applyPlan([perm, hooks as PlanStep], { tty: false, yes: false, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["skipped", "skipped"]);
     expect(fs.existsSync(settings())).toBe(false);
   });
@@ -271,7 +271,7 @@ describe("permission and hooks", () => {
     const perm = (await claudeCodeAdapter.permission(ctx())) as PlanStep;
     writeSettings({ permissions: [] });
     const before = fs.readFileSync(settings(), "utf8");
-    const [result] = await applyPlan([perm], { tty: false, yes: true, out: sink });
+    const [result] = await applyPlan([perm], { tty: false, yes: true, ...applyUi() });
     expect(result).toMatchObject({ status: "failed", detail: "~/.claude/settings.json: permissions is not an object" });
     expect(fs.readFileSync(settings(), "utf8")).toBe(before);
   });

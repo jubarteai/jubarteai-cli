@@ -260,17 +260,17 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
 
     test("--check exits 0 when the AGENTS.md section is current", async () => {
       const result = await check();
-      expect(result.code, result.stdout).toBe(0);
-      expect(result.stdout).not.toContain("[todo]");
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stderr).not.toContain("[todo]");
     });
 
     test("--check exits 2 once the section is an older release's, and changes nothing", async () => {
       makeSectionStale();
       const staleText = box.read(agentsMd());
       const result = await check();
-      expect(result.code, result.stdout).toBe(2);
-      expect(result.stdout).toContain("[todo]");
-      expect(result.stdout).toContain("AGENTS.md");
+      expect(result.code, result.stderr).toBe(2);
+      expect(result.stderr).toContain("[todo]");
+      expect(result.stderr).toContain("AGENTS.md");
       expect(box.read(agentsMd())).toBe(staleText);
     });
 
@@ -278,7 +278,7 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       const current = box.read(agentsMd());
       makeSectionStale();
       const applied = await box.run(["update", "--yes", "--no-self-update", "--keep-mcp"]);
-      expect(applied.code, applied.stdout).toBe(0);
+      expect(applied.code, applied.stderr).toBe(0);
       expect(box.read(agentsMd())).toBe(current);
       expect((await check()).code).toBe(0);
     });
@@ -308,9 +308,9 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
     test("with nothing installed it says so and exits 0", async () => {
       await rmDir(join(box.repo, ".mcp.json"));
       const result = await check();
-      expect(result.code, result.stdout).toBe(0);
-      expect(result.stdout).toContain("not set up here yet");
-      expect(result.stdout).toContain("jubarteai init");
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stderr).toContain("not set up here yet");
+      expect(result.stderr).toContain("jubarteai init");
     });
 
     function makeSectionStale(): void {
