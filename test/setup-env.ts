@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+
 import { AGENT_SESSION_VARS } from "../src/agent-session.js";
 
 // The suites often run inside a coding agent's shell, whose variables would make the CLI refuse account changes and
@@ -32,4 +35,17 @@ if (process.platform === "win32") {
       return true;
     },
   });
+}
+
+// Windows runners point TEMP at an 8.3 short name (C:\\Users\\RUNNER~1\\AppData\\Local\\Temp). Real paths, git's output
+// and the CLI's checks use the long name, so a sandbox under the short one is "outside home" to them, and the CLI
+// refuses to start a .cmd from a path holding "~". Point the temp folder at its long name for the whole run.
+if (process.platform === "win32") {
+  try {
+    const long = realpathSync.native(tmpdir());
+    process.env.TEMP = long;
+    process.env.TMP = long;
+  } catch {
+    // keep the runner's own value
+  }
 }

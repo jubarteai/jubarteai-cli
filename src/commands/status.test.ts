@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -175,7 +175,8 @@ describe("status", () => {
   });
 
   it("reports a credentials file it can't read, exits 1, and still shows the rest", async () => {
-    mkdirSync(join(sandbox, ".config", "jubarteai"), { recursive: true });
+    // The config folder is ~/.config/jubarteai on POSIX and %APPDATA%\\jubarteai on Windows.
+    mkdirSync(dirname(credentialsPath()), { recursive: true });
     writeFileSync(credentialsPath(), `{ "token": "${TOKEN_A}" nope`);
     const result = await run(["status"]);
     expect(result.code).toBe(1);

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
 import { setTtyOpenerForTests } from "../../src/prompt.js";
@@ -96,6 +96,50 @@ const codexBody = (version: string): string => `
 if [ "$1" = "--version" ]; then echo "codex-cli ${version}"; exit 0; fi
 exit 0`;
 
+const IS_WINDOWS = process.platform === "win32";
+
+/**
+ * Windows: the same stub as a Node script (CommonJS), started by a .cmd shim. It appends the same CALL/ARG/PWD/ENV/END
+ * block to the log as the sh stub, then does what that stub's body does.
+ */
+function nodeStub(name: "npx" | "claude" | "codex", log: string, opts: { npxExit: number; codexVersion: string }): string {
+  return `"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const env = Object.entries(process.env).map(([k, v]) => k + "=" + v + "\\n").join("");
+fs.appendFileSync(${JSON.stringify(log)}, "CALL ${name}\\n" + args.map((a) => "ARG " + a + "\\n").join("") + "PWD " + process.cwd() + "\\nENV\\n" + env + "END\\n");
+const name = ${JSON.stringify(name)};
+if (name === "npx") {
+  let prev = "";
+  for (const a of args) {
+    if (prev === "-a") {
+      const d = a === "claude-code" ? ".claude/skills" : a === "windsurf" ? ".windsurf/skills" : ".agents/skills";
+      const dir = path.join(process.cwd(), d, "jubarteai");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), "# jubarteai skill\\n");
+    }
+    prev = a;
+  }
+  process.exit(${opts.npxExit});
+}
+if (name === "claude") {
+  if (args[0] === "plugin" && args[1] === "list") console.log("[]");
+  else if (args[0] === "--version") console.log("2.1.300 (Claude Code)");
+}
+if (name === "codex" && args[0] === "--version") console.log("codex-cli ${opts.codexVersion}");
+process.exit(0);
+`;
+}
+
+/** The folder holding git.exe on the current PATH (Windows), so the sandbox's narrowed PATH can keep it. */
+function gitDir(): string | null {
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (dir !== "" && existsSync(join(dir, "git.exe"))) return dir;
+  }
+  return null;
+}
+
 export function createInitSandbox(options: SandboxOptions = {}): InitSandbox {
   const saved: Record<string, string | undefined> = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   const root = realpathSync(mkdtempSync(join(tmpdir(), "jba-init-")));
@@ -113,18 +157,54 @@ export function createInitSandbox(options: SandboxOptions = {}): InitSandbox {
     claude: CLAUDE_BODY,
     codex: codexBody(options.codexVersion ?? "0.162.1"),
   };
-  for (const name of stubs) {
-    const file = join(bin, name);
-    writeFileSync(file, stubScript(name, log, bodies[name] ?? ""));
-    chmodSync(file, 0o755);
+  const realExecPath = process.execPath;
+  if (IS_WINDOWS) {
+    const stubOpts = { npxExit: options.npxExit ?? 0, codexVersion: options.codexVersion ?? "0.162.1" };
+    for (const name of stubs) {
+      const script = join(bin, `${name}.cjs`);
+      writeFileSync(script, nodeStub(name, log, stubOpts));
+      writeFileSync(join(bin, `${name}.cmd`), `@"${realExecPath}" "${script}" %*\r\n@exit /b %ERRORLEVEL%\r\n`);
+    }
+    // The CLI runs an npx it finds on PATH as `node <npx-cli.js next to node> ...`, never through the .cmd, so a PATH
+    // stub alone can't intercept it. Give this process a node whose npm is the stub: a hard link to the real node.exe
+    // (a copy across volumes) with node_modules/npm/bin/npx-cli.js beside it. restore() puts execPath back.
+    if (stubs.includes("npx")) {
+      const nodeDir = join(root, "node");
+      const npmBin = join(nodeDir, "node_modules", "npm", "bin");
+      mkdirSync(npmBin, { recursive: true });
+      writeFileSync(join(nodeDir, "node_modules", "npm", "package.json"), '{ "type": "commonjs" }\n');
+      writeFileSync(join(npmBin, "npx-cli.js"), nodeStub("npx", log, stubOpts));
+      const fakeNode = join(nodeDir, "node.exe");
+      try {
+        linkSync(realExecPath, fakeNode);
+      } catch {
+        copyFileSync(realExecPath, fakeNode);
+      }
+      process.execPath = fakeNode;
+    }
+  } else {
+    for (const name of stubs) {
+      const file = join(bin, name);
+      writeFileSync(file, stubScript(name, log, bodies[name] ?? ""));
+      chmodSync(file, 0o755);
+    }
   }
 
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.TMPDIR = join(root, "tmp");
   mkdirSync(process.env.TMPDIR);
-  process.env.PATH = `${bin}:/usr/bin:/bin`;
-  process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+  if (IS_WINDOWS) {
+    // The stubs, git and System32 (cmd.exe starts the .cmd stubs): nothing else, so no real editor is detected.
+    const system32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+    process.env.PATH = [bin, gitDir(), system32].filter((dir): dir is string => dir !== null).join(delimiter);
+    const emptyConfig = join(root, "gitconfig");
+    writeFileSync(emptyConfig, "");
+    process.env.GIT_CONFIG_GLOBAL = emptyConfig;
+  } else {
+    process.env.PATH = `${bin}:/usr/bin:/bin`;
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+  }
   process.env.GIT_CONFIG_NOSYSTEM = "1";
   for (const name of ["XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "JUBARTEAI_TOKEN", "JUBARTEAI_URL"]) delete process.env[name];
   resetEnvTokenForTests();
@@ -156,6 +236,7 @@ export function createInitSandbox(options: SandboxOptions = {}): InitSandbox {
         });
     },
     restore() {
+      process.execPath = realExecPath;
       setTtyOpenerForTests(null);
       resetEnvTokenForTests();
       for (const name of ENV_NAMES) {

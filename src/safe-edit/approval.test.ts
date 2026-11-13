@@ -72,8 +72,8 @@ describe("approvalGroups", () => {
     expect(approvalGroups(steps, HOME).map((g) => [g.title, g.note ?? null])).toEqual([
       ["Codex", null],
       ["Claude Code", null],
-      ["Repo", "/work/main"],
-      ["Repo", "/work/wt"],
+      ["Repo", resolve("/work/main")],
+      ["Repo", resolve("/work/wt")],
       ["This machine", null],
     ]);
   });

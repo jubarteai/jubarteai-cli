@@ -10,6 +10,7 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { saveSeat } from "../auth/credentials.js";
+import { credentialsPath } from "../paths.js";
 import { writeBinding } from "../binding/binding.js";
 import type { StoredSeat } from "../auth/credentials.js";
 import { routeWith } from "../cli/router.js";
@@ -242,7 +243,7 @@ describe("doctor: logins", () => {
   });
 
   it("fails when the saved logins file can't be read", async () => {
-    const credentials = join(sandbox, ".config", "jubarteai", "credentials.json");
+    const credentials = credentialsPath(); // ~/.config/jubarteai on POSIX, %APPDATA%\\jubarteai on Windows
     mkdirSync(dirname(credentials), { recursive: true });
     writeFileSync(credentials, "not json{", { mode: 0o600 });
     const { code, report } = await runJson();
@@ -304,7 +305,9 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
     expect(check(after.report, "harness:claude-code")).toMatchObject({ level: "ok", data: { permission: "configured", hooks: "configured", mcp_entries: [] } });
   });
 
-  it("recognizes the absolute hook commands init registers, and calls bare or outdated ones partial", async () => {
+  // Windows registers the bare `jubarteai` on purpose (PowerShell can't parse "node" "script"), so there is no absolute
+  // form to tell apart from a bare one there.
+  it.skipIf(process.platform === "win32")("recognizes the absolute hook commands init registers, and calls bare or outdated ones partial", async () => {
     // The process running doctor is the install init ran from: its node and bin script are what the hooks name.
     expect(resolveCliCommand()).toMatch(/^".+" ".+"$/);
     mkdirSync(join(sandbox, ".claude"));
@@ -429,9 +432,17 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
       expect(check(missing.report, "hook_commands:claude-code").level).toBe("warn");
       expect(check(missing.report, "hook_commands:claude-code").detail).toContain("not on your PATH");
 
-      const exe = join(sandbox, "bin", "jubarteai");
-      writeFileSync(exe, "#!/bin/sh\n");
-      chmodSync(exe, 0o755);
+      const bin = join(sandbox, "bin");
+      if (process.platform === "win32") {
+        // PATH holds only git's folder there; a .cmd is what PATHEXT finds.
+        mkdirSync(bin, { recursive: true });
+        writeFileSync(join(bin, "jubarteai.cmd"), "@exit /b 0\r\n");
+        process.env.PATH = `${bin};${process.env.PATH ?? ""}`;
+      } else {
+        const exe = join(bin, "jubarteai");
+        writeFileSync(exe, "#!/bin/sh\n");
+        chmodSync(exe, 0o755);
+      }
       const found = await runJson();
       expect(check(found.report, "hook_commands:claude-code")).toMatchObject({ level: "ok", detail: "found" });
     });
