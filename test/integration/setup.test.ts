@@ -99,7 +99,8 @@ describe("init and update", () => {
         hooks: Record<string, Array<{ hooks: Array<{ type: string; command: string; timeout: number }> }>>;
       };
       expect(settings.theme).toBe("dark");
-      expect(settings.permissions.allow).toEqual(["Bash(ls)", "Bash(jubarteai *)"]);
+      // Windows adds the PowerShell spelling beside the Bash rule.
+      expect(settings.permissions.allow).toEqual(IS_WINDOWS ? ["Bash(ls)", "Bash(jubarteai *)", "PowerShell(jubarteai *)"] : ["Bash(ls)", "Bash(jubarteai *)"]);
       expect(settings.hooks["SessionStart"]?.[0]?.hooks[0]?.command).toBe("echo someone-elses-hook");
       for (const { event, arg, timeout } of HOOKS) {
         const ours = (settings.hooks[event] ?? []).flatMap((group) => group.hooks).filter((hook) => hook.command.endsWith(` hook ${arg} --harness claude-code`));

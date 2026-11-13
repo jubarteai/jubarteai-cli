@@ -36,7 +36,7 @@ function snapshot(dir: string): Record<string, string> {
       const path = join(current, name);
       const info = lstatSync(path);
       if (info.isDirectory()) walk(path);
-      else if (info.isFile()) out[relative(dir, path)] = readFileSync(path, "utf8");
+      else if (info.isFile()) out[relative(dir, path).replaceAll("\\", "/")] = readFileSync(path, "utf8"); // "/" on every OS
     }
   };
   walk(dir);

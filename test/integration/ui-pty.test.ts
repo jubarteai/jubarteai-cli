@@ -95,7 +95,9 @@ describe("init on a terminal", () => {
     const account = await session.waitFor("[Y/n]");
     session.send(ENTER);
     await session.waitFor("press Enter for all: ", { after: account });
-    expect(session.raw()).not.toContain("\u001b[");
+    // ConPTY writes escape codes of its own (input mode, focus, cursor) around whatever the program prints, so on
+    // Windows "no escape code" can't be read off the terminal; the stream-level tests cover the CLI's side there.
+    if (!IS_WINDOWS) expect(session.raw()).not.toContain("\u001b[");
     const text = session.text();
     const row = /(\d+)\. Add the JubarteAI session hooks to ~\/\.claude\/settings\.json/.exec(text);
     expect(row, text).not.toBeNull();
@@ -114,7 +116,7 @@ describe("init on a terminal", () => {
     await session.waitFor("press Enter for all: ", { after: account });
     session.send(ENTER);
     expect((await session.exit).exitCode).toBe(0);
-    expect(session.raw()).not.toContain("\u001b");
+    if (!IS_WINDOWS) expect(session.raw()).not.toContain("\u001b"); // see the --plain test: ConPTY adds its own
   });
 
   ptyTest("a 60-column window gets the compact banner", async () => {

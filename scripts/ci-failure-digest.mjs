@@ -20,8 +20,14 @@ export function failureLines(report, root = "") {
   for (const file of report.testResults ?? []) {
     const failed = (file.assertionResults ?? []).filter((test) => test.status === "failed");
     for (const test of failed) {
-      const first = String(test.failureMessages?.[0] ?? "").split("\n").find((line) => line.trim() !== "") ?? "";
-      lines.push(`${rel(file.name)} > ${test.fullName ?? test.title}: ${first.trim().slice(0, 300)}`);
+      // The first lines of the error (the assertion and the start of its diff), folded onto one line.
+      const head = String(test.failureMessages?.[0] ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "" && !line.startsWith("❯") && !line.startsWith("at "))
+        .slice(0, 3)
+        .join(" | ");
+      lines.push(`${rel(file.name)} > ${test.fullName ?? test.title}: ${head.slice(0, 500)}`);
     }
     // A file that failed before any test ran (an import error, a crash in a hook) has no failed assertion.
     if (failed.length === 0 && file.status === "failed") {

@@ -271,7 +271,8 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(result.err).toContain("OpenCode: session hooks");
     expect(result.err).toContain("so jubarteai does not write any");
     expect(result.err).toContain("`jubarteai connect`");
-    expect(result.err).not.toContain(`${hookCommandPrefix} connect`);
+    // On Windows the hook command is the bare name itself, so there is no absolute form to keep out.
+    if (posix) expect(result.err).not.toContain(`${hookCommandPrefix} connect`);
   });
 });
 
