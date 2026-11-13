@@ -9,11 +9,13 @@
 // reported when the command ran from ~ or / (no single project is meant there).
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { removeFileSafely } from "../binding/gitignore.js";
 import { runCommand } from "../install/run.js";
 import { safeForDisplay } from "../output.js";
 import { editJsonFile, readConfigText, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
 import { editTomlFile, removeTomlTable, TomlConflictError } from "../safe-edit/toml-edit.js";
 import { assertSafeTarget, type RefusalReason } from "../safe-edit/file-guards.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import type { CleanupScope, ManualInstructions } from "./types.js";
 import type { HarnessId } from "../session/harness-env.js";
@@ -468,6 +470,7 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
   return {
     id,
     label,
+    group: harnessGroup(target.harness),
     files: [target.file],
     sensitive: true,
     preview,
@@ -478,6 +481,11 @@ function stepFor(finding: Finding, scope: CleanupScope, gate: CleanupGate | unde
       if (target.format === "toml") {
         try {
           result = editTomlFile(target.file, (text) => removeTomlTable(text, CODEX_TABLE), { createIfMissing: false, ...rules });
+          // A config that held only that table (init made it for Codex's fallback) goes with it.
+          if (result.status === "changed") {
+            const left = readConfigText(target.file);
+            if (left.status === "ok" && left.text.trim() === "") removeFileSafely(target.file);
+          }
         } catch (e) {
           if (e instanceof TomlConflictError) return skippedResult({ id, label }, `it sets jubarteai inline or with dotted keys, remove it by hand: ${shown}`);
           throw e;

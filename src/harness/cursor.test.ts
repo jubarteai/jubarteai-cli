@@ -2,10 +2,10 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { cursorAdapter } from "./cursor.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 let home: string;
 let savedHome: string | undefined;
@@ -208,7 +208,7 @@ describe("cursor inspect", () => {
     expect(state.permission).toBe("manual");
     const notes = state.notes.join(" ");
     expect(notes).toContain("Shell(jubarteai) is in permissions.allow");
-    expect(notes).toContain("login, logout, link, init and update");
+    expect(notes).toContain("login, logout, link, init, update and uninstall");
     expect(notes).toContain("CURSOR_AGENT");
   });
 
@@ -276,10 +276,10 @@ describe("cursor re-run (spec 6.1: re-running init is safe)", () => {
   it("re-plans the hooks as a non-sensitive step that reports already configured without a TTY; the permission stays printed", async () => {
     const first = (await cursorAdapter.hooks(ctx(withCli()))) as PlanStep[];
     expect(first.every((s) => s.sensitive)).toBe(true);
-    await applyPlan(first, { tty: false, yes: true, out: new PassThrough() });
+    await applyPlan(first, { tty: false, yes: true, ...applyUi() });
     const again = (await cursorAdapter.hooks(ctx(withCli()))) as PlanStep[];
     expect(again.map((s) => s.sensitive)).toEqual([false]);
-    const results = await applyPlan(again, { tty: false, yes: false, out: new PassThrough() });
+    const results = await applyPlan(again, { tty: false, yes: false, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["already configured"]);
     expect(isManual(await cursorAdapter.permission(ctx(withCli())))).toBe(true);
   });

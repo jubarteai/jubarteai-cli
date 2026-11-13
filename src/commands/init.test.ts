@@ -20,6 +20,10 @@ vi.setConfig({ testTimeout: 60_000 });
 
 const KEY = "jba_INITTESTKEYINITTESTKEY0001";
 const posix = process.platform !== "win32";
+/** Where the credential file sits under the sandbox root, with forward slashes. */
+const CREDENTIALS_REL = posix ? "/home/.config/jubarteai/credentials.json" : "/home/AppData/Roaming/jubarteai/credentials.json";
+/** Files holding `needle`, relative to the sandbox root, with forward slashes. */
+const filesWithKey = (root: string, needle: string): string[] => filesContaining(root, needle).map((f) => f.slice(root.length).replaceAll("\\", "/"));
 const ACME = { id: "33333333-3333-4333-8333-333333333333", slug: "acme", name: "Acme Inc" };
 const BETA = { id: "55555555-5555-4555-8555-555555555555", slug: "beta", name: "Beta LLC" };
 
@@ -33,7 +37,8 @@ function installFakeBin(): void {
   const bin = join(sb.root, "jubarteai.js");
   writeFileSync(bin, "// fake bin\n");
   process.argv[1] = bin;
-  hookCommandPrefix = `"${process.execPath}" "${realpathSync(bin)}"`;
+  // Windows registers the bare `jubarteai` (PowerShell can't parse "node" "script"; GUI apps inherit npm's shims).
+  hookCommandPrefix = posix ? `"${process.execPath}" "${realpathSync(bin)}"` : "jubarteai";
 }
 
 beforeEach(async () => {
@@ -92,9 +97,27 @@ function trustCodexProject(): void {
   writeFileSync(join(sb.home, ".codex", "config.toml"), `[projects.${JSON.stringify(sb.repo)}]\ntrust_level = "trusted"\n`);
 }
 
+const CHECKLIST_PROMPT = "press Enter for all: ";
+
+/** The rows of a checklist line prompt, as `{ number, label }`. */
+function checklistRows(prompt: string): Array<{ number: number; label: string }> {
+  return [...prompt.matchAll(/^\s+(\d+)\. (.*)$/gm)].map((m) => ({ number: Number(m[1]), label: m[2] as string }));
+}
+
+/** The answer to a checklist prompt that leaves out the rows whose label `leave` accepts (Enter when none). */
+function leaveOut(prompt: string, leave: (label: string) => boolean): string {
+  return checklistRows(prompt)
+    .filter((row) => leave(row.label))
+    .map((row) => row.number)
+    .join(" ");
+}
+
+/** A timeline row without its marker and group: `[ok]   Claude Code · Add the hooks: configured` → `Add the hooks: configured`. */
+const rowText = (line: string): string => line.replace(/^\[[A-Za-z]+\]\s+(?:[^·\n]+ · )?/, "");
+
 function summaryLine(err: string, label: RegExp): string {
-  // The plan and the prompts print step labels too; the summary line is the last one.
-  const line = err.split("\n").filter((l) => label.test(l)).pop();
+  // The prompts print step labels too; the result row is the last line that matches.
+  const line = err.split("\n").map(rowText).filter((l) => label.test(l)).pop();
   expect(line, `a summary line matching ${String(label)} in:\n${err}`).toBeDefined();
   return line as string;
 }
@@ -149,12 +172,15 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
 
     // summary: one line per step with the shared statuses, the by-hand block, then the restart line
     expect(result.err).toContain(`Bind this repo to workspace acme: ${INIT_COPY.statusConfigured}`);
-    expect(summaryLine(result.err, /^Install skill for claude-code, codex/)).toMatch(/: configured$/);
-    expect(summaryLine(result.err, /^AGENTS\.md section/)).toMatch(/: configured$/);
+    expect(summaryLine(result.err, /^Install skill for claude-code, codex/)).toMatch(/: configured(?: — .*)?$/);
+    expect(summaryLine(result.err, /^AGENTS\.md section/)).toMatch(/: configured(?: — .*)?$/);
     expect(result.err).toContain(`${INIT_COPY.codexRegisterLabel}: ${INIT_COPY.statusConfigured}`);
     expect(result.err).toContain(INIT_COPY.manualHeading);
     expect(result.err).toContain("Trust the Codex hooks");
-    expect(result.err.trimEnd().endsWith(INIT_COPY.restart)).toBe(true);
+    // the restart line, then the closing tally as the last line
+    const lines = result.err.trimEnd().split("\n");
+    expect(lines.at(-1)).toMatch(/^Done in \S+ — \d+ ok/);
+    expect(lines.slice(-3, -1)).toContain(INIT_COPY.restart);
   });
 
   it("never lets the key reach a child process, an output stream or a repo file", async () => {
@@ -167,7 +193,7 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(result.err).not.toContain(KEY);
     expect(result.out).not.toContain(KEY);
     // The key lives in the credential file and, for Codex's fallback, Codex's user-level config: nowhere else.
-    expect(filesContaining(sb.root, KEY).map((f) => f.slice(sb.root.length)).sort()).toEqual(["/home/.codex/config.toml", "/home/.config/jubarteai/credentials.json"]);
+    expect(filesWithKey(sb.root, KEY).sort()).toEqual(["/home/.codex/config.toml", CREDENTIALS_REL].sort());
   });
 
   it("is idempotent: a second run changes nothing and reports already configured", async () => {
@@ -183,7 +209,7 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     const again = await run(["init", "--yes"]);
     expect(again.code, again.err).toBe(0);
     for (const line of summarySteps(again.err)) {
-      expect(line, line).toMatch(/: (already configured|skipped \(kept: [^)]*\))$/);
+      expect(line, line).toMatch(/: (already configured|skipped \(kept: [^)]*\))(?: — .*)?$/);
     }
     expect(again.err).toContain(`Bind this repo to workspace acme: ${INIT_COPY.statusAlreadyConfigured}`);
     expect(again.err).not.toMatch(/: configured$/m);
@@ -197,7 +223,8 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(again.err).not.toContain("Trust the Codex hooks");
   });
 
-  it("a re-run after a Node upgrade rewrites the hook commands in place, never beside the old ones", async () => {
+  // The absolute "node" "script" form is POSIX's; Windows writes the bare name, which a Node upgrade doesn't change.
+  it.skipIf(!posix)("a re-run after a Node upgrade rewrites the hook commands in place, never beside the old ones", async () => {
     withEnvKey();
     expect((await run(["init", "--yes"])).code).toBe(0);
     const upgraded = join(sb.root, "v2", "jubarteai.js");
@@ -217,7 +244,7 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
         expect(commands[0]?.startsWith(`${prefix} hook `), `${file} ${event}`).toBe(true);
       }
     }
-    expect(summaryLine(again.err, /session hooks to .*\.claude\/settings\.json/)).toMatch(/: configured$/);
+    expect(summaryLine(again.err, /session hooks to .*\.claude\/settings\.json/)).toMatch(/: configured(?: — .*)?$/);
     // The Codex hooks changed, so Codex will ask to trust them again.
     expect(again.err).toContain("Trust the Codex hooks");
     // The permission rule never takes the absolute form.
@@ -244,20 +271,17 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(result.err).toContain("OpenCode: session hooks");
     expect(result.err).toContain("so jubarteai does not write any");
     expect(result.err).toContain("`jubarteai connect`");
-    expect(result.err).not.toContain(`${hookCommandPrefix} connect`);
+    // On Windows the hook command is the bare name itself, so there is no absolute form to keep out.
+    if (posix) expect(result.err).not.toContain(`${hookCommandPrefix} connect`);
   });
 });
 
-/** The step lines of a run's output: from the blank line after the plan up to the notes. */
+/** The result rows of a run's output, without markers: every `<label>: <status>` timeline row. */
 function summarySteps(err: string): string[] {
-  const lines = err.split("\n");
-  const start = lines.lastIndexOf("") >= 0 ? lines.findIndex((l, i) => l === "" && /: (configured|already configured|skipped|failed)/.test(lines[i + 1] ?? "")) : -1;
-  const out: string[] = [];
-  for (let i = start + 1; i < lines.length; i++) {
-    const line = lines[i] as string;
-    if (!/: (configured|already configured|skipped|failed)/.test(line)) break;
-    out.push(line);
-  }
+  const out = err
+    .split("\n")
+    .filter((l) => /^\[(ok|skip|FAIL)\]/.test(l))
+    .map(rowText);
   expect(out.length, err).toBeGreaterThan(0);
   return out;
 }
@@ -317,7 +341,7 @@ describe("init: accounts", () => {
     const result = await run(["init", "--yes", "--workspace", "acme"]);
     expect(result.code, result.err).toBe(0);
     expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ workspace: { slug: "acme" } });
-    expect(result.err).toContain("Using ada@example.com — Acme Inc");
+    expect(result.err).toContain("Account: ada@example.com — Acme Inc");
   });
 
   it("rejects --workspace and the browser flags together with an environment key", async () => {
@@ -356,8 +380,8 @@ describe("init: accounts", () => {
   });
 });
 
-describe("init: the prompts, in spec order", () => {
-  it("asks account, Proceed, the binding question, then each sensitive step, then cleanup", async () => {
+describe("init: the one approval", () => {
+  it("asks the account and the two choices, then shows ONE checklist with every row, and no per-step prompt", async () => {
     storeSeats();
     trustCodexProject();
     // an old key-bearing MCP entry for Claude Code, to be offered for removal
@@ -372,19 +396,18 @@ describe("init: the prompts, in spec order", () => {
       expect(index, `${needle} in ${JSON.stringify(asked)}`).toBeGreaterThanOrEqual(0);
       return index;
     };
-    const order = [
-      at("Use ada@example.com"),
-      at("Proceed?"),
-      at(INIT_COPY.shareBindingQuestion),
-      at("Allow Bash(jubarteai *)"),
-      at("Add the JubarteAI session hooks to ~/.claude/settings.json"),
-      at("Add the JubarteAI session hooks to ~/.codex/hooks.json"),
-      at("Allow network access for jubarteai in Codex"),
-      at("Share the Codex network setting"),
-      at("Remove the jubarteai MCP entry from ~/.claude.json"),
-    ];
+    const order = [at("Use ada@example.com"), at(INIT_COPY.shareBindingQuestion), at("Share the Codex network setting"), at(INIT_COPY.checklistTitle)];
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(new Set(order).size).toBe(order.length);
+    // ONE approval: a single checklist, listing every sensitive row, and no per-step "Apply …?" question anywhere
+    expect(tty.prompts.filter((p) => p.includes(CHECKLIST_PROMPT))).toHaveLength(1);
+    expect(tty.prompts.some((p) => p.includes("Apply \""))).toBe(false);
+    expect(tty.prompts.some((p) => p.startsWith("Proceed?"))).toBe(false);
+    const checklist = tty.prompts.find((p) => p.includes(CHECKLIST_PROMPT)) as string;
+    expect(checklist).toContain(INIT_COPY.checklistTitle);
+    for (const label of ["Allow Bash(jubarteai *)", "Add the JubarteAI session hooks to ~/.claude/settings.json", "Add the JubarteAI session hooks to ~/.codex/hooks.json", "Allow network access for jubarteai in Codex", "Remove the jubarteai MCP entry from ~/.claude.json"]) {
+      expect(checklist, label).toContain(label);
+    }
     // the shared answer is in effect: no address in config.json, the address in the ignored local file
     expect(json(join(sb.repo, ".jubarteai", "config.json"))).toEqual({ version: 1, workspace: { id: BETA.id, slug: "beta" } });
     expect(json(join(sb.repo, ".jubarteai", "config.local.json"))).toEqual({ version: 1, user: { email: "ada@example.com" } });
@@ -400,26 +423,55 @@ describe("init: the prompts, in spec order", () => {
     expect(tty.shown()).not.toContain("jba_");
   });
 
-  it("answering n to Proceed changes nothing and exits 0", async () => {
+  it("leaving every row out changes nothing, says Aborted. and exits 0", async () => {
     storeSeats();
-    scriptedTty((p) => (p.startsWith("Proceed?") ? "n" : ""));
+    // Leaving every row out is the same as saying no: nothing is applied.
+    scriptedTty((p) => (p.includes(CHECKLIST_PROMPT) ? leaveOut(p, () => true) : ""));
     const result = await run(["init"]);
     expect(result.code).toBe(0);
+    expect(result.err).toContain("Aborted.");
     expect(existsSync(join(sb.repo, ".jubarteai"))).toBe(false);
     expect(existsSync(join(sb.home, ".claude", "settings.json"))).toBe(false);
     expect(sb.calls().filter((c) => c.name === "npx")).toHaveLength(0);
-    expect(summaryLine(result.err, /^Bind this repo/)).toMatch(/skipped \(declined\)$/);
   });
 
-  it("a sensitive step answered n is skipped; the rest still run", async () => {
+  it("a row left out of the checklist is skipped as not selected; the rest still run", async () => {
     storeSeats();
-    scriptedTty((p) => (p.includes("session hooks") ? "n" : ""));
+    scriptedTty((p) => (p.includes(CHECKLIST_PROMPT) ? leaveOut(p, (label) => label.includes("session hooks to ~/.claude")) : ""));
     const result = await run(["init", "--keep-mcp"]);
     expect(result.code, result.err).toBe(0);
-    expect(summaryLine(result.err, /^Add the JubarteAI session hooks to ~\/\.claude/)).toMatch(/: skipped \(declined\)$/);
+    expect(result.err).toMatch(/Add the JubarteAI session hooks to ~\/\.claude\/settings\.json: skipped \(not selected\)/);
     expect((json(join(sb.home, ".claude", "settings.json")) as { hooks?: unknown }).hooks).toBeUndefined();
     expect(read(join(sb.home, ".claude", "settings.json"))).toContain("Bash(jubarteai *)");
   });
+});
+
+describe("init inside an agent's shell (R-M1, C4)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  for (const yes of [false, true]) {
+    it(`shows no checklist or question to a scripted terminal and applies no sensitive step (${yes ? "--yes" : "no flag"})`, async () => {
+      storeSeats();
+      vi.stubEnv("CLAUDECODE", "1");
+      // A terminal that would press Enter, space, y and n for anything it was asked.
+      const tty = scriptedTty(() => "y");
+      const result = await run(["init", ...(yes ? ["--yes"] : []), "--keep-mcp"]);
+      expect(result.code, result.err).toBe(0);
+      expect(tty.prompts).toEqual([]);
+      expect(tty.shown()).toBe("");
+      expect(result.err).not.toContain(INIT_COPY.checklistTitle);
+      // The non-sensitive steps ran (the binding, the AGENTS.md section, the skill); each sensitive one needs the person.
+      expect(existsSync(join(sb.repo, ".jubarteai", "config.json"))).toBe(true);
+      expect(existsSync(join(sb.repo, "AGENTS.md"))).toBe(true);
+      expect(existsSync(join(sb.home, ".claude", "settings.json"))).toBe(false);
+      expect(existsSync(join(sb.home, ".codex", "hooks.json"))).toBe(false);
+      expect(result.err).toContain("needs your approval");
+      // The binding stayed private: the share question is only ever asked of a person.
+      expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ user: { email: "ada@example.com" } });
+    });
+  }
 });
 
 describe("init: the binding", () => {
@@ -499,6 +551,49 @@ describe("init: the binding", () => {
   });
 });
 
+describe("init and link in a linked worktree (one binding per repo)", () => {
+  const worktreeIt = posix ? it : it.skip;
+  /** The sandbox repo with one commit and a linked worktree of it. */
+  function addWorktree(): string {
+    sb.git(["commit", "--allow-empty", "-q", "-m", "init"]);
+    const tree = join(sb.root, "wt");
+    sb.git(["worktree", "add", "-q", tree]);
+    return realpathSync(tree);
+  }
+
+  worktreeIt("init writes the binding and .gitignore in the main checkout and AGENTS.md in the worktree", async () => {
+    withEnvKey();
+    const tree = addWorktree();
+    const result = await run(["init", "--yes"], tree);
+    expect(result.code, result.err).toBe(0);
+    expect(existsSync(join(sb.repo, ".jubarteai", "config.json"))).toBe(true);
+    expect(read(join(sb.repo, ".gitignore"))).toContain("# jubarteai: private workspace binding");
+    expect(existsSync(join(tree, ".jubarteai"))).toBe(false);
+    expect(existsSync(join(tree, "AGENTS.md"))).toBe(true);
+    expect(existsSync(join(sb.repo, "AGENTS.md"))).toBe(false);
+  });
+
+  worktreeIt("a second worktree finds the binding already configured", async () => {
+    withEnvKey();
+    const first = addWorktree();
+    const second = join(sb.root, "wt2");
+    sb.git(["worktree", "add", "-q", second]);
+    await run(["init", "--yes"], first);
+    const again = await run(["init", "--yes"], realpathSync(second));
+    expect(again.code, again.err).toBe(0);
+    expect(again.err).toContain(`Bind this repo to workspace acme: ${INIT_COPY.statusAlreadyConfigured}`);
+  });
+
+  worktreeIt("link run in a worktree binds the main checkout", async () => {
+    storeSeats();
+    const tree = addWorktree();
+    const result = await run(["link", "--workspace", "acme"], tree);
+    expect(result.code, result.err).toBe(0);
+    expect(json(join(sb.repo, ".jubarteai", "config.json"))["workspace"]).toMatchObject({ slug: "acme" });
+    expect(existsSync(join(tree, ".jubarteai"))).toBe(false);
+  });
+});
+
 describe("init: moving a bound repo to another workspace (R-S9)", () => {
   function bindToBeta(): void {
     storeSeats();
@@ -534,7 +629,7 @@ describe("init: moving a bound repo to another workspace (R-S9)", () => {
     bindToBeta();
     const result = await run([...ARGS, "--yes"]);
     expect(result.code, result.err).toBe(0);
-    expect(summaryLine(result.err, MOVE)).toMatch(/: configured$/);
+    expect(summaryLine(result.err, MOVE)).toMatch(/: configured(?: — .*)?$/);
     expect(json(join(sb.repo, ".jubarteai", "config.json"))).toMatchObject({ workspace: { id: ACME.id, slug: "acme" } });
   });
 
@@ -593,7 +688,8 @@ describe("init: sensitive steps", () => {
     expect(result.code, result.err).toBe(0);
     const settings = json(join(sb.home, ".claude", "settings.json")) as { model: string; permissions: { allow: string[] }; hooks: { SessionStart: Array<{ hooks: Array<{ command: string }> }> } };
     expect(settings.model).toBe("x");
-    expect(settings.permissions.allow).toEqual(["Bash(ls)", "Bash(jubarteai *)"]);
+    // Windows adds the PowerShell spelling beside the Bash rule.
+    expect(settings.permissions.allow).toEqual(posix ? ["Bash(ls)", "Bash(jubarteai *)"] : ["Bash(ls)", "Bash(jubarteai *)", "PowerShell(jubarteai *)"]);
     const commands = settings.hooks.SessionStart.flatMap((g) => g.hooks.map((h) => h.command));
     expect(commands).toContain("other-tool");
     expect(commands).toContain(`${hookCommandPrefix} hook session-start --harness claude-code`);
@@ -611,7 +707,7 @@ describe("init: MCP cleanup and Codex", () => {
     const result = await run(["init", "--yes"]);
     expect(result.code, result.err).toBe(0);
     expect(json(join(sb.home, ".claude.json"))).toEqual({ mcpServers: { other: { command: "x" } } });
-    expect(summaryLine(result.err, /^Remove the jubarteai MCP entry from ~\/\.claude\.json/)).toMatch(/: configured$/);
+    expect(summaryLine(result.err, /^Remove the jubarteai MCP entry from ~\/\.claude\.json/)).toMatch(/: configured(?: — .*)?$/);
   });
 
   it("--keep-mcp leaves it in place and lists the step as turned off", async () => {
@@ -645,17 +741,24 @@ describe("init: MCP cleanup and Codex", () => {
     expect(project).not.toContain("mcp_servers");
     // no fallback registration, so the key is in the credential file only
     expect(read(join(sb.home, ".codex", "config.toml"))).not.toContain("[mcp_servers.jubarteai]");
-    expect(filesContaining(sb.root, KEY).map((f) => f.slice(sb.root.length))).toEqual(["/home/.config/jubarteai/credentials.json"]);
+    expect(filesWithKey(sb.root, KEY)).toEqual([CREDENTIALS_REL]);
   });
 
-  it("asks before writing Codex's fallback entry, shows it without the key, and writes it only on yes", async () => {
+  it("offers Codex's fallback entry as a checklist row, shows it without the key on `d`, and writes it when it stays checked", async () => {
     storeSeats();
-    const tty = scriptedTty((p) => (p.includes("Register JubarteAI in Codex") ? "y" : ""));
+    // `d` first: the checklist shows the exact entry, then Enter applies everything.
+    let looked = false;
+    const tty = scriptedTty((p) => {
+      if (!p.includes(CHECKLIST_PROMPT)) return "";
+      if (looked) return "";
+      looked = true;
+      return "d";
+    });
     const result = await run(["init", "--no-hooks", "--no-permissions", "--keep-mcp"]);
     expect(result.code, result.err).toBe(0);
-    expect(tty.prompts.some((p) => p.startsWith(`Apply "${INIT_COPY.codexRegisterLabel}"?`))).toBe(true);
-    // the entry is shown on the output stream before the question, with a placeholder for the key
-    expect(result.err).toContain('http_headers = { "Authorization" = "Bearer <your key>" }');
+    expect(tty.prompts.find((p) => p.includes(CHECKLIST_PROMPT))).toContain(INIT_COPY.codexRegisterLabel);
+    // the entry is shown before the approval, with a placeholder for the key
+    expect(tty.shown()).toContain('http_headers = { "Authorization" = "Bearer <your key>" }');
     expect(tty.shown()).not.toMatch(/jba_[A-Za-z0-9]/);
     expect(result.err).not.toMatch(/jba_[A-Za-z0-9]/);
     expect(read(join(sb.home, ".codex", "config.toml"))).toContain("jba_BETAKEYBETAKEYBETAKEY0002");
@@ -699,7 +802,7 @@ describe("init: MCP cleanup and Codex", () => {
     expect(config).toContain(`http_headers = { "Authorization" = "Bearer ${NEW_KEY}" }`);
     expect(config).not.toContain(KEY);
     expect(config.match(/\[mcp_servers\.jubarteai\]/g)).toHaveLength(1);
-    expect(summaryLine(result.err, new RegExp(`^${INIT_COPY.codexUpdateLabel.replace(/[()']/g, "\\$&")}`))).toMatch(/: configured$/);
+    expect(summaryLine(result.err, new RegExp(`^${INIT_COPY.codexUpdateLabel.replace(/[()']/g, "\\$&")}`))).toMatch(/: configured(?: — .*)?$/);
     if (posix) expect(statSync(join(sb.home, ".codex", "config.toml")).mode & 0o777).toBe(0o600);
     expect(sb.callLog()).not.toContain(NEW_KEY);
     expect(result.err).not.toContain(NEW_KEY);
@@ -716,17 +819,22 @@ describe("init: MCP cleanup and Codex", () => {
     expect(read(join(sb.home, ".codex", "config.toml"))).toBe(before);
   });
 
-  it("asks before updating the key, shows who Codex will act as, and never shows the key", async () => {
+  it("lists the key update as a row, shows who Codex will act as on `d`, and never shows the key", async () => {
     storeSeats();
     mkdirSync(join(sb.home, ".codex"), { recursive: true });
     const config = `model = "x"\n\n[mcp_servers.jubarteai]\nurl = "${fake.origin}/api/mcp"\nhttp_headers = { "Authorization" = "Bearer jba_REVOKEDKEYREVOKEDKEY0001" }\n`;
     writeFileSync(join(sb.home, ".codex", "config.toml"), config);
-    const tty = scriptedTty(() => "");
+    let looked = false;
+    const tty = scriptedTty((p) => {
+      if (!p.includes(CHECKLIST_PROMPT) || looked) return "";
+      looked = true;
+      return "d";
+    });
     const result = await run(["init", "--no-hooks", "--no-permissions", "--keep-mcp"]);
     expect(result.code, result.err).toBe(0);
-    expect(tty.prompts.some((p) => p.startsWith(`Apply "${INIT_COPY.codexUpdateLabel}"?`))).toBe(true);
-    expect(result.err).toContain("Codex will act as ada@example.com — Beta LLC on this machine");
-    expect(result.err).toContain('"Authorization" = "Bearer <your key>"');
+    expect(tty.prompts.find((p) => p.includes(CHECKLIST_PROMPT))).toContain(INIT_COPY.codexUpdateLabel);
+    expect(tty.shown()).toContain("Codex will act as ada@example.com — Beta LLC on this machine");
+    expect(tty.shown()).toContain('"Authorization" = "Bearer <your key>"');
     expect(result.err + tty.shown()).not.toMatch(/jba_[A-Za-z0-9]/);
     expect(read(join(sb.home, ".codex", "config.toml"))).toBe(config.replace("jba_REVOKEDKEYREVOKEDKEY0001", "jba_BETAKEYBETAKEYBETAKEY0002"));
   });
@@ -795,13 +903,13 @@ describe("init: MCP cleanup and Codex", () => {
     expect(result.err).toContain(INIT_COPY.codexUnreadableTitle);
   });
 
-  it("still offers the fallback entry when the opt-in is declined, and writes it on yes", async () => {
+  it("still offers the fallback entry when the opt-in row is left out, and writes it", async () => {
     storeSeats();
     trustCodexProject();
-    const tty = scriptedTty((p) => (p.includes("Allow network access for jubarteai") ? "n" : ""));
+    const tty = scriptedTty((p) => (p.includes(CHECKLIST_PROMPT) ? leaveOut(p, (label) => label.includes("Allow network access for jubarteai")) : ""));
     const result = await run(["init", "--no-hooks", "--no-permissions", "--keep-mcp"]);
     expect(result.code, result.err).toBe(0);
-    expect(tty.prompts.some((p) => p.startsWith(`Apply "${INIT_COPY.codexRegisterLabel}"?`))).toBe(true);
+    expect(tty.prompts.some((p) => p.includes(INIT_COPY.codexRegisterLabel))).toBe(true);
     expect(existsSync(join(sb.repo, ".codex", "config.toml"))).toBe(false);
     expect(read(join(sb.home, ".codex", "config.toml"))).toContain("[mcp_servers.jubarteai]");
   });

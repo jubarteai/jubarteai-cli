@@ -1,4 +1,5 @@
 import { callCommand } from "../commands/call.js";
+import { completionCommand } from "../commands/completion.js";
 import { connectCommand } from "../commands/connect.js";
 import { doctorCommand } from "../commands/doctor.js";
 import { hookCommand } from "../commands/hook.js";
@@ -9,6 +10,7 @@ import { loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
 import { statusCommand } from "../commands/status.js";
 import { TOOL_COMMANDS } from "../commands/tool.js";
+import { uninstallCommand } from "../commands/uninstall.js";
 import { updateCommand } from "../commands/update.js";
 import type { ParsedArgs, FlagSpec } from "./args.js";
 
@@ -17,7 +19,7 @@ export type CommandContext = {
   stderr: NodeJS.WritableStream;
   stdin: NodeJS.ReadableStream;
   cwd: string;
-  globals: { workspace?: string; agent?: string; pretty: boolean; yes: boolean };
+  globals: { workspace?: string; agent?: string; pretty: boolean; yes: boolean; plain?: boolean; verbose?: boolean };
 };
 
 export type CommandGroup = "account" | "tools" | "setup" | "internal";
@@ -41,6 +43,8 @@ export const COMMANDS: CommandDef[] = [
   linkCommand,
   doctorCommand,
   updateCommand,
+  uninstallCommand,
+  completionCommand,
   loginCommand,
   logoutCommand,
   statusCommand,

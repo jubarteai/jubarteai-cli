@@ -3,6 +3,10 @@ import { isatty, ReadStream as TtyReadStream, WriteStream as TtyWriteStream } fr
 
 import { PROMPT_MAX_ATTEMPTS, PROMPT_MAX_CHARS } from "./constants.js";
 import { CliError, ExitCode, UsageError } from "./errors.js";
+import { ESCAPE_TIMEOUT_MS, KeyDecoder } from "./ui/keys.js";
+import type { Key } from "./ui/keys.js";
+
+export type { Key } from "./ui/keys.js";
 
 type TtyInput = NodeJS.ReadableStream & {
   isTTY?: boolean;
@@ -192,6 +196,116 @@ async function withTerminal<T>(fallback: T, use: (handle: TtyHandle) => Promise<
   }
 }
 
+/** One key at a time from a terminal in raw mode; the iteration ends when the input does (read as Ctrl-D). */
+function keyReader(input: TtyInput): { keys: AsyncIterable<Key>; dispose(): void } {
+  const decoder = new KeyDecoder();
+  const queue: Key[] = [];
+  let wake: (() => void) | null = null;
+  let ended = false;
+  let timer: NodeJS.Timeout | undefined;
+  const signal = (): void => {
+    const resume = wake;
+    wake = null;
+    resume?.();
+  };
+  const arm = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    if (!decoder.hasPending()) return;
+    timer = setTimeout(() => {
+      queue.push(...decoder.flush());
+      signal();
+    }, ESCAPE_TIMEOUT_MS);
+    timer.unref();
+  };
+  const onData = (chunk: string | Buffer): void => {
+    queue.push(...decoder.push(typeof chunk === "string" ? chunk : chunk.toString("utf8")));
+    arm();
+    signal();
+  };
+  const onEnd = (): void => {
+    ended = true;
+    signal();
+  };
+  if (typeof (input as { setEncoding?: unknown }).setEncoding === "function") {
+    (input as unknown as { setEncoding(encoding: string): void }).setEncoding("utf8");
+  }
+  input.on("data", onData);
+  input.on("end", onEnd);
+  input.on("close", onEnd);
+  input.on("error", onEnd);
+  input.resume();
+  async function* iterate(): AsyncGenerator<Key> {
+    for (;;) {
+      const next = queue.shift();
+      if (next !== undefined) {
+        yield next;
+        continue;
+      }
+      if (ended) {
+        yield { name: "ctrl-d" };
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+    }
+  }
+  return {
+    keys: iterate(),
+    dispose() {
+      if (timer !== undefined) clearTimeout(timer);
+      input.removeListener("data", onData);
+      input.removeListener("end", onEnd);
+      input.removeListener("close", onEnd);
+      input.removeListener("error", onEnd);
+      input.pause();
+    },
+  };
+}
+
+/**
+ * Runs `use` with the terminal in raw mode and its keys decoded. `keys` is null when raw mode is unavailable (the
+ * input has no setRawMode, or it throws): the caller then uses line prompts on the same handle. Raw mode is put
+ * back and the handle closed on every way out (an answer, Ctrl-C, a throw). With no terminal at all: `fallback`.
+ */
+export async function withRawTerminal<T>(
+  fallback: T,
+  use: (handle: TtyHandle, keys: AsyncIterable<Key> | null) => Promise<T>,
+  opts: { raw?: boolean } = {},
+): Promise<T> {
+  const handle = opener();
+  if (handle === null) return fallback;
+  let raw = false;
+  try {
+    // `raw: false` (plain mode) asks for the line forms outright: the terminal stays in cooked mode.
+    if (opts.raw !== false && typeof handle.input.setRawMode === "function") {
+      try {
+        handle.input.setRawMode(true);
+        raw = true;
+      } catch {
+        raw = false;
+      }
+    }
+    if (!raw) return await use(handle, null);
+    const reader = keyReader(handle.input);
+    try {
+      return await use(handle, reader.keys);
+    } finally {
+      reader.dispose();
+    }
+  } finally {
+    if (raw) {
+      try {
+        handle.input.setRawMode?.(false);
+      } catch {
+        // The terminal is gone already.
+      }
+    }
+    handle.close();
+  }
+}
+
 /** Y/n question. Without a reachable TTY (or on end of input) it returns the default. */
 export async function confirm(question: string, opts: { defaultYes: boolean }): Promise<boolean> {
   return withTerminal(opts.defaultYes, async (handle) => {
@@ -245,4 +359,9 @@ export async function choose<T>(
     }
     return fallback.value;
   });
+}
+
+/** One visible line from an already-open terminal handle (the line forms of checklist and choice). Null at end of input. */
+export function readHandleLine(handle: TtyHandle): Promise<string | null> {
+  return readLine(handle, false);
 }

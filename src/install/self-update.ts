@@ -9,7 +9,7 @@ import { posix, resolve, win32 } from "node:path";
 import { CLI_NAME } from "../constants.js";
 import { homeDir } from "../paths.js";
 import { childEnv } from "../process-env.js";
-import { runCommand } from "./run.js";
+import { logTail, runCommand } from "./run.js";
 
 /** The registry document for the `latest` dist-tag of the package. */
 export const CLI_REGISTRY_LATEST_URL = "https://registry.npmjs.org/jubarteai/latest";
@@ -246,7 +246,7 @@ function samePath(a: string, b: string): boolean {
 
 export type CliInstallOutcome =
   | { ok: true }
-  | { ok: false; eacces: boolean; timedOut: boolean; notFound: boolean };
+  | { ok: false; eacces: boolean; timedOut: boolean; notFound: boolean; log?: string[] };
 
 /**
  * `npm install -g jubarteai@<version>` into `prefix`, the prefix the running CLI was installed under: when that is
@@ -266,7 +266,8 @@ export async function installCliVersion(version: string, prefix: string): Promis
     timeoutMs: CLI_INSTALL_TIMEOUT_MS,
   });
   if (res.code === 0 && !res.timedOut) return { ok: true };
-  return { ok: false, eacces: PERMISSION_CODES.test(`${res.stderr}\n${res.stdout}`), timedOut: res.timedOut, notFound: res.notFound };
+  const log = logTail(res);
+  return { ok: false, eacces: PERMISSION_CODES.test(`${res.stderr}\n${res.stdout}`), timedOut: res.timedOut, notFound: res.notFound, ...(log.length === 0 ? {} : { log }) };
 }
 
 export type ReexecOutcome = { started: true; code: number } | { started: false; reason: "not-found" | "spawn-failed" };
@@ -281,13 +282,15 @@ function signalCode(signal: NodeJS.Signals | null): number {
 /**
  * Runs `node <entry> <args>` — `entry` is the bin script npm just replaced in place under the running install's
  * prefix, never whatever `jubarteai` comes first on PATH (that can be another, stale copy) — with this process's own
- * Node, inheriting the terminal, and resolves with its exit code. The environment is childEnv() (never the key).
+ * Node, inheriting the terminal, and resolves with its exit code. The environment is childEnv() (never the key) with
+ * JUBARTEAI_BANNER=off, so the continued run doesn't print a second banner.
  * While it runs, SIGINT and SIGTERM don't end this process: Ctrl-C reaches the child through the terminal, and a
  * SIGTERM is passed on to it.
  */
 export async function reexecCli(entry: string, args: string[]): Promise<ReexecOutcome> {
   if (!fileExists(entry)) return { started: false, reason: "not-found" };
-  const env = childEnv();
+  // The parent already printed the banner; the new CLI continues the same run and must not print it again.
+  const env = childEnv({ JUBARTEAI_BANNER: "off" });
   return new Promise<ReexecOutcome>((done) => {
     let child: ChildProcess;
     try {

@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 
 import type { CommandContext } from "../cli/commands.js";
 import { safeForDisplay } from "../output.js";
+import { createUi } from "../ui/index.js";
 import { PROMPT_MAX_ATTEMPTS, LOGIN_TIMEOUT_MS, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
 import { promptHidden } from "../prompt.js";
@@ -140,11 +141,16 @@ async function codeFromBrowser(ctx: CommandContext, opts: { origin: string; work
       ...(opts.workspace === undefined ? {} : { workspace: opts.workspace }),
     });
     await announce(ctx, url, opts.noBrowser, deps);
-    ctx.stderr.write("Waiting for you to approve the login in the browser (Ctrl+C to cancel)...\n");
+    const waitText = "Waiting for you to approve the login in the browser (Ctrl+C to cancel)";
+    const ui = createUi(ctx.stderr, { ...(ctx.globals.plain === true ? { plain: true } : {}), ...(ctx.globals.verbose === true ? { verbose: true } : {}) });
+    // Where the code can be typed too (a terminal on stdin) the prompt owns the line, so the wait stays text; otherwise
+    // (the install one-liner pipes the script through stdin) it is a spinner on a rich terminal.
+    const spin = ui.mode.animate && (ctx.stdin as { isTTY?: boolean }).isTTY !== true;
+    if (!spin) ctx.stderr.write(`${waitText}...\n`);
     typed = typedCodeSession(ctx);
     const waiting: Array<Promise<{ code: string } | { error: "access_denied" } | { error: "timeout" }>> = [server.result];
     if (typed !== null) waiting.push(typed.code.then((code) => ({ code })));
-    const outcome = await Promise.race(waiting);
+    const outcome = spin ? await ui.spin(waitText, () => Promise.race(waiting)) : await Promise.race(waiting);
     if ("code" in outcome) return outcome.code;
     if (outcome.error === "access_denied") throw new CliError("Login denied.", ExitCode.SERVER_ERROR, "access_denied");
     throw new CliError(`Timed out waiting for the browser. ${PASTE_HINT}`, ExitCode.SERVER_ERROR, "login_timeout");

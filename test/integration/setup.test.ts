@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { startFakeServer } from "./fake-server.js";
 import type { FakeServer } from "./fake-server.js";
-import { FAKE_KEY, IS_WINDOWS, WINDOWS_STUB_REASON, createSandbox, plantJson, previousAgentsMdSection } from "./harness.js";
+import { FAKE_KEY, IS_WINDOWS, createSandbox, plantJson, previousAgentsMdSection } from "./harness.js";
 import type { Sandbox } from "./harness.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 60_000 });
@@ -45,7 +45,7 @@ function summary(stderr: string): Array<{ label: string; status: string }> {
 const settingsPath = (): string => join(box.home, ".claude", "settings.json");
 const agentsMd = (): string => join(box.repo, "AGENTS.md");
 
-describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON})`, () => {
+describe("init and update", () => {
   describe("init --yes", () => {
     beforeEach(async () => {
       await setup({ stubs: ["npx", "npm", "claude"] });
@@ -99,7 +99,8 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
         hooks: Record<string, Array<{ hooks: Array<{ type: string; command: string; timeout: number }> }>>;
       };
       expect(settings.theme).toBe("dark");
-      expect(settings.permissions.allow).toEqual(["Bash(ls)", "Bash(jubarteai *)"]);
+      // Windows adds the PowerShell spelling beside the Bash rule.
+      expect(settings.permissions.allow).toEqual(IS_WINDOWS ? ["Bash(ls)", "Bash(jubarteai *)", "PowerShell(jubarteai *)"] : ["Bash(ls)", "Bash(jubarteai *)"]);
       expect(settings.hooks["SessionStart"]?.[0]?.hooks[0]?.command).toBe("echo someone-elses-hook");
       for (const { event, arg, timeout } of HOOKS) {
         const ours = (settings.hooks[event] ?? []).flatMap((group) => group.hooks).filter((hook) => hook.command.endsWith(` hook ${arg} --harness claude-code`));
@@ -143,7 +144,8 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       expect(fake.agents[0]?.description).toBe("claude-code on acme-app");
     });
 
-    test("with Copilot present, init registers the preToolUse guard, and its own command denies an agent's login but not inbox (review R-S12)", async () => {
+    // The guard's `bash` line is POSIX shell syntax (`|| true`); Windows runs the `powershell` line instead.
+    test.skipIf(IS_WINDOWS)("with Copilot present, init registers the preToolUse guard, and its own command denies an agent's login but not inbox (review R-S12)", async () => {
       mkdirSync(join(box.home, ".copilot"), { recursive: true });
       await box.signInWithKey(fake);
       const result = await box.run(["init", "--yes"]);
@@ -236,7 +238,7 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       // Codex's own user config only, not into any project file.
       const codexConfig = join(box.home, ".codex", "config.toml");
       expect(box.read(codexConfig)).toContain("[mcp_servers.jubarteai]");
-      expect(statSync(codexConfig).mode & 0o777).toBe(0o600);
+      if (!IS_WINDOWS) expect(statSync(codexConfig).mode & 0o777).toBe(0o600);
       expect(box.findLeaks([FAKE_KEY], { allowFiles: [codexConfig] })).toEqual([]);
 
       const again = await box.run(["init", "--yes"]);
@@ -260,17 +262,17 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
 
     test("--check exits 0 when the AGENTS.md section is current", async () => {
       const result = await check();
-      expect(result.code, result.stdout).toBe(0);
-      expect(result.stdout).not.toContain("[todo]");
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stderr).not.toContain("[todo]");
     });
 
     test("--check exits 2 once the section is an older release's, and changes nothing", async () => {
       makeSectionStale();
       const staleText = box.read(agentsMd());
       const result = await check();
-      expect(result.code, result.stdout).toBe(2);
-      expect(result.stdout).toContain("[todo]");
-      expect(result.stdout).toContain("AGENTS.md");
+      expect(result.code, result.stderr).toBe(2);
+      expect(result.stderr).toContain("[todo]");
+      expect(result.stderr).toContain("AGENTS.md");
       expect(box.read(agentsMd())).toBe(staleText);
     });
 
@@ -278,7 +280,7 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       const current = box.read(agentsMd());
       makeSectionStale();
       const applied = await box.run(["update", "--yes", "--no-self-update", "--keep-mcp"]);
-      expect(applied.code, applied.stdout).toBe(0);
+      expect(applied.code, applied.stderr).toBe(0);
       expect(box.read(agentsMd())).toBe(current);
       expect((await check()).code).toBe(0);
     });
@@ -308,9 +310,9 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
     test("with nothing installed it says so and exits 0", async () => {
       await rmDir(join(box.repo, ".mcp.json"));
       const result = await check();
-      expect(result.code, result.stdout).toBe(0);
-      expect(result.stdout).toContain("not set up here yet");
-      expect(result.stdout).toContain("jubarteai init");
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stderr).toContain("not set up here yet");
+      expect(result.stderr).toContain("jubarteai init");
     });
 
     function makeSectionStale(): void {

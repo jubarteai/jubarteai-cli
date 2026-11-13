@@ -11,7 +11,8 @@ import { CODEX_REVOKED_HINT } from "../install/init-copy.js";
 import { homeDir } from "../paths.js";
 import { promptHidden, isInteractive } from "../prompt.js";
 import { envOrigin } from "../process-env.js";
-import { applyPlan, summarize } from "../safe-edit/plan.js";
+import { applyPlan } from "../safe-edit/plan.js";
+import { createUi } from "../ui/index.js";
 
 // `jubarteai login` (spec section 5.5). The key of `--with-token` is read from stdin or a hidden
 // prompt, never from argv.
@@ -91,8 +92,15 @@ async function refreshCodexAfterLogin(ctx: CommandContext, seat: StoredSeat, rep
     ctx.stderr.write(`${CODEX_REVOKED_HINT}\n`);
     return;
   }
-  const results = await applyPlan([codexUpdateStep({ home, env: process.env }, seat, url)], { tty, yes, out: ctx.stderr });
-  for (const line of summarize(results)) ctx.stderr.write(`${line}\n`);
+  const ui = createUi(ctx.stderr, { ...(ctx.globals.plain === true ? { plain: true } : {}), ...(ctx.globals.verbose === true ? { verbose: true } : {}) });
+  const results = await applyPlan([codexUpdateStep({ home, env: process.env }, seat, url)], {
+    tty,
+    yes,
+    ui,
+    timeline: ui.timeline(),
+    approval: "confirm",
+    title: "Update the key in Codex's MCP config?",
+  });
   if (!results.every((result) => result.status === "configured" || result.status === "already configured")) ctx.stderr.write(`${CODEX_REVOKED_HINT}\n`);
 }
 

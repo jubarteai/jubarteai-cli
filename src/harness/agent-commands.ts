@@ -16,7 +16,7 @@
 import { TOOL_SPECS } from "../mcp/tool-specs.js";
 
 /** The commands that change the saved account, the repo binding or harness files: never pre-approved. */
-export const PERSON_COMMANDS = ["login", "logout", "link", "init", "update"] as const;
+export const PERSON_COMMANDS = ["login", "logout", "link", "init", "update", "uninstall"] as const;
 
 /** The person commands as prose, for printed caveats: "login, logout, link, init and update". */
 export const PERSON_COMMAND_LIST = `${PERSON_COMMANDS.slice(0, -1).join(", ")} and ${PERSON_COMMANDS[PERSON_COMMANDS.length - 1]}`;

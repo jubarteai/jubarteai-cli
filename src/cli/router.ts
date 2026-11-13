@@ -1,11 +1,13 @@
 import { CLI_NAME, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { setChildOutput } from "../install/run.js";
 import { redactSecrets, safeForDisplay, transportErrorEnvelope, writeJson } from "../output.js";
 import { GLOBAL_FLAGS, parseArgs } from "./args.js";
 import type { FlagSpec, ParsedArgs } from "./args.js";
 import { COMMANDS } from "./commands.js";
 import type { CommandContext, CommandDef } from "./commands.js";
 import { renderCommandHelp, renderHelp } from "./help.js";
+import { suggest } from "./suggest.js";
 
 export { renderCommandHelp, renderHelp };
 
@@ -44,6 +46,25 @@ function checkHead(head: readonly string[], command: string): void {
   if (head.length === 0) return;
   if (head.every((token) => HEAD_INFO_FLAGS.has(token)) && head.some((token) => HEAD_RUNS_NOTHING.has(token))) return;
   throw new UsageError(`Put flags after the command name: ${CLI_NAME} ${safeForDisplay(command)} [options].`);
+}
+
+/**
+ * An MCP tool name typed as the tool is named (`search_knowledge`) runs its kebab-case command, quietly: agents and docs
+ * use both spellings. Only tool commands have aliases; `init_` and the like are just typos.
+ */
+function aliasOf(commands: readonly CommandDef[], name: string): CommandDef | undefined {
+  if (!name.includes("_")) return undefined;
+  const kebab = name.replace(/_/g, "-");
+  return commands.find((candidate) => candidate.group === "tools" && candidate.name === kebab);
+}
+
+/** `Unknown command "x".` plus the nearest public command within edit distance 2, when there is exactly one. */
+function unknownCommand(commands: readonly CommandDef[], name: string): UsageError {
+  const near = suggest(
+    name.replace(/_/g, "-"),
+    commands.filter((candidate) => candidate.group !== "internal").map((candidate) => candidate.name),
+  );
+  return new UsageError(`Unknown command "${safeForDisplay(name)}".${near === null ? "" : ` Did you mean "${near}"?`}`);
 }
 
 function hasHelpToken(args: readonly string[]): boolean {
@@ -87,7 +108,7 @@ export async function routeWith(commands: readonly CommandDef[], argv: string[],
 
     if (split.command === undefined) {
       const top = parseArgs(argv, [...GLOBAL_FLAGS, HELP_ALL_FLAG]);
-      if (top.positionals.length > 0) throw new UsageError(`Unknown command "${safeForDisplay(top.positionals[0] as string)}".`);
+      if (top.positionals.length > 0) throw unknownCommand(commands, top.positionals[0] as string);
       const extra = argv.find((token) => token !== "--" && !HEAD_INFO_FLAGS.has(token));
       if (extra !== undefined) throw new UsageError(`${safeForDisplay(extra)} needs a command: ${CLI_NAME} <command> [options].`);
       if (top.flags.version === true) {
@@ -100,8 +121,8 @@ export async function routeWith(commands: readonly CommandDef[], argv: string[],
 
     checkHead(split.head, split.command);
     const headFlags = parseArgs(split.head, [...GLOBAL_FLAGS, HELP_ALL_FLAG]).flags;
-    command = commands.find((candidate) => candidate.name === split.command);
-    if (command === undefined) throw new UsageError(`Unknown command "${safeForDisplay(split.command)}".`);
+    command = commands.find((candidate) => candidate.name === split.command) ?? aliasOf(commands, split.command);
+    if (command === undefined) throw unknownCommand(commands, split.command);
 
     const ownNames = new Set(command.flags.map((spec) => spec.name));
     const specs = [...command.flags, ...GLOBAL_FLAGS.filter((spec) => !ownNames.has(spec.name))];
@@ -123,9 +144,17 @@ export async function routeWith(commands: readonly CommandDef[], argv: string[],
     const globals: CommandContext["globals"] = { pretty, yes: flags.yes === true };
     if (typeof flags.workspace === "string") globals.workspace = flags.workspace;
     if (typeof flags.agent === "string") globals.agent = flags.agent;
+    if (flags.plain === true) globals.plain = true;
+    if (flags.verbose === true) {
+      globals.verbose = true;
+      // The programs a command starts (npm, the skills installer) show their output, one dim indented line at a time.
+      setChildOutput((line) => ctx.stderr.write(`    ${line}\n`));
+    }
     return await command.run({ ...ctx, globals }, { flags, positionals: parsed.positionals });
   } catch (error) {
     return reportError(error, command, ctx, pretty);
+  } finally {
+    setChildOutput(null);
   }
 }
 

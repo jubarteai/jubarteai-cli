@@ -5,8 +5,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { HOOK_REGISTERED_TIMEOUT_S } from "../constants.js";
 import { editJsonFile, readJsonObject } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { findMcpEntries, isUnderHome, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
+import { jsonRemovalStep, removeFromStringList, removeNestedHooks, sameRule } from "./uninstall.js";
 import type { HarnessId } from "../session/harness-env.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
 import { PERSON_COMMANDS } from "./agent-commands.js";
@@ -180,11 +182,12 @@ export function hooksPreview(spec: HooksEditSpec): string {
 }
 
 /** The plan step that writes `spec`'s hooks into `file`; non-sensitive (nothing to ask) when they are all there already. */
-export function hooksStep(args: { id: string; label: string; file: string; home: string; spec: HooksEditSpec; alreadyDone: boolean }): PlanStep {
+export function hooksStep(args: { id: string; label: string; file: string; home: string; spec: HooksEditSpec; alreadyDone: boolean; harness: HarnessId }): PlanStep {
   const { id, label, file, home, spec } = args;
   return {
     id,
     label,
+    group: harnessGroup(args.harness),
     files: [file],
     sensitive: !args.alreadyDone,
     preview: hooksPreview(spec),
@@ -352,6 +355,7 @@ async function permission(ctx: InitCtx): Promise<PlanStep | ManualInstructions |
   return {
     id,
     label,
+    group: harnessGroup(ID),
     files: [file],
     sensitive: !done,
     preview: entries,
@@ -384,7 +388,7 @@ async function hooks(ctx: InitCtx): Promise<PlanStep[] | ManualInstructions | nu
     return manualSettings(ctx, file, "Claude Code hooks", ["add these hooks:", ...hooksPreview(spec).split("\n")], `${shownPath(file, ctx.home)}: hooks has an unexpected shape`);
   }
   const done = settings.status === "ok" && inspectCommandHooks(settings.doc, spec) === "configured";
-  return [hooksStep({ id: `${ID}:hooks`, label: `Add the JubarteAI session hooks to ${shownPath(file, ctx.home)}`, file, home: ctx.home, spec, alreadyDone: done })];
+  return [hooksStep({ id: `${ID}:hooks`, label: `Add the JubarteAI session hooks to ${shownPath(file, ctx.home)}`, file, home: ctx.home, spec, alreadyDone: done, harness: ID })];
 }
 
 async function inspect(ctx: InitCtx): Promise<AdapterState> {
@@ -413,6 +417,38 @@ async function mcpCleanup(scope: CleanupScope): Promise<Array<PlanStep | ManualI
   return mcpCleanupFor(ID, scope);
 }
 
+/** Removes our permission rules (both the Bash and the PowerShell spellings, whatever this platform) and our three hooks. */
+async function uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+  const file = settingsPath(ctx.home, ctx.env);
+  const shown = shownPath(file, ctx.home);
+  const rules = permissionRules({ cliCommand: ctx.cliCommand, platform: "win32" });
+  const permission = jsonRemovalStep({
+    harness: ID,
+    id: `${ID}:uninstall-permission`,
+    label: `Remove the jubarteai permission rules from ${shown}`,
+    file,
+    home: ctx.home,
+    preview: [`${shown}:`, ...rules.allow.map((r) => `  permissions.allow -= "${r}"`), ...rules.ask.map((r) => `  permissions.ask -= "${r}"`)].join("\n"),
+    byHand: [...rules.allow, ...rules.ask].map((r) => `"${r}" (permissions.allow / permissions.ask)`),
+    edit: (doc) => {
+      const allowed = removeFromStringList(doc, ["permissions", "allow"], rules.allow, sameRule);
+      const asked = removeFromStringList(doc, ["permissions", "ask"], rules.ask, sameRule);
+      return allowed || asked;
+    },
+  });
+  const hooks = jsonRemovalStep({
+    harness: ID,
+    id: `${ID}:uninstall-hooks`,
+    label: `Remove the JubarteAI session hooks from ${shown}`,
+    file,
+    home: ctx.home,
+    preview: [`${shown}:`, ...HOOK_EVENTS.map((e) => `  hooks.${e.name}: the entry running "hook ${e.arg} --harness ${ID}"`)].join("\n"),
+    byHand: HOOK_EVENTS.map((e) => `the hooks.${e.name} entry that runs "hook ${e.arg} --harness ${ID}"`),
+    edit: (doc) => removeNestedHooks(doc, HOOK_EVENTS, ID),
+  });
+  return [permission, hooks].filter((item): item is PlanStep | ManualInstructions => item !== null);
+}
+
 export const claudeCodeAdapter: HarnessAdapter = {
   id: ID,
   label: "Claude Code",
@@ -424,4 +460,5 @@ export const claudeCodeAdapter: HarnessAdapter = {
   hooks,
   inspect,
   mcpCleanup,
+  uninstall,
 };

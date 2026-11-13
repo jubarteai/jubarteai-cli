@@ -94,4 +94,10 @@ export interface HarnessAdapter {
   mcpCleanup(scope: CleanupScope): Promise<Array<PlanStep | ManualInstructions>>;
   /** Codex network opt-in (spec §6.1 step 7). */
   extras?(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>>;
+  /**
+   * The inverse of permission(), hooks() and extras(): sensitive steps that remove only what init wrote (our hook
+   * entries, our permission rules, Codex's network opt-in), none when nothing of ours is there, and printed
+   * instructions for a file that can't be rewritten or an adapter whose entries are printed rather than written.
+   */
+  uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>>;
 }

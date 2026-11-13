@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { runCommand } from "../install/run.js";
 import { editJsonFile, readJsonObject, type JsonEditResult } from "../safe-edit/json-edit.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
 import { AGENT_RULE_WORDS, PERSON_COMMAND_LIST } from "./agent-commands.js";
 import type { AdapterState, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions, PrintedRule } from "./types.js";
@@ -228,6 +229,7 @@ function permissionStep(file: string, major: Major, done: boolean, legacy: boole
   return {
     id,
     label: LABEL,
+    group: harnessGroup(HARNESS),
     files: [file],
     sensitive: !done,
     preview: [
@@ -284,6 +286,29 @@ export const opencodeAdapter: HarnessAdapter = {
   skillAgent: "opencode",
   sessionVar: null,
   promptInjection: false,
+
+  /** OpenCode's permission syntax differs between 1.x and 2.x, so the removal is printed, not written. */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const dir = opencodeDir(ctx.env, ctx.home);
+    const names = [...new Set([...V2_FILES, ...V1_FILES])];
+    const holding = names.map((name) => join(dir, name)).filter((file) => {
+      const read = readConfig(file);
+      return read.status === "ok" ? allowsCommand(read.doc) : read.status !== "missing" && existsSync(file);
+    });
+    if (holding.length === 0) return [];
+    return [
+      {
+        kind: "manual",
+        harness: HARNESS,
+        title: "OpenCode: remove the jubarteai permission rules",
+        lines: [
+          ...holding.map((file) => `Open ${file} and delete the allow rules for ${COMMAND_PATTERNS.map((p) => `"${p}"`).join(", ")} (under permission.bash, or the permissions list in OpenCode 2.x).`),
+          "JubarteAI wrote no OpenCode hooks, so there is nothing else to remove.",
+        ],
+        reason: "OpenCode's permission syntax differs between 1.x and 2.x, so the CLI doesn't rewrite it",
+      },
+    ];
+  },
 
   async detect(env: DetectEnv): Promise<boolean> {
     return env.which("opencode") !== null || existsSync(opencodeDir(env.env, env.home));

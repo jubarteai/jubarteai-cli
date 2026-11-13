@@ -10,6 +10,8 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { saveSeat } from "../auth/credentials.js";
+import { credentialsPath } from "../paths.js";
+import { writeBinding } from "../binding/binding.js";
 import type { StoredSeat } from "../auth/credentials.js";
 import { routeWith } from "../cli/router.js";
 import { cliVersion } from "../constants.js";
@@ -241,7 +243,7 @@ describe("doctor: logins", () => {
   });
 
   it("fails when the saved logins file can't be read", async () => {
-    const credentials = join(sandbox, ".config", "jubarteai", "credentials.json");
+    const credentials = credentialsPath(); // ~/.config/jubarteai on POSIX, %APPDATA%\\jubarteai on Windows
     mkdirSync(dirname(credentials), { recursive: true });
     writeFileSync(credentials, "not json{", { mode: 0o600 });
     const { code, report } = await runJson();
@@ -303,7 +305,9 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
     expect(check(after.report, "harness:claude-code")).toMatchObject({ level: "ok", data: { permission: "configured", hooks: "configured", mcp_entries: [] } });
   });
 
-  it("recognizes the absolute hook commands init registers, and calls bare or outdated ones partial", async () => {
+  // Windows registers the bare `jubarteai` on purpose (PowerShell can't parse "node" "script"), so there is no absolute
+  // form to tell apart from a bare one there.
+  it.skipIf(process.platform === "win32")("recognizes the absolute hook commands init registers, and calls bare or outdated ones partial", async () => {
     // The process running doctor is the install init ran from: its node and bin script are what the hooks name.
     expect(resolveCliCommand()).toMatch(/^".+" ".+"$/);
     mkdirSync(join(sandbox, ".claude"));
@@ -428,9 +432,17 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
       expect(check(missing.report, "hook_commands:claude-code").level).toBe("warn");
       expect(check(missing.report, "hook_commands:claude-code").detail).toContain("not on your PATH");
 
-      const exe = join(sandbox, "bin", "jubarteai");
-      writeFileSync(exe, "#!/bin/sh\n");
-      chmodSync(exe, 0o755);
+      const bin = join(sandbox, "bin");
+      if (process.platform === "win32") {
+        // PATH holds only git's folder there; a .cmd is what PATHEXT finds.
+        mkdirSync(bin, { recursive: true });
+        writeFileSync(join(bin, "jubarteai.cmd"), "@exit /b 0\r\n");
+        process.env.PATH = `${bin};${process.env.PATH ?? ""}`;
+      } else {
+        const exe = join(bin, "jubarteai");
+        writeFileSync(exe, "#!/bin/sh\n");
+        chmodSync(exe, 0o755);
+      }
       const found = await runJson();
       expect(check(found.report, "hook_commands:claude-code")).toMatchObject({ level: "ok", detail: "found" });
     });
@@ -504,6 +516,86 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
     execFileSync("git", ["init", "-q"], { cwd: sandbox });
     const home = await runJson(["doctor", "--json"], sandbox);
     expect(check(home.report, "instructions").detail).toContain("home folder");
+  });
+});
+
+describe("doctor: worktree bindings", () => {
+  const git = (...args: string[]): void => {
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: repo, stdio: "ignore" });
+  };
+  function worktree(): string {
+    git("init", "-q");
+    git("commit", "--allow-empty", "-q", "-m", "init");
+    const tree = join(sandbox, "wt");
+    git("worktree", "add", "-q", tree);
+    return realpathSync(tree);
+  }
+
+  it("names the main checkout when the worktree inherits its binding", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("ok");
+    expect(found.detail).toContain("from the main checkout");
+    expect(found.data).toMatchObject({ workspace: "acme", inherited_from: tree });
+  });
+
+  it("notes when the worktree's own binding hides the main checkout's, and warns when they differ", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain("this worktree has its own binding");
+    expect(found.detail).toContain("acme");
+  });
+
+  it("warns, naming the main checkout's file, when only that binding is unreadable", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    writeFileSync(join(repo, ".jubarteai", "config.json"), JSON.stringify({ version: 2 }));
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain("workspace other");
+    expect(found.detail).toContain("the main checkout's");
+    expect(found.detail).toContain(join(repo, ".jubarteai", "config.json"));
+    expect(found.detail).not.toContain("jubarteai link");
+  });
+
+  it("does not tell the user to delete the valid config.json when the main checkout's config.local.json is the broken one", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: true });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    writeFileSync(join(repo, ".jubarteai", "config.local.json"), "{ not json");
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain(join(repo, ".jubarteai", "config.local.json"));
+    expect(found.detail).not.toContain(join(repo, ".jubarteai", "config.json"));
+    expect(found.detail).not.toContain("delete that file");
+  });
+
+  it("names config.json, the file read first, when both of the main checkout's files are invalid", async () => {
+    const tree = worktree();
+    writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: true });
+    writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
+    writeFileSync(join(repo, ".jubarteai", "config.json"), "{ not json");
+    writeFileSync(join(repo, ".jubarteai", "config.local.json"), "{ not json");
+    const { report } = await runJson(["doctor", "--json"], tree);
+    const found = check(report, "binding");
+    expect(found.level).toBe("warn");
+    expect(found.detail).toContain(join(repo, ".jubarteai", "config.json"));
+    expect(found.detail).not.toContain("config.local.json");
+    expect(found.detail).not.toContain("leave the other one alone");
+  });
+
+  it("has no binding check without a binding", async () => {
+    const { report } = await runJson();
+    expect(report.checks.some((c) => c.id === "binding")).toBe(false);
   });
 });
 

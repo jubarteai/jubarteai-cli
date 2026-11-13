@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { basename, isAbsolute } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { Writable } from "node:stream";
 
 import type { ParsedArgs } from "../cli/args.js";
@@ -7,6 +7,8 @@ import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentialsReport } from "../auth/credentials.js";
 import type { StoredSeat } from "../auth/credentials.js";
 import { whoami } from "../auth/whoami.js";
+import { InvalidBindingError, findBinding, mainCheckoutBinding, mainCheckoutRoot } from "../binding/binding.js";
+import type { Binding } from "../binding/binding.js";
 import { CLI_NAME, cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
 import { codexUserFile, readCodexEntry, seatForBearer } from "../harness/codex-entry.js";
@@ -24,6 +26,9 @@ import { meetsNodeFloor } from "../node-floor.js";
 import { safeForDisplay, writeJson } from "../output.js";
 import { envOrigin, takeEnvToken } from "../process-env.js";
 import { readJsonObject } from "../safe-edit/json-edit.js";
+import { truncate } from "../ui/display.js";
+import { createUi } from "../ui/index.js";
+import type { Ui } from "../ui/index.js";
 import { statusCommand } from "./status.js";
 
 // `jubarteai doctor` (spec section 5.5): `status`, then live checks. Output is plain text for people (stdout), or
@@ -315,6 +320,60 @@ function codexEntryCheck(home: string, env: NodeJS.ProcessEnv): Check | null {
   return { id, level: "ok", label, detail: `uses your saved login for ${workspace}`, data: { matched: true, workspace } };
 }
 
+/** Where this folder's binding comes from, and whether a worktree's own binding hides the main checkout's. */
+function bindingCheck(cwd: string): Check | null {
+  const id = "binding";
+  const label = "Repo binding";
+  try {
+    const found = findBinding(cwd);
+    if (found === null) return null;
+    const slug = text(found.workspace.slug);
+    if (found.inheritedFrom !== undefined) {
+      return {
+        id,
+        level: "ok",
+        label,
+        detail: `workspace ${slug}, from the main checkout ${text(found.root)}`,
+        data: { workspace: slug, inherited_from: found.inheritedFrom },
+      };
+    }
+    let main: Binding | null;
+    try {
+      main = mainCheckoutBinding(cwd);
+    } catch (error) {
+      // This worktree's own binding is fine; it is the main checkout's file that is not. `jubarteai link` here can't fix that one.
+      // Name the exact file that failed: config.json is read first, so when both are invalid this names config.json.
+      const root = mainCheckoutRoot(cwd);
+      const where =
+        error instanceof InvalidBindingError
+          ? ` (${text(error.path)})`
+          : root === null
+            ? ""
+            : ` (in ${text(root)}/.jubarteai/)`;
+      return {
+        id,
+        level: "warn",
+        label,
+        detail: `workspace ${slug}; this worktree has its own binding, but the main checkout's${where} can't be read: fix that file there`,
+        data: { workspace: slug, main_checkout_workspace: null },
+      };
+    }
+    if (main !== null && resolve(main.root) !== resolve(found.root)) {
+      const differs = main.workspace.id !== found.workspace.id;
+      return {
+        id,
+        level: differs ? "warn" : "ok",
+        label,
+        detail: `workspace ${slug}; this worktree has its own binding, and the main checkout's is ${text(main.workspace.slug)}${differs ? " (a different workspace; delete this worktree's .jubarteai folder to use the main checkout's)" : ""}`,
+        data: { workspace: slug, main_checkout_workspace: text(main.workspace.slug) },
+      };
+    }
+    return { id, level: "ok", label, detail: `workspace ${slug}`, data: { workspace: slug } };
+  } catch {
+    return { id, level: "warn", label, detail: "the binding file can't be read; run: jubarteai link", data: { workspace: null } };
+  }
+}
+
 type HarnessResult = { detected: HarnessAdapter[]; checks: Check[] };
 
 async function harnessChecks(projectRoot: string | null): Promise<HarnessResult> {
@@ -417,8 +476,15 @@ async function captureStatus(ctx: CommandContext, json: boolean): Promise<string
 
 const MARKERS: Readonly<Record<Level, string>> = { ok: "ok  ", warn: "warn", fail: "fail" };
 
-function renderChecks(checks: Check[]): string {
-  return checks.map((check) => `${MARKERS[check.level]}  ${check.label}: ${check.detail}`).join("\n");
+/** One line per check: the words `ok`/`warn`/`fail` in plain mode, a coloured glyph on a rich terminal. */
+function renderChecks(checks: Check[], ui: Ui): string {
+  if (!ui.mode.rich) return checks.map((check) => `${MARKERS[check.level]}  ${check.label}: ${check.detail}`).join("\n");
+  const glyph: Record<Level, string> = {
+    ok: ui.paint("ok", ui.glyphs.done),
+    warn: ui.paint("warn", ui.glyphs.warn),
+    fail: ui.paint("fail", ui.glyphs.fail),
+  };
+  return checks.map((check) => truncate(`${glyph[check.level]}  ${check.label}: ${check.detail}`, ui.mode.columns)).join("\n");
 }
 
 async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
@@ -431,6 +497,7 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   const harness = withDeadline<HarnessResult | null>(harnessChecks(project.root).catch(() => null), LOCAL_DEADLINE_MS, null);
   const skill = skillCheck(project.root, ctx.cwd);
   const statusText = captureStatus(ctx, json);
+  const binding = bindingCheck(ctx.cwd);
 
   const [accountResult, versionResult, harnessResult, skillResult, status] = await Promise.all([account, version, harness, skill, statusText]);
   const harnessFallback: Check = { id: "harnesses", level: "warn", label: "Harnesses", detail: "couldn't check in time", data: { detected: null } };
@@ -439,6 +506,7 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
     versionResult,
     accountResult.credentials,
     ...accountResult.seats,
+    ...(binding === null ? [] : [binding]),
     ...(harnessResult === null ? [harnessFallback] : harnessResult.checks),
     skillResult,
     instructionsCheck(project),
@@ -448,7 +516,8 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (json) {
     writeJson(ctx.stdout, { ok: !failed, checks, status: JSON.parse(status) as unknown }, { pretty: ctx.globals.pretty });
   } else {
-    ctx.stdout.write(`${status}\nChecks:\n${renderChecks(checks)}\n`);
+    const ui = createUi(ctx.stdout, { ...(ctx.globals.plain === true ? { plain: true } : {}) });
+    ctx.stdout.write(`${status}\nChecks:\n${renderChecks(checks, ui)}\n`);
   }
   return failed ? ExitCode.SERVER_ERROR : ExitCode.OK;
 }

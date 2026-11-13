@@ -25,9 +25,13 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homeDir } from "../paths.js";
+import { MACHINE_GROUP, harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep, StepResult } from "../safe-edit/plan.js";
+import { HARNESS_IDS } from "../session/harness-env.js";
+import type { HarnessId } from "../session/harness-env.js";
+import type { ManualInstructions } from "../harness/types.js";
 import { SKILL_AGENT_DIRS, SKILL_NAME, SKILL_REPO, SKILLS_CLI_MIN_NODE, SKILLS_CLI_VERSION } from "./constants.js";
-import { runCommand, which } from "./run.js";
+import { logTail, runCommand, which } from "./run.js";
 
 export type SkillChannel = {
   kind: "plugin-user" | "plugin-project" | "skills-project" | "skills-global" | "hand-copy";
@@ -214,6 +218,7 @@ function infoStep(id: string, label: string, status: StepResult["status"], detai
     id,
     label,
     kind: "info",
+    group: MACHINE_GROUP,
     files,
     sensitive: false,
     apply: async (): Promise<StepResult> => ({ id, label, status, detail }),
@@ -583,7 +588,7 @@ async function userNpmRegistry(): Promise<string> {
   }
 }
 
-async function runSkillsAdd(scope: Scope, root: string | null, tail: string[]): Promise<{ ok: boolean; why: string }> {
+async function runSkillsAdd(scope: Scope, root: string | null, tail: string[]): Promise<{ ok: boolean; why: string; log?: string[] }> {
   const cwd = scope === "global" || root === null ? homeDir() : root;
   const res = await runCommand("npx", ["-y", `skills@${SKILLS_CLI_VERSION}`, "add", SKILL_REPO, ...tail], {
     cwd,
@@ -594,9 +599,13 @@ async function runSkillsAdd(scope: Scope, root: string | null, tail: string[]): 
     timeoutMs: SKILLS_ADD_TIMEOUT_MS,
   });
   if (res.notFound) return { ok: false, why: "npx not found" };
-  if (res.timedOut) return { ok: false, why: "npx skills add timed out" };
-  if (res.code !== 0) return { ok: false, why: "npx skills add error" };
+  if (res.timedOut) return { ok: false, why: "npx skills add timed out", log: logTail(res) };
+  if (res.code !== 0) return { ok: false, why: "npx skills add error", log: logTail(res) };
   return { ok: true, why: "" };
+}
+
+function withLog(result: StepResult, log: string[]): StepResult {
+  return log.length === 0 ? result : { ...result, log };
 }
 
 const LOCK_NOTE = "The skills CLI created skills-lock.json in the project root; commit it with the skill, or add it to .gitignore.";
@@ -617,15 +626,16 @@ function skillUpdateStep(
   return {
     id,
     label,
+    group: harnessGroup(harnessesForAgent(copy.owner)[0] ?? "claude-code"),
     files,
     sensitive: false,
     apply: async (): Promise<StepResult> => {
-      const result = (status: StepResult["status"], detail: string): StepResult => ({ id, label, status, detail });
+      const result = (status: StepResult["status"], detail: string, log?: string[]): StepResult => ({ id, label, status, detail, ...(log === undefined || log.length === 0 ? {} : { log }) });
       if (!nodeMeetsFloor(ctx.nodeVersion)) return result("skipped", nodeSkipDetail(ctx.nodeVersion, copy.scope, ctx.root, tail));
       const hadLock = lockPath !== null && existsSync(lockPath);
       const run = await runSkillsAdd(copy.scope, ctx.root, tail);
       const lockNote = copy.scope === "project" && lockPath !== null && !hadLock && existsSync(lockPath) ? ` ${LOCK_NOTE}` : "";
-      if (!run.ok) return result("failed", `${run.why}${lockNote}`);
+      if (!run.ok) return result("failed", `${run.why}${lockNote}`, run.log);
       const tree = skillTreeSha(copy.dir);
       const restart = "Restart your IDE(s) to pick up the updated skill.";
       if (ctx.latest === null || ctx.latest.tree === null) return result("configured", `re-installed ${copy.shown}. ${restart}${lockNote}`);
@@ -747,6 +757,7 @@ function pluginSteps(
     return {
       id: sid,
       label,
+      group: harnessGroup("claude-code"),
       files,
       sensitive: false,
       apply: async (): Promise<StepResult> => {
@@ -765,8 +776,8 @@ function pluginSteps(
           cwd,
           timeoutMs: PLUGIN_COMMAND_TIMEOUT_MS,
         });
-        if (run.timedOut) return result("failed", `claude plugin update timed out (${e.scope})`);
-        if (run.code !== 0) return result("failed", `claude plugin update error (${e.scope})`);
+        if (run.timedOut) return withLog(result("failed", `claude plugin update timed out (${e.scope})`), logTail(run));
+        if (run.code !== 0) return withLog(result("failed", `claude plugin update error (${e.scope})`), logTail(run));
 
         // The outcome comes from a re-listing of every entry, not from the command's output,
         // so an update that landed on another entry is reported as such.
@@ -833,6 +844,12 @@ function duplicateAndLinkSteps(discovery: PluginDiscovery, copies: SkillCopy[], 
   return steps;
 }
 
+/** The harnesses a skills-installer agent id serves: one editor, or (GitHub Copilot) VS Code and Copilot CLI. */
+export function harnessesForAgent(agent: string): HarnessId[] {
+  if (agent === "github-copilot") return ["vscode", "copilot-cli"];
+  return (HARNESS_IDS as readonly string[]).includes(agent) ? [agent as HarnessId] : [];
+}
+
 function initStep(opts: { root: string | null; agents: string[]; copies: SkillCopy[]; plugins: PluginDiscovery; nodeVersion: string }): PlanStep {
   const id = "skill-install";
   const scope: Scope = opts.root === null ? "global" : "project";
@@ -866,21 +883,117 @@ function initStep(opts: { root: string | null; agents: string[]; copies: SkillCo
     }
   }
   if (scope === "project" && lockPath !== null) files.push(lockPath);
+  const harnesses = [...new Set(missing.flatMap((agent) => harnessesForAgent(agent)))];
   return {
     id,
     label,
+    // One `skills add -a a -a b` serves several harnesses: it shows under the first and narrows to those still checked.
+    group: harnessGroup(harnesses[0] ?? "claude-code"),
+    alsoGroups: harnesses.slice(1),
+    narrow: (keep) => {
+      const kept = missing.filter((agent) => harnessesForAgent(agent).some((h) => keep.has(h)));
+      return kept.length === 0 ? null : initStep({ ...opts, agents: kept });
+    },
     files,
     sensitive: false,
     apply: async (): Promise<StepResult> => {
-      const result = (status: StepResult["status"], detail: string): StepResult => ({ id, label, status, detail });
+      const result = (status: StepResult["status"], detail: string, log?: string[]): StepResult => ({ id, label, status, detail, ...(log === undefined || log.length === 0 ? {} : { log }) });
       if (!nodeMeetsFloor(opts.nodeVersion)) return result("skipped", nodeSkipDetail(opts.nodeVersion, scope, opts.root, tail));
       const hadLock = lockPath !== null && existsSync(lockPath);
       const run = await runSkillsAdd(scope, opts.root, tail);
       const lockNote = scope === "project" && lockPath !== null && !hadLock && existsSync(lockPath) ? ` ${LOCK_NOTE}` : "";
-      if (!run.ok) return result("failed", `${run.why}${lockNote}`);
+      if (!run.ok) return result("failed", `${run.why}${lockNote}`, run.log);
       return result("configured", `installed for ${missing.join(", ")}${lockNote}`);
     },
   };
+}
+
+async function runSkillsRemove(scope: Scope, root: string | null, tail: string[]): Promise<{ ok: boolean; why: string; log?: string[] }> {
+  const cwd = scope === "global" || root === null ? homeDir() : root;
+  const res = await runCommand("npx", ["-y", `skills@${SKILLS_CLI_VERSION}`, "remove", SKILL_NAME, ...tail], {
+    cwd,
+    // Same pins as `add`: the user's registry and no project .npmrc / node options steering the fetch.
+    env: { npm_config_registry: await userNpmRegistry(), ...NODE_OPTIONS_OFF },
+    timeoutMs: SKILLS_ADD_TIMEOUT_MS,
+  });
+  if (res.notFound) return { ok: false, why: "npx not found" };
+  if (res.timedOut) return { ok: false, why: "npx skills remove timed out", log: logTail(res) };
+  if (res.code !== 0) return { ok: false, why: "npx skills remove error", log: logTail(res) };
+  return { ok: true, why: "" };
+}
+
+/**
+ * The steps that take the skill away, the inverse of `init`'s install: `claude plugin uninstall` for each plugin install at
+ * user scope and this project's scope, `npx skills remove jubarteai` for each copy the skills installer made (it owns its
+ * lock file), and printed instructions for a hand copy or a link (the CLI never deletes a folder it didn't create).
+ * Every step is sensitive: uninstall changes nothing without `--yes` or an approval.
+ */
+export async function planSkillRemoval(opts: { root: string | null; cwd?: string }): Promise<Array<PlanStep | ManualInstructions>> {
+  const startDir = opts.cwd ?? process.cwd();
+  const keys = await claudeProjectKeys(opts.root, startDir);
+  const listCwd = opts.root === null ? homeDir() : startDir;
+  const plugins = await discoverPlugins(listCwd, keys);
+  const out: Array<PlanStep | ManualInstructions> = [];
+
+  plugins.entries
+    .filter((e) => e.bucket === "user" || e.bucket === "current")
+    .forEach((e, i) => {
+      const id = `skill-plugin-uninstall-${i}`;
+      const label = `Uninstall plugin ${e.id} (${e.scope})`;
+      out.push({
+        id,
+        label,
+        group: harnessGroup("claude-code"),
+        files: e.installPath === "" ? [] : [e.installPath],
+        sensitive: true,
+        preview: `claude plugin uninstall ${e.id} --scope ${e.scope}`,
+        flag: "--yes",
+        apply: async (): Promise<StepResult> => {
+          const result = (status: StepResult["status"], detail: string, log?: string[]): StepResult => ({ id, label, status, detail, ...(log === undefined || log.length === 0 ? {} : { log }) });
+          if (e.scope !== "user" && (!isAbsolute(e.projectPath) || !isDir(e.projectPath))) return result("failed", `the project folder of the ${e.scope} install is gone`);
+          const run = await runCommand("claude", ["plugin", "uninstall", e.id, "--scope", e.scope], {
+            cwd: e.scope === "user" ? listCwd : e.projectPath,
+            timeoutMs: PLUGIN_COMMAND_TIMEOUT_MS,
+          });
+          if (run.notFound) return result("failed", "claude not found");
+          if (run.timedOut) return result("failed", `claude plugin uninstall timed out (${e.scope})`);
+          if (run.code !== 0) return result("failed", `claude plugin uninstall error (${e.scope})`, logTail(run));
+          return result("configured", `uninstalled (${e.scope})`);
+        },
+      });
+    });
+
+  discoverSkillCopies(opts.root, null).forEach((copy, i) => {
+    const owner = harnessesForAgent(copy.owner)[0] ?? "claude-code";
+    if (copy.channel !== "npx") {
+      out.push({
+        kind: "manual",
+        harness: owner,
+        title: `Skill ${copy.channel === "link" ? "link" : "hand copy"} (${copy.scope})`,
+        lines: [`Delete ${copy.shown}${copy.channel === "link" ? " (a link: delete the link, not what it points to)" : ""}.`],
+        reason: "the CLI removes only copies the skills installer made",
+      });
+      return;
+    }
+    const id = `skill-remove-${i}`;
+    const label = `Remove the skill (${copy.scope}, ${copy.shown})`;
+    const tail = copy.scope === "global" ? ["-g", "-a", copy.owner, "-y"] : ["-a", copy.owner, "-y"];
+    out.push({
+      id,
+      label,
+      group: harnessGroup(owner),
+      files: [copy.dir],
+      sensitive: true,
+      preview: `npx -y skills@${SKILLS_CLI_VERSION} remove ${SKILL_NAME} ${tail.join(" ")}`,
+      flag: "--yes",
+      apply: async (): Promise<StepResult> => {
+        const run = await runSkillsRemove(copy.scope, opts.root, tail);
+        if (!run.ok) return { id, label, status: "failed", detail: run.why, ...(run.log === undefined || run.log.length === 0 ? {} : { log: run.log }) };
+        return { id, label, status: "configured", detail: "removed" };
+      },
+    });
+  });
+  return out;
 }
 
 /**

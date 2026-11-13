@@ -2,7 +2,7 @@ import { refuseInAgentSession } from "../agent-session.js";
 import type { ParsedArgs } from "../cli/args.js";
 import type { CommandContext, CommandDef } from "../cli/commands.js";
 import { readCredentials } from "../auth/credentials.js";
-import { convertBinding, writeBinding } from "../binding/binding.js";
+import { bindingRootFor, convertBinding, writeBinding } from "../binding/binding.js";
 import type { BindingWriteResult } from "../binding/binding.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
 import {
@@ -64,8 +64,10 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (wantsShared && wantsPrivate) throw new UsageError(INIT_COPY.bindingConflict);
   const form = wantsShared ? true : wantsPrivate ? false : undefined;
 
-  const { root } = projectRootOf(ctx.cwd);
-  if (root === null) throw new UsageError(INIT_COPY.linkNeedsProject);
+  const { root: projectRoot } = projectRootOf(ctx.cwd);
+  if (projectRoot === null) throw new UsageError(INIT_COPY.linkNeedsProject);
+  // In a linked worktree the binding lives in the main checkout, shared by every worktree of the repo.
+  const root = bindingRootFor(projectRoot);
   const existing = bindingAt(root);
 
   // A form flag alone converts the binding that is there; it needs no login and doesn't touch the workspace.

@@ -3,6 +3,7 @@ import { readFileSync, readSync, statSync } from "node:fs";
 import { ARG_INPUT_MAX_BYTES } from "../constants.js";
 import { UsageError } from "../errors.js";
 import { safeForDisplay } from "../output.js";
+import { suggest } from "./suggest.js";
 
 export type FlagType = "string" | "number" | "boolean" | "string[]" | "json";
 
@@ -13,6 +14,12 @@ export type FlagSpec = {
   /** Also accept `--<name>-file <path|->`, which reads the value from a file (or stdin for `-`). */
   file?: boolean;
   hidden?: boolean;
+  /**
+   * Booleans only: what `--no-<name>` does, for a flag whose negated form is the one people type (on by default, or a
+   * filter where false means something). Completion lists `--no-<name>` with this text. The parser accepts `--no-<name>`
+   * for every boolean either way.
+   */
+  negation?: string;
 };
 
 /**
@@ -31,6 +38,8 @@ export const GLOBAL_FLAGS: FlagSpec[] = [
   { name: "agent", type: "string", description: "Agent id to act as (default: this session's agent)" },
   { name: "pretty", type: "boolean", description: "Indent the JSON output" },
   { name: "yes", type: "boolean", description: "Accept every default without asking" },
+  { name: "plain", type: "boolean", description: "Plain text output: no colours, banner or animation (also NO_COLOR, TERM=dumb)" },
+  { name: "verbose", type: "boolean", description: "Show the output of the programs the command runs (npm, the skills installer)" },
   { name: "help", type: "boolean", description: "Show help" },
   { name: "version", type: "boolean", description: "Print the version" },
 ];
@@ -137,6 +146,7 @@ export function parseArgs(argv: string[], specs: FlagSpec[], options: ParseOptio
     byName.set(spec.name, spec);
     if (spec.file === true && spec.type !== "boolean") byFileName.set(`${spec.name}-file`, spec);
   }
+  const flagNames = specs.filter((spec) => spec.hidden !== true).map((spec) => spec.name);
   const reader = new Reader(options.readStdin ?? defaultReadStdin);
   const flags: Record<string, unknown> = {};
   const origin = new Map<string, "value" | "file">();
@@ -188,7 +198,10 @@ export function parseArgs(argv: string[], specs: FlagSpec[], options: ParseOptio
     }
 
     const found = name === "" ? null : resolve(name);
-    if (found === null) throw new UsageError(`Unknown flag --${safeForDisplay(name)}`);
+    if (found === null) {
+      const near = name === "" ? null : suggest(name, flagNames);
+      throw new UsageError(`Unknown flag --${safeForDisplay(name)}${near === null ? "" : `. Did you mean "--${near}"?`}`);
+    }
     const { spec } = found;
 
     if (found.kind === "negation") {

@@ -176,9 +176,10 @@ describe("login: Codex's key after a re-login revoked the old one (R-M2)", () =>
     for (const [answer, rewritten] of [["", true], ["n", false]] as const) {
       plantCodex(entry(OLD));
       signedIn(OLD);
-      const tty = scriptedTty((prompt) => (prompt.startsWith("Proceed?") ? "y" : answer));
+      const tty = scriptedTty(() => answer);
       const result = await run(["login"]);
-      expect(tty.prompts.some((p) => p.startsWith('Apply "Update the key in Codex'))).toBe(true);
+      // One choice input, Yes preselected: no per-step prompt after it.
+      expect(tty.prompts).toEqual(["Update the key in Codex's MCP config? [Y/n/d] "]);
       expect(readFileSync(codexFile(), "utf8")).toBe(rewritten ? entry(NEW) : entry(OLD));
       expect(result.err.includes(CODEX_REVOKED_HINT)).toBe(!rewritten);
       expect(result.err + tty.shown()).not.toMatch(/jba_[A-Za-z0-9]/);

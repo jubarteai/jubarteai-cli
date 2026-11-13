@@ -7,12 +7,10 @@ import {
   checkClosingLines,
   cliInstallFailedLines,
   cliVersionRow,
-  closingLines,
+  closingNotes,
   countResults,
-  formatRow,
   infoRow,
   nothingInstalledLines,
-  resultLines,
   todoRow,
   updateExitCode,
 } from "./update-report.js";
@@ -21,20 +19,6 @@ const result = (status: StepResult["status"], detail?: string): StepResult =>
   detail === undefined ? { id: status, label: `Step ${status}`, status } : { id: status, label: `Step ${status}`, status, detail };
 
 describe("rows", () => {
-  it("uses update.sh's plain markers", () => {
-    expect(formatRow({ level: "todo", name: "AGENTS.md section", text: "would change" })).toBe("  [todo] AGENTS.md section: would change");
-    expect(formatRow({ level: "ok", name: "CLI", text: "1.0.0, up to date" })).toBe("  [ok]   CLI: 1.0.0, up to date");
-    expect(formatRow({ level: "warn", name: "x", text: "y" })).toBe("  [warn] x: y");
-    expect(formatRow({ level: "info", name: "x", text: "y" })).toBe("  [info] x: y");
-  });
-
-  it("neutralises control characters and redacts anything key-shaped in a row", () => {
-    const line = formatRow({ level: "warn", name: "a\u001b[31mb", text: "key jba_FAKEFAKEFAKE here\nnext" });
-    expect(line).not.toContain("\u001b");
-    expect(line).not.toContain("jba_FAKE");
-    expect(line).not.toContain("\n");
-  });
-
   it("describes the CLI version states; a newer one is a change, an unknown one an advisory", () => {
     expect(cliVersionRow({ kind: "current", current: "1.0.0", latest: "1.0.0" })).toEqual({ level: "ok", name: "CLI", text: "1.0.0, up to date" });
     const newer = cliVersionRow({ kind: "newer", current: "1.0.0", latest: "1.1.0" });
@@ -78,26 +62,13 @@ describe("closing", () => {
   it("counts ok, skipped and failed like update.sh's closing line, plus failures outside the plan", () => {
     const counts = countResults([result("configured"), result("already configured"), result("skipped"), result("failed", "x")], 2, 1);
     expect(counts).toEqual({ ok: 2, skipped: 1, failed: 2, warnings: 2 });
-    expect(closingLines(counts, { changed: true })).toEqual([
-      "Done — 2 ok, 1 skipped, 2 failed, 2 warning(s)",
-      "   2 step(s) failed — see above.",
-      `   ${UPDATE_COPY.restart}`,
-    ]);
-    expect(closingLines({ ok: 0, skipped: 0, failed: 0, warnings: 0 }, { changed: false })).toEqual(["Done — 0 ok, 0 skipped, 0 failed, 0 warning(s)"]);
+    expect(closingNotes(counts, { changed: true })).toEqual(["2 step(s) failed — see above.", UPDATE_COPY.restart]);
+    expect(closingNotes({ ok: 0, skipped: 0, failed: 0, warnings: 0 }, { changed: false })).toEqual([]);
   });
 
   it("closes a --check run with the pending count or 'Nothing to update'", () => {
     expect(checkClosingLines(3, 1)).toEqual(["3 change(s) pending — run without --check to apply", "   1 warning(s) above."]);
     expect(checkClosingLines(0, 0)).toEqual(["Nothing to update"]);
-  });
-
-  it("prints the plan's results with summarize's wording", () => {
-    expect(resultLines([result("skipped", "needs confirmation")])).toEqual(["  Step skipped: skipped (needs confirmation)"]);
-    expect(resultLines([result("failed", "npx error")])).toEqual(["  Step failed: failed: npx error"]);
-    expect(resultLines([result("configured", "updated 1.7.0 -> 1.7.1 (user); restart Claude Code or run /reload-plugins to load it")])).toEqual([
-      "  Step configured: configured — updated 1.7.0 -> 1.7.1 (user); restart Claude Code or run /reload-plugins to load it",
-    ]);
-    expect(resultLines([result("already configured")])).toEqual(["  Step already configured: already configured"]);
   });
 
   it("points at jubarteai init when nothing is installed (D30)", () => {

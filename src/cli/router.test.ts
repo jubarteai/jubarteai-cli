@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { cliVersion } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { runCommand } from "../install/run.js";
 import type { ParsedArgs } from "./args.js";
 import type { CommandContext, CommandDef } from "./commands.js";
 import { renderCommandHelp, renderHelp, routeWith } from "./router.js";
@@ -132,6 +133,58 @@ describe("routeWith: help and version", () => {
   });
 });
 
+describe("routeWith: did you mean and aliases", () => {
+  const registry = [
+    command({ name: "search-knowledge", flags: [{ name: "branches", type: "string[]", description: "b" }, { name: "query", type: "string", description: "q" }] }),
+    command({ name: "init", group: "setup" }),
+    command({ name: "hook", group: "internal" }),
+  ];
+
+  it("runs a snake_case tool name as its kebab command, silently", async () => {
+    const seen = { value: null as Seen };
+    const h = harness([command({ name: "search-knowledge", flags: [{ name: "query", type: "string", description: "q" }] }, seen)]);
+    expect(await h.run(["search_knowledge", "--query", "x"])).toBe(0);
+    expect(seen.value?.args.flags.query).toBe("x");
+    expect(h.err()).toBe("");
+  });
+
+  it("does not alias setup commands: init_ is a typo", async () => {
+    const h = harness(registry);
+    expect(await h.run(["in_it"])).toBe(2);
+    expect(h.err()).toContain('Unknown command "in_it".');
+  });
+
+  it("suggests the nearest command and exits 2 without running anything", async () => {
+    const seen = { value: null as Seen };
+    const h = harness([command({ name: "search-knowledge" }, seen), command({ name: "init", group: "setup" })]);
+    expect(await h.run(["serch-knowledge"])).toBe(2);
+    expect(h.err()).toContain('Unknown command "serch-knowledge". Did you mean "search-knowledge"?');
+    expect(h.err()).toContain('Run "jubarteai --help" for usage.');
+    expect(seen.value).toBeNull();
+  });
+
+  it("offers no suggestion at distance 3, for an internal command, or for a key-shaped word (which is redacted)", async () => {
+    const far = harness(registry);
+    expect(await far.run(["searchknowled"])).toBe(2);
+    expect(far.err()).not.toContain("Did you mean");
+    const internal = harness(registry);
+    expect(await internal.run(["hok"])).toBe(2);
+    expect(internal.err()).not.toContain("hook");
+    const key = harness(registry);
+    expect(await key.run([SECRET])).toBe(2);
+    expect(key.err()).not.toContain(SECRET);
+  });
+
+  it("suggests the nearest flag", async () => {
+    const h = harness(registry);
+    expect(await h.run(["search-knowledge", "--branchs", "main"])).toBe(2);
+    expect(h.err()).toContain('Unknown flag --branchs. Did you mean "--branches"?');
+    const far = harness(registry);
+    expect(await far.run(["search-knowledge", "--zzzzzz"])).toBe(2);
+    expect(far.err()).not.toContain("Did you mean");
+  });
+});
+
 describe("routeWith: dispatch", () => {
   it("accepts global flags after the command and hands them to the command", async () => {
     const seen = { value: null as Seen };
@@ -140,6 +193,46 @@ describe("routeWith: dispatch", () => {
     expect(seen.value?.globals).toEqual({ workspace: "acme", agent: "agent-1", pretty: true, yes: true });
     expect(seen.value?.args.flags.query).toBe("x");
     expect(seen.value?.args.positionals).toEqual(["extra"]);
+  });
+
+  it("hands --plain and --verbose to the command, and --plain before the command name is still refused", async () => {
+    const seen = { value: null as Seen };
+    const h = harness([command({ name: "init" }, seen)]);
+    expect(await h.run(["init", "--plain", "--verbose"])).toBe(0);
+    expect(seen.value?.globals).toEqual({ pretty: false, yes: false, plain: true, verbose: true });
+    expect(await h.run(["--plain", "init"])).toBe(2);
+    expect(h.err()).toContain("Put flags after the command name");
+  });
+
+  it("--verbose streams child output to stderr for the command's run only", async () => {
+    const h = harness([
+      {
+        name: "init",
+        summary: "s",
+        group: "setup",
+        flags: [],
+        async run() {
+          await runCommand(process.execPath, ["-e", "console.log('npm says hi')"], { timeoutMs: 10_000 });
+          return 0;
+        },
+      },
+    ]);
+    await h.run(["init", "--verbose"]);
+    expect(h.err()).toContain("    npm says hi");
+    const quiet = harness([
+      {
+        name: "init",
+        summary: "s",
+        group: "setup",
+        flags: [],
+        async run() {
+          await runCommand(process.execPath, ["-e", "console.log('npm says hi')"], { timeoutMs: 10_000 });
+          return 0;
+        },
+      },
+    ]);
+    await quiet.run(["init"]);
+    expect(quiet.err()).not.toContain("npm says hi");
   });
 
   it("defaults the globals", async () => {

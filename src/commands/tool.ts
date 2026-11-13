@@ -106,6 +106,7 @@ function toFlagSpec(flag: ToolFlag): FlagSpec {
   const out: FlagSpec = { name: flag.name, type: flag.type, description: flag.description };
   if (flag.file === true) out.file = true;
   if (flag.hidden === true) out.hidden = true;
+  if (flag.negation !== undefined) out.negation = flag.negation;
   return out;
 }
 

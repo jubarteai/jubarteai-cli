@@ -38,6 +38,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { findMcpEntries, isUnderHome, mcpCleanupFor, shownPath, type CleanupHarness } from "./mcp-cleanup.js";
 import type { CleanupScope, ManualInstructions } from "./types.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 const isWindows = process.platform === "win32";
 const posix = it.skipIf(isWindows);
@@ -86,9 +87,8 @@ function manuals(items: Array<PlanStep | ManualInstructions>): ManualInstruction
   return items.filter((i): i is ManualInstructions => "kind" in i);
 }
 
-const sink = { write: () => true } as unknown as NodeJS.WritableStream;
 async function run(items: Array<PlanStep | ManualInstructions>): Promise<StepResult[]> {
-  return applyPlan(steps(items), { tty: false, yes: true, out: sink });
+  return applyPlan(steps(items), { tty: false, yes: true, ...applyUi() });
 }
 async function cleanup(harness: CleanupHarness, s: CleanupScope): Promise<Array<PlanStep | ManualInstructions>> {
   return mcpCleanupFor(harness, s);

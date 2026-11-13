@@ -440,6 +440,25 @@ export function setTomlKey(text: string, table: string, key: string, value: stri
 }
 
 /**
+ * Removes `key` from `table` when its one-line value is exactly `value` (a key the person set to something else is
+ * theirs and stays), and the table itself when that leaves it empty. Throws TomlConflictError when the table is also
+ * defined inline or with dotted keys.
+ */
+export function removeTomlKey(text: string, table: string, key: string, value: string | boolean | number): { text: string; changed: boolean } {
+  const target = namedTable(table);
+  const lines = parseLines(text);
+  if (hasInlineDefinition(lines, target)) throw new TomlConflictError();
+  const existing = findKey(lines, target, key);
+  if (existing === undefined || existing.last !== lines.indexOf(existing)) return { text, changed: false };
+  const { from, to } = valueSpan(existing);
+  if (parseValue(existing.content.slice(from, to)) !== value) return { text, changed: false };
+  let out = text.slice(0, existing.start) + text.slice(existing.end);
+  const left = getTomlTable(out, table);
+  if (left !== null && left.body.trim() === "") out = removeTomlTable(out, table).text;
+  return { text: out, changed: true };
+}
+
+/**
  * Apply `edit` to the TOML text in `file`, written back atomically (exact mode, guards against symlinks, other owners and
  * hard links) only when `edit` says it changed something. "refused" carries the guard's reason, or "invalid-json" for a
  * file that is not UTF-8 text or is too big to be a config; nothing is written then.

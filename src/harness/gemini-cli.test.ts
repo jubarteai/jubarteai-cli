@@ -106,7 +106,8 @@ describe("permission", () => {
     expect(step.files).toEqual([settings()]);
     expect((await step.apply()).status).toBe("configured");
     expect(readSettings()).toEqual({ tools: { allowed: ENTRIES } });
-    expect(statSync(settings()).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX mode bits to check (it reports 0o666 for any writable file).
+    if (process.platform !== "win32") expect(statSync(settings()).mode & 0o777).toBe(0o600);
     const before = readFileSync(settings(), "utf8");
     expect((await step.apply()).status).toBe("already configured");
     expect(readFileSync(settings(), "utf8")).toBe(before);
@@ -209,7 +210,7 @@ describe("permission: agent commands only (review R-M1)", () => {
     put(JSON.stringify({ tools: { allowed: [LEGACY] } }));
     const legacy = await geminiCliAdapter.inspect(ctx());
     expect(legacy.permission).toBe("missing");
-    expect(legacy.notes.join(" ")).toContain("login, logout, link, init and update");
+    expect(legacy.notes.join(" ")).toContain("login, logout, link, init, update and uninstall");
     put(JSON.stringify({ tools: { allowed: [LEGACY, ...ENTRIES] } }));
     const both = await geminiCliAdapter.inspect(ctx());
     expect(both.permission).toBe("configured");

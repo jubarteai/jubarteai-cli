@@ -4,9 +4,11 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   MAX_OUTPUT_CHARS,
+  logTail,
   resolveInvocation,
   runCommand,
   runCommandSync,
+  setChildOutput,
   which,
   whichWith,
   type Probe,
@@ -168,6 +170,35 @@ describe.skipIf(!POSIX)("runCommand", () => {
     expect(res.code).toBeNull();
     expect(res.stderr).toMatch(/^could not start \([A-Za-z0-9_-]+\)$/);
     expect(res.notFound).toBe(false);
+  });
+});
+
+describe.skipIf(!POSIX)("child output streaming and the log tail", () => {
+  afterEach(() => setChildOutput(null));
+
+  it("streams each line, redacted and made safe, only while a handler is set", async () => {
+    fakeExe("talker", `process.stdout.write("first\\nkey ${FAKE_KEY} here\\n"); process.stderr.write("esc \\u001b[31mred\\npartial");`);
+    const quiet: string[] = [];
+    await runCommand("talker", [], { timeoutMs: 10_000 });
+    expect(quiet).toEqual([]);
+    const lines: string[] = [];
+    setChildOutput((line) => lines.push(line));
+    await runCommand("talker", [], { timeoutMs: 10_000 });
+    expect(lines).toContain("first");
+    expect(lines).toContain("key [redacted] here");
+    expect(lines).toContain("esc ?[31mred");
+    expect(lines).toContain("partial");
+    expect(lines.join("\n")).not.toContain(FAKE_KEY);
+  });
+
+  it("logTail keeps the last lines of both streams, redacted and safe", () => {
+    const stdout = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+    const tail = logTail({ stdout, stderr: `boom ${FAKE_KEY}\n\u001b[2Jclear\n\n` }, 15);
+    expect(tail).toHaveLength(15);
+    expect(tail.at(-1)).toBe("?[2Jclear");
+    expect(tail.at(-2)).toBe("boom [redacted]");
+    expect(tail.join("\n")).not.toContain(FAKE_KEY);
+    expect(logTail({ stdout: "", stderr: "" })).toEqual([]);
   });
 });
 

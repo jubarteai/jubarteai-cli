@@ -10,6 +10,7 @@ import { vscodeAdapter } from "../harness/vscode.js";
 import type { InitCtx } from "../harness/types.js";
 import { applyPlan } from "../safe-edit/plan.js";
 import { planHookRefresh } from "./hook-refresh.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 const OLD = '"/old/node" "/old/bin/jubarteai.js"';
 const NEW = '"/new/node" "/new/bin/jubarteai.js"';
@@ -51,7 +52,7 @@ describe("planHookRefresh", () => {
     expect(plan.steps[0]).toMatchObject({ sensitive: true, files: [file] });
     expect(plan.steps[0]?.preview).toContain(NEW.replaceAll('"', '\\"'));
 
-    const results = await applyPlan(plan.steps, { tty: false, yes: true, agentSession: null, out: { write: () => true } as unknown as NodeJS.WritableStream });
+    const results = await applyPlan(plan.steps, { tty: false, yes: true, agentSession: null, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["configured"]);
     expect(fs.readFileSync(file, "utf8")).toContain(NEW.replaceAll('"', '\\"'));
     expect(fs.readFileSync(file, "utf8")).not.toContain("/old/node");
@@ -105,7 +106,7 @@ describe("planHookRefresh", () => {
       fs.mkdirSync(path.dirname(copilotFile()), { recursive: true });
       fs.writeFileSync(copilotFile(), text);
     };
-    const apply = (steps: Parameters<typeof applyPlan>[0]) => applyPlan(steps, { tty: false, yes: true, agentSession: null, out: { write: () => true } as unknown as NodeJS.WritableStream });
+    const apply = (steps: Parameters<typeof applyPlan>[0]) => applyPlan(steps, { tty: false, yes: true, agentSession: null, ...applyUi() });
 
     it("adds the missing guard to a file whose session hooks are current: one step, labelled as adding the guard (review R-S16)", async () => {
       write(sessionOnly("jubarteai"));
@@ -116,7 +117,7 @@ describe("planHookRefresh", () => {
       expect(step).toMatchObject({ sensitive: true, files: [copilotFile()] });
       expect(step?.preview).toContain("hooks.preToolUse: jubarteai hook pre-tool-use --harness vscode");
       // The file comes right after "guard to", so the commands listed after it can't read as "update to <file>" (review R-N19).
-      expect(step?.label).toBe(`Add the preToolUse guard to ${copilotFile()} (denies an agent's login, logout, link, init and update)`);
+      expect(step?.label).toBe(`Add the preToolUse guard to ${copilotFile()} (denies an agent's login, logout, link, init, update and uninstall)`);
 
       const results = await apply(plan.steps);
       expect(results.map((r) => r.status)).toEqual(["configured"]);

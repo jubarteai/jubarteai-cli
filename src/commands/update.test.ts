@@ -32,6 +32,7 @@ import { routeWith } from "../cli/router.js";
 import { HOOK_EVENTS } from "../harness/claude-code.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import type { HarnessAdapter, ManualInstructions } from "../harness/types.js";
+import { harnessGroup } from "../safe-edit/plan.js";
 import type { PlanStep } from "../safe-edit/plan.js";
 import { AGENTS_MD_MARKERS, SKILL_REPO, SKILLS_CLI_VERSION, agentsMdSnippet, agentsMdSnippetHistory } from "../install/constants.js";
 import { cliEntryFor } from "../install/self-update.js";
@@ -215,6 +216,9 @@ function currentProjectCopy(): string {
   return dir;
 }
 
+/** Answers the plan's one question: every row stays checked (what pressing Enter does). */
+const approveAll: NonNullable<UpdateDeps["approve"]> = async (groups) => ({ kind: "apply", checked: new Set(groups.flatMap((g) => g.rows.map((r) => r.key))) });
+
 class Capture extends Writable {
   text = "";
   override _write(chunk: Buffer | string, _enc: BufferEncoding, cb: (error?: Error | null) => void): void {
@@ -224,16 +228,16 @@ class Capture extends Writable {
 }
 
 type RunOpts = { cwd?: string; deps?: Partial<UpdateDeps> };
-type RunResult = { code: number; out: string; err: string; fetchLatest: ReturnType<typeof vi.fn>; confirm: ReturnType<typeof vi.fn> };
+type RunResult = { code: number; out: string; err: string; fetchLatest: ReturnType<typeof vi.fn>; choice: ReturnType<typeof vi.fn> };
 
 async function update(argv: string[] = [], opts: RunOpts = {}): Promise<RunResult> {
   const fetchLatest = vi.fn(async () => CURRENT_CLI as string | null);
-  const confirm = vi.fn(async () => true);
+  const choiceFn = vi.fn(async (): Promise<"yes" | "no"> => "yes");
   const deps: Partial<UpdateDeps> = {
     fetchLatest,
     currentVersion: () => CURRENT_CLI,
     isTty: () => false,
-    confirm,
+    choice: choiceFn as unknown as UpdateDeps["choice"],
     latestSkill: sb.latest,
     nodeVersion: "24.22.3",
     cliCommand: () => ({ command: NEW_HOOK_COMMAND, npx: false }),
@@ -250,10 +254,11 @@ async function update(argv: string[] = [], opts: RunOpts = {}): Promise<RunResul
   });
   return {
     code,
-    out: stdout.text,
-    err: stderr.text,
+    // update's report is human progress, so it goes to stderr (P3); `out` is what stdout got (nothing).
+    out: stderr.text,
+    err: stdout.text,
     fetchLatest: (opts.deps?.fetchLatest as ReturnType<typeof vi.fn> | undefined) ?? fetchLatest,
-    confirm: (opts.deps?.confirm as ReturnType<typeof vi.fn> | undefined) ?? confirm,
+    choice: (opts.deps?.choice as ReturnType<typeof vi.fn> | undefined) ?? choiceFn,
   };
 }
 
@@ -316,7 +321,7 @@ describe.skipIf(!posix)("update: self-update", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain(`a newer CLI is available: ${CURRENT_CLI} -> ${NEWER_CLI}`);
     // --yes: no prompt for the install either.
-    expect(r.confirm).not.toHaveBeenCalled();
+    expect(r.choice).not.toHaveBeenCalled();
     // Into the prefix the running CLI came from, so that copy is the one updated.
     expect(npmInstalls().map((c) => c.argv)).toEqual([["install", "-g", "--prefix", sb.prefix, `jubarteai@${NEWER_CLI}`]]);
     // From HOME, so the project's own .npmrc can't pick the registry for a global install.
@@ -330,14 +335,18 @@ describe.skipIf(!posix)("update: self-update", () => {
     expect(npxAdds()).toEqual([]);
   });
 
-  it("asks Proceed? [Y/n] on a terminal without --yes, and passes the re-executed CLI's exit code back", async () => {
+  it("asks Install? on a terminal without --yes, and passes the re-executed CLI's exit code back", async () => {
     stub("npm", { globalPrefix: sb.prefix });
     stubEntry({ exitCode: 1 });
-    const confirm = vi.fn(async () => true);
-    const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true, confirm } });
+    const choiceFn = vi.fn(async (_ui: unknown, input: { details?: () => string[] }) => {
+      // "Show the exact changes" prints what will run.
+      expect(input.details?.()).toEqual([`This will run: npm install -g jubarteai@${NEWER_CLI} (into ${sb.prefix})`]);
+      return "yes" as const;
+    });
+    const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true, choice: choiceFn as unknown as UpdateDeps["choice"], approve: approveAll } });
 
-    expect(confirm).toHaveBeenCalledWith("Proceed?", { defaultYes: true });
-    expect(r.out).toContain(`This will run: npm install -g jubarteai@${NEWER_CLI} (into ${sb.prefix})`);
+    expect(choiceFn).toHaveBeenCalledTimes(1);
+    expect((choiceFn.mock.calls as unknown as unknown[][])[0]?.[1]).toMatchObject({ question: `Install jubarteai@${NEWER_CLI}?`, options: ["yes", "no", "show"], defaultIndex: 0 });
     // npm's global prefix is the running one: no --prefix.
     expect(npmInstalls().map((c) => c.argv)).toEqual([["install", "-g", `jubarteai@${NEWER_CLI}`]]);
     expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update"]]);
@@ -348,10 +357,10 @@ describe.skipIf(!posix)("update: self-update", () => {
     stub("npm");
     staleProjectCopy();
     // No to the CLI install, yes to the plan that follows.
-    const confirm = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
-    const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true, confirm } });
+    const choiceFn = vi.fn(async () => "no" as const);
+    const r = await update([], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI), isTty: () => true, choice: choiceFn as unknown as UpdateDeps["choice"], approve: approveAll } });
 
-    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(choiceFn).toHaveBeenCalledTimes(1);
     expect(npmInstalls()).toEqual([]);
     expect(r.out).toContain("kept the installed CLI");
     expect(npxAdds()).toHaveLength(1);
@@ -375,7 +384,8 @@ describe.skipIf(!posix)("update: self-update", () => {
 
     expect(r.out).toContain('npm install -g --prefix "$HOME/.local" jubarteai@0.2.0');
     expect(r.out).toContain('export PATH="$HOME/.local/bin:$PATH"');
-    expect(r.out).not.toContain("npm error");
+    // npm's last lines are shown under the failed row, as text only.
+    expect(r.out).toContain("npm error code EACCES");
     expect(npxAdds()).toHaveLength(1);
     expect(r.out).toContain("1 failed");
     expect(r.code).toBe(1);
@@ -432,13 +442,43 @@ describe.skipIf(!posix)("update: self-update", () => {
     const r = await update(["--no-self-update"]);
 
     expect(r.fetchLatest).not.toHaveBeenCalled();
-    expect(r.out).toContain("[info] CLI: 0.1.0 (self-update skipped)");
+    expect(r.out).toContain("CLI: 0.1.0 (self-update skipped)");
     expect(r.code).toBe(0);
   });
 
   it("re-exec arguments never carry --check or anything but update's own flags", () => {
     expect(reexecArgs({ yes: false, keepMcp: false })).toEqual(["update", "--no-self-update"]);
     expect(reexecArgs({ yes: true, keepMcp: true })).toEqual(["update", "--no-self-update", "--yes", "--keep-mcp"]);
+  });
+
+  it("the re-executed CLI gets --plain, --verbose and --show-changes from update's own command line", async () => {
+    stub("npm", { globalPrefix: sb.prefix });
+    stubEntry({ exitCode: 0 });
+    const r = await update(["--yes", "--plain", "--verbose", "--show-changes"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI) } });
+
+    expect(r.code, r.out).toBe(0);
+    expect(npmInstalls()).toHaveLength(1);
+    expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes", "--plain", "--verbose", "--show-changes"]]);
+  });
+
+  it("the re-executed CLI gets no output flag the command line didn't give", async () => {
+    stub("npm", { globalPrefix: sb.prefix });
+    stubEntry({ exitCode: 0 });
+    const r = await update(["--yes"], { deps: { fetchLatest: vi.fn(async () => NEWER_CLI) } });
+
+    expect(r.code, r.out).toBe(0);
+    expect(entryCalls().map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes"]]);
+  });
+
+  it("re-exec arguments keep the output choices: --plain, --verbose and --show-changes", () => {
+    expect(reexecArgs({ yes: false, keepMcp: false, plain: true, verbose: true, showChanges: true })).toEqual([
+      "update",
+      "--no-self-update",
+      "--plain",
+      "--verbose",
+      "--show-changes",
+    ]);
+    expect(reexecArgs({ yes: false, keepMcp: false, plain: false, verbose: false, showChanges: false })).toEqual(["update", "--no-self-update"]);
   });
 });
 
@@ -480,32 +520,33 @@ describe.skipIf(!posix)("update: applying (D28)", () => {
     const r = await update();
 
     expect(r.code).toBe(0);
-    expect(r.confirm).not.toHaveBeenCalled();
+    expect(r.choice).not.toHaveBeenCalled();
     expect(npxAdds().map((c) => c.argv)).toEqual([["-y", `skills@${SKILLS_CLI_VERSION}`, "add", SKILL_REPO, "-a", "claude-code", "-y"]]);
     expect(npxAdds()[0]?.cwd).toBe(sb.project);
     expect(skillTreeSha(dir)).toBe(sb.latest.tree);
     expect(read("AGENTS.md")).toBe(`# Demo\n\n${CURRENT_SECTION}`);
     expect(r.out).toContain("Restart your IDE(s) to pick up the updated skill.");
-    expect(r.out).toContain("Done — 2 ok, 0 skipped, 0 failed");
+    expect(r.out).toMatch(/Done in [^ ]+ — 2 ok\n/);
     expect(r.out).toContain("Restart your editor or agent so it picks up the changes.");
 
     // a second run right after an update finds nothing to do, and never asks
     const again = await update([], { deps: { isTty: () => true } });
     expect(again.code).toBe(0);
     expect(again.out).toContain("Everything is up to date");
-    expect(again.confirm).not.toHaveBeenCalled();
+    expect(again.choice).not.toHaveBeenCalled();
     expect(npxAdds()).toHaveLength(1);
   });
 
-  it("on a terminal asks Proceed? once; --yes skips the prompt", async () => {
+  it("on a terminal asks the one question; --yes skips it", async () => {
     staleProjectCopy();
-    const asked = await update(["--no-self-update"], { deps: { isTty: () => true } });
-    expect(asked.confirm).toHaveBeenCalledWith("Proceed?", { defaultYes: true });
+    const approve = vi.fn(approveAll);
+    const asked = await update(["--no-self-update"], { deps: { isTty: () => true, approve } });
+    expect(approve).toHaveBeenCalledTimes(1);
     expect(asked.code).toBe(0);
 
     staleProjectCopy();
-    const yes = await update(["--yes", "--no-self-update"], { deps: { isTty: () => true } });
-    expect(yes.confirm).not.toHaveBeenCalled();
+    await update(["--yes", "--no-self-update"], { deps: { isTty: () => true, approve } });
+    expect(approve).toHaveBeenCalledTimes(1);
     expect(npxAdds()).toHaveLength(2);
   });
 
@@ -550,16 +591,20 @@ describe.skipIf(!posix)("update: MCP cleanup (D3, D5)", () => {
     expect(r.out).toContain("removed the jubarteai entry");
   });
 
-  it("asks before the removal on a terminal (its own prompt) and keeps the entry when declined", async () => {
+  it("lists the removal as a row of the one question and keeps the entry when it is unchecked", async () => {
     signIn();
     const file = claudeJsonWithEntry();
     const before = readFileSync(file, "utf8");
-    const confirm = vi.fn(async (question: string) => question === "Proceed?");
-    const r = await update(["--no-self-update"], { deps: { isTty: () => true, confirm } });
+    // The one question lists the removal as a row; the person unchecks it.
+    const approve = vi.fn(async (groups: Parameters<NonNullable<UpdateDeps["approve"]>>[0]) => ({
+      kind: "apply" as const,
+      checked: new Set(groups.flatMap((g) => g.rows).filter((row) => !row.label.includes("MCP entry")).map((row) => row.key)),
+    }));
+    const r = await update(["--no-self-update"], { deps: { isTty: () => true, approve } });
 
-    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(approve).toHaveBeenCalledTimes(1);
     expect(readFileSync(file, "utf8")).toBe(before);
-    expect(r.out).toContain("skipped (declined)");
+    expect(r.out).toContain("skipped (not selected)");
     expect(r.code).toBe(0);
   });
 
@@ -633,6 +678,7 @@ describe.skipIf(!posix)("update: Codex instructions are read by their code, neve
     const cleanup: PlanStep = {
       id: "mcp-cleanup:codex:project:x",
       label: "Remove the jubarteai MCP entry from .codex/config.toml",
+      group: harnessGroup("codex"),
       files: [],
       sensitive: true,
       async apply() {
@@ -651,6 +697,7 @@ describe.skipIf(!posix)("update: Codex instructions are read by their code, neve
       hooks: async () => null,
       inspect: async () => ({ permission: "n/a", hooks: "n/a", mcpEntries: [], notes: [] }),
       mcpCleanup: async () => [cleanup],
+      uninstall: async () => [],
       extras: async () => [
         manual("Network access, reworded", "a reason worded some new way", CODEX_CODES.networkManual),
         manual("Hooks, reworded", "trust them some new way", CODEX_CODES.trustHooks),
@@ -708,7 +755,7 @@ describe.skipIf(!posix)("update: no key, ever (D2, D3, D21)", () => {
 
     // 2. the rest, in this process: check, then apply (prompting, so every preview is printed)
     const check = await update(["--check"]);
-    const applied = await update([], { deps: { isTty: () => true } });
+    const applied = await update([], { deps: { isTty: () => true, approve: approveAll } });
     outputs.push(check.out, check.err, applied.out, applied.err);
     expect(applied.code).toBe(0);
     expect(npxAdds()).toHaveLength(1);
@@ -725,7 +772,7 @@ describe.skipIf(!posix)("update: no key, ever (D2, D3, D21)", () => {
     const r = await update([FAKE_TOKEN]);
     expect(r.code).toBe(2);
     expect(`${r.out}${r.err}`).not.toContain(FAKE_TOKEN);
-    expect(r.err).toContain("update takes no arguments, and never a key");
+    expect(r.out).toContain("update takes no arguments, and never a key");
   });
 
   it("the update sources never read credentials, resolve a seat, take the env key, call whoami or claude mcp", () => {

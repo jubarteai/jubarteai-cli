@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, rmdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { BINDING_VERSION } from "../constants.js";
 import { CliError, ExitCode, UsageError } from "../errors.js";
+import { gitTop, linkedWorktree } from "../git/layout.js";
 import { homeDir } from "../paths.js";
 import { childEnv } from "../process-env.js";
 import { SafeEditError, writeFileAtomic } from "../safe-edit/atomic-write.js";
@@ -22,6 +23,11 @@ export type Binding = {
   workspace: { id: string; slug: string };
   email: string | null;
   shared: boolean;
+  /**
+   * Set when this binding was read from the main checkout because the linked worktree the command ran in
+   * has none of its own: the worktree's top level. `root` and `dir` then name the main checkout.
+   */
+  inheritedFrom?: string;
 };
 
 const BINDING_DIR = ".jubarteai";
@@ -46,8 +52,18 @@ function hasControlCharacter(value: string): boolean {
   return false;
 }
 
+/** A binding file that exists but is not valid. `path` is the exact file (config.json or config.local.json). */
+export class InvalidBindingError extends UsageError {
+  readonly path: string;
+  constructor(path: string) {
+    super(`The workspace binding at ${path} is not valid. Fix it, or run: jubarteai link`);
+    this.name = "InvalidBindingError";
+    this.path = path;
+  }
+}
+
 function bindingError(path: string): UsageError {
-  return new UsageError(`The workspace binding at ${path} is not valid. Fix it, or run: jubarteai link`);
+  return new InvalidBindingError(path);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -126,16 +142,7 @@ function readBindingAt(root: string): Binding | null {
   return { dir, root, workspace, email, shared: true };
 }
 
-/** The nearest folder at or above `start` that holds `.git` (a directory, or a file for worktrees and submodules). */
-function gitTopLevel(start: string): string | null {
-  let current = resolve(start);
-  for (;;) {
-    if (existsSync(join(current, ".git"))) return current;
-    const parent = dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
-}
+const gitTopLevel = gitTop;
 
 function isInsideOrEqual(child: string, parent: string): boolean {
   const rel = relative(parent, child);
@@ -151,10 +158,10 @@ function isInsideOrEqual(child: string, parent: string): boolean {
  */
 export function findBinding(cwd: string): Binding | null {
   const start = resolve(cwd);
-  const gitTop = gitTopLevel(start);
+  const top = gitTopLevel(start);
   let ceiling: string;
-  if (gitTop !== null) {
-    ceiling = gitTop;
+  if (top !== null) {
+    ceiling = top;
   } else {
     const home = resolve(homeDir());
     ceiling = isInsideOrEqual(start, home) ? home : start;
@@ -162,12 +169,83 @@ export function findBinding(cwd: string): Binding | null {
   let current = start;
   for (;;) {
     const found = readBindingAt(current);
-    if (found !== null) return found;
-    if (current === ceiling) return null;
+    if (found !== null) return withMainEmail(found, top);
+    if (current === ceiling) break;
     const parent = dirname(current);
-    if (parent === current) return null;
+    if (parent === current) break;
     current = parent;
   }
+  return top === null ? null : inheritFromMain(top);
+}
+
+/** The main checkout of the linked worktree at `top`, when `top` is one that checks out against git's back-link. */
+function mainCheckoutOf(top: string): string | null {
+  return linkedWorktree(top)?.mainCheckout ?? null;
+}
+
+/**
+ * A linked worktree with no binding of its own uses the main checkout's: read-only, the same file checks
+ * (regular files, this user's, size-capped), and only from a worktree that git's own back-link confirms.
+ */
+function inheritFromMain(top: string): Binding | null {
+  const main = mainCheckoutOf(top);
+  if (main === null || resolve(main) === resolve(top)) return null;
+  const found = readBindingAt(main);
+  return found === null ? null : { ...found, inheritedFrom: top };
+}
+
+/**
+ * The main checkout's own binding for a command run inside a linked worktree (null outside one, or when the
+ * main checkout has none). `doctor` uses it to say that a worktree's own binding shadows the main checkout's.
+ */
+export function mainCheckoutBinding(cwd: string): Binding | null {
+  const main = mainCheckoutRoot(cwd);
+  return main === null ? null : readBindingAt(main);
+}
+
+/** The main checkout's folder for a command run inside a linked worktree (null outside one). Reads no binding file. */
+export function mainCheckoutRoot(cwd: string): string | null {
+  const top = gitTopLevel(resolve(cwd));
+  if (top === null) return null;
+  const main = mainCheckoutOf(top);
+  if (main === null || resolve(main) === resolve(top)) return null;
+  return main;
+}
+
+/**
+ * A shared binding committed to the repo has no email in the worktree (it lives in the ignored
+ * `config.local.json` of the checkout that ran `init`). Take it from the main checkout's binding, but
+ * only when that names the same workspace. Best effort: the main checkout's files are not this worktree's
+ * binding, so one that is unreadable or invalid there must not fail the worktree's own valid binding —
+ * the email just stays unknown (`doctor` reports the main checkout's file on its own).
+ */
+function withMainEmail(found: Binding, top: string | null): Binding {
+  if (found.email !== null || top === null || resolve(found.root) !== resolve(top)) return found;
+  const main = mainCheckoutOf(top);
+  if (main === null || resolve(main) === resolve(top)) return found;
+  let mainBinding: Binding | null;
+  try {
+    mainBinding = readBindingAt(main);
+  } catch {
+    return found;
+  }
+  if (mainBinding === null || mainBinding.workspace.id !== found.workspace.id || mainBinding.email === null) return found;
+  return { ...found, email: mainBinding.email };
+}
+
+/**
+ * The folder a binding is written to for a command run in `cwd`: the main checkout when `cwd` is inside
+ * a linked worktree that has one (so every worktree of a repo shares one binding), else the git top
+ * level, else `cwd` itself. A worktree that already has a binding of its own keeps writing it: that is the
+ * one `findBinding` reads there, so writing the main checkout's instead would change nothing the worktree sees.
+ */
+export function bindingRootFor(cwd: string): string {
+  const start = resolve(cwd);
+  const top = gitTopLevel(start);
+  if (top === null) return start;
+  const main = mainCheckoutOf(top);
+  if (main === null || hasBindingFiles(top)) return top;
+  return main;
 }
 
 function writeRepoFile(path: string, data: string): void {
@@ -265,6 +343,44 @@ function applyBinding(root: string, input: BindingInput, reason?: "tracked" | "e
   changed = removeFileSafely(localPath).changed || changed;
   changed = removeIgnoreBlock(localIgnorePath, LOCAL_IGNORE_BLOCK, { deleteWhenEmpty: true }).changed || changed;
   return { changed, form: "private" };
+}
+
+/**
+ * Whether git tracks `.jubarteai/config.json` in `root`: a committed (shared) binding is removed in a commit, not here.
+ * Same fail-closed answer as the writer's.
+ */
+export function bindingIsTracked(root: string): boolean {
+  return isTrackedByGit(resolve(root));
+}
+
+/** True when `<root>/.jubarteai/config.json` exists (valid or not): there is a binding to take away. */
+export function hasBindingFiles(root: string): boolean {
+  try {
+    return lstatSync(join(root, BINDING_DIR, CONFIG_FILE)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Removes the binding init or link wrote in `root`: config.json, config.local.json, the folder's own .gitignore block, the
+ * folder once empty, and the private-binding lines in the repo's .gitignore. Every other file in `.jubarteai/` stays.
+ */
+export function removeBinding(root: string): { changed: boolean } {
+  const absolute = resolve(root);
+  const dir = join(absolute, BINDING_DIR);
+  let changed = false;
+  changed = removeFileSafely(join(dir, CONFIG_FILE)).changed || changed;
+  changed = removeFileSafely(join(dir, LOCAL_FILE)).changed || changed;
+  changed = removeIgnoreBlock(join(dir, LOCAL_IGNORE_FILE), LOCAL_IGNORE_BLOCK, { deleteWhenEmpty: true }).changed || changed;
+  // A .gitignore that held only init's lines goes with them.
+  changed = removePrivateGitignore(absolute, { deleteWhenEmpty: true }).changed || changed;
+  try {
+    rmdirSync(dir);
+  } catch {
+    // Not empty (someone's own file) or already gone: leave it.
+  }
+  return { changed };
 }
 
 /**

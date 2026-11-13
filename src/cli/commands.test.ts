@@ -23,7 +23,7 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
   return { code, out: out.text(), err: err.text() };
 }
 
-const SETUP = ["init", "link", "doctor", "update"];
+const SETUP = ["init", "link", "doctor", "update", "uninstall", "completion"];
 const ACCOUNT = ["login", "logout", "status"];
 const TOOL_COMMAND_NAMES = TOOL_SPECS.map((spec) => spec.command);
 /** Every command of spec 5.3-5.5 a person sees in plain `--help` (hook is internal). */

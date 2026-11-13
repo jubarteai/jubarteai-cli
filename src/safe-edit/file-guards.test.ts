@@ -145,7 +145,8 @@ describe("assertSafeTarget, strict (the credential store)", () => {
     expect(fs.statSync(dirAsFile).isDirectory()).toBe(true);
   });
 
-  it("does not mistake an unreadable path for a missing one: a file where a directory should be throws", () => {
+  // POSIX answers ENOTDIR for a path under a file; Windows answers ENOENT, which reads as missing (the write then fails).
+  it.skipIf(isWindows)("does not mistake an unreadable path for a missing one: a file where a directory should be throws", () => {
     const file = write(path.join(home, "a-file"));
     expect(() => assertSafeTarget(path.join(file, "creds.json"), { allowMissing: true })).toThrow();
   });
@@ -185,7 +186,9 @@ describe("assertSafeTargetWith, the platform and the filesystem stubbed", () => 
     expect(assertSafeTargetWith(file, { allowMissing: true }, stub)).toEqual({ ok: false, reason: "reparse-point" });
   });
 
-  it("outside home, a root-owned link in a parent (macOS /var, /tmp) is the system's own, a link anyone else owns is refused", () => {
+  // The two below stub one path as a Linux link but stat every other directory for real; Windows directories carry
+  // POSIX mode bits that read as world-writable, so they only make sense on POSIX. Windows is the win32 stubs above.
+  it.skipIf(isWindows)("outside home, a root-owned link in a parent (macOS /var, /tmp) is the system's own, a link anyone else owns is refused", () => {
     const outside = path.join(root, "other", "sys", "creds.json");
     write(outside);
     const sys = path.join(root, "other", "sys");
@@ -199,7 +202,7 @@ describe("assertSafeTargetWith, the platform and the filesystem stubbed", () => 
     expect(assertSafeTargetWith(outside, { allowMissing: true }, stub(myUid + 1000))).toEqual({ ok: false, reason: "symlink" });
   });
 
-  it("under home, a root-owned link in a parent is still refused: the exemption is for system paths only", () => {
+  it.skipIf(isWindows)("under home, a root-owned link in a parent is still refused: the exemption is for system paths only", () => {
     const file = write(path.join(home, "config", "creds.json"));
     const parent = path.join(home, "config");
     const stub = env({

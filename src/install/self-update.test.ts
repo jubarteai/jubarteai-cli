@@ -210,7 +210,8 @@ const me = path.basename(process.argv[1]);
 const argv = process.argv.slice(2);
 const sawToken = "JUBARTEAI_TOKEN" in process.env || Object.values(process.env).some((v) => String(v).includes("jba_FAKE"));
 const nodeOptions = [process.env.NODE_OPTIONS, process.env.npm_config_node_options];
-fs.appendFileSync(path.join(__dirname, me + ".log"), JSON.stringify({ argv, cwd: fs.realpathSync(process.cwd()), nodeOptions, sawToken }) + "\\n");
+const banner = process.env.JUBARTEAI_BANNER ?? null;
+fs.appendFileSync(path.join(__dirname, me + ".log"), JSON.stringify({ argv, cwd: fs.realpathSync(process.cwd()), nodeOptions, sawToken, banner }) + "\\n");
 if (argv[0] === "prefix") {
   ${opts.globalPrefix === undefined ? "process.exit(1);" : `process.stdout.write(${JSON.stringify(`${opts.globalPrefix}\n`)}); process.exit(0);`}
 }
@@ -226,7 +227,7 @@ process.exit(${opts.exitCode ?? 0});
   const stubNpm = (opts: { exitCode?: number; stderr?: string; globalPrefix?: string } = {}): void =>
     stub(join(bin, "npm"), { globalPrefix: prefix, ...opts });
 
-  type Call = { argv: string[]; cwd: string; nodeOptions: Array<string | null>; sawToken: boolean };
+  type Call = { argv: string[]; cwd: string; nodeOptions: Array<string | null>; sawToken: boolean; banner?: string | null };
   const callsIn = (file: string): Call[] => {
     if (!existsSync(file)) return [];
     return readFileSync(file, "utf8")
@@ -292,12 +293,19 @@ process.exit(${opts.exitCode ?? 0});
 
   it("recognises npm's permission error (EACCES) so the caller can print the --prefix hint", async () => {
     stubNpm({ exitCode: 243, stderr: "npm error code EACCES\nnpm error syscall mkdir\n" });
-    expect(await installCliVersion("1.4.2", prefix)).toEqual({ ok: false, eacces: true, timedOut: false, notFound: false });
+    expect(await installCliVersion("1.4.2", prefix)).toEqual({
+      ok: false,
+      eacces: true,
+      timedOut: false,
+      notFound: false,
+      log: ["npm error code EACCES", "npm error syscall mkdir"],
+    });
   });
 
   it("reports any other npm failure without the permission flag", async () => {
-    stubNpm({ exitCode: 1, stderr: "npm error code E404\n" });
-    expect(await installCliVersion("1.4.2", prefix)).toEqual({ ok: false, eacces: false, timedOut: false, notFound: false });
+    stubNpm({ exitCode: 1, stderr: "npm error code E404\nkey jba_FAKESECRETSECRETSECRET1\n" });
+    const outcome = await installCliVersion("1.4.2", prefix);
+    expect(outcome).toEqual({ ok: false, eacces: false, timedOut: false, notFound: false, log: ["npm error code E404", "key [redacted]"] });
   });
 
   it("reports a missing npm", async () => {
@@ -317,6 +325,13 @@ process.exit(${opts.exitCode ?? 0});
     expect(await reexecCli(entry, ["update", "--no-self-update", "--yes"])).toEqual({ started: true, code: 7 });
     expect(callsIn(`${entry}.log`).map((c) => c.argv)).toEqual([["update", "--no-self-update", "--yes"]]);
     expect(callsIn(join(bin, "jubarteai.log"))).toEqual([]);
+  });
+
+  it("starts the new CLI with its banner off, since this run already printed one", async () => {
+    const entry = cliEntryFor(prefix);
+    stub(entry);
+    expect(await reexecCli(entry, ["update", "--no-self-update"])).toEqual({ started: true, code: 0 });
+    expect(callsIn(`${entry}.log`)[0]?.banner).toBe("off");
   });
 
   it("says so when the entry npm should have written is missing", async () => {

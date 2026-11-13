@@ -22,7 +22,8 @@ import {
   type Obj,
 } from "./cursor.js";
 import { PERSON_COMMAND_LIST, agentCommandPattern } from "./agent-commands.js";
-import { findMcpEntries, mcpCleanupFor } from "./mcp-cleanup.js";
+import { findMcpEntries, mcpCleanupFor, shownPath } from "./mcp-cleanup.js";
+import { jsonRemovalStep } from "./uninstall.js";
 import type { AdapterState, CleanupScope, DetectEnv, HarnessAdapter, InitCtx, ManualInstructions } from "./types.js";
 
 const HARNESS = "zed" as const;
@@ -109,6 +110,45 @@ export const zedAdapter: HarnessAdapter = {
   sessionVar: null,
   promptInjection: false,
 
+  /** Removes our always_allow pattern (and a leftover legacy one) from Zed's settings. */
+  async uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructions>> {
+    const file = settingsPath(ctx.home, ctx.env, ctx.platform);
+    const shown = shownPath(file, ctx.home);
+    const step = jsonRemovalStep({
+      harness: HARNESS,
+      id: `${HARNESS}:uninstall-permission`,
+      label: `Remove the jubarteai terminal rule from ${shown}`,
+      file,
+      home: ctx.home,
+      preview: [`${shown}:`, `  agent.tool_permissions.tools.terminal.always_allow -= { "pattern": ${JSON.stringify(ALLOW_PATTERN)} }`].join("\n"),
+      byHand: [`the always_allow entry with pattern ${JSON.stringify(ALLOW_PATTERN)} under ${PERMISSION_PATH.join(".")}`],
+      edit: (doc) => {
+        const list = alwaysAllow(doc);
+        if (list === "absent" || list === "bad") return false;
+        const kept = list.filter((entry) => !isRule(entry) && !isLegacyRule(entry));
+        if (kept.length === list.length) return false;
+        list.splice(0, list.length, ...kept);
+        if (list.length > 0) return true;
+        // The list is empty now: drop it and the containers only we had made.
+        let node: Obj = doc;
+        const trail: Array<[Obj, string]> = [];
+        for (const key of PERMISSION_PATH) {
+          trail.push([node, key]);
+          node = node[key] as Obj;
+        }
+        delete node["always_allow"];
+        for (let i = trail.length - 1; i >= 0; i -= 1) {
+          const [parent, key] = trail[i] as [Obj, string];
+          const child = parent[key] as Obj;
+          if (Object.keys(child).length > 0) break;
+          delete parent[key];
+        }
+        return true;
+      },
+    });
+    return step === null ? [] : [step];
+  },
+
   async detect(env: DetectEnv): Promise<boolean> {
     return existsSync(zedDir(env.home, env.env, env.platform)) || env.which("zed") !== null;
   },
@@ -125,10 +165,11 @@ export const zedAdapter: HarnessAdapter = {
       );
     }
     return jsonEditStep({
+      harness: HARNESS,
       id: `${HARNESS}:permission`,
       label: LABEL_PERMISSION,
       file,
-      preview: `  agent.tool_permissions.tools.terminal.always_allow += { "pattern": ${JSON.stringify(ALLOW_PATTERN)} }   (agent commands only: login, logout, link, init, update keep asking)\n  an earlier "${LEGACY_PATTERN}" entry, if present, is replaced: it also approved ${PERSON_COMMAND_LIST}`,
+      preview: `  agent.tool_permissions.tools.terminal.always_allow += { "pattern": ${JSON.stringify(ALLOW_PATTERN)} }   (agent commands only: ${PERSON_COMMAND_LIST} keep asking)\n  an earlier "${LEGACY_PATTERN}" entry, if present, is replaced: it also approved ${PERSON_COMMAND_LIST}`,
       createIfMissing: true,
       edit: addPermission,
     });

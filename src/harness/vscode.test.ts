@@ -2,12 +2,12 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PassThrough } from "node:stream";
 import { applyPlan, type PlanStep, type StepResult } from "../safe-edit/plan.js";
 import { PERSON_COMMAND_LIST, agentCommandPattern, personCommandPattern } from "./agent-commands.js";
 import { spawnSync } from "node:child_process";
 import { COPILOT_HOOKS_STEP_ID, guardMissingNote, copilotHooksPlan, copilotHooksState, copilotHooksStep, vscodeAdapter } from "./vscode.js";
 import type { InitCtx, ManualInstructions } from "./types.js";
+import { applyUi } from "../../test/helpers/apply-ui.js";
 
 let home: string;
 let savedHome: string | undefined;
@@ -444,10 +444,10 @@ describe("vscode re-run (spec 6.1: re-running init is safe)", () => {
     const plan = async (): Promise<PlanStep[]> => [(await vscodeAdapter.permission(ctx())) as PlanStep, ...((await vscodeAdapter.hooks(ctx())) as PlanStep[])];
     const first = await plan();
     expect(first.map((s) => s.sensitive)).toEqual([true, true]);
-    await applyPlan(first, { tty: false, yes: true, out: new PassThrough() });
+    await applyPlan(first, { tty: false, yes: true, ...applyUi() });
     const again = await plan();
     expect(again.map((s) => s.sensitive)).toEqual([false, false]);
-    const results = await applyPlan(again, { tty: false, yes: false, out: new PassThrough() });
+    const results = await applyPlan(again, { tty: false, yes: false, ...applyUi() });
     expect(results.map((r) => r.status)).toEqual(["already configured", "already configured"]);
   });
 });

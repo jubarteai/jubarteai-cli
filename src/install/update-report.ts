@@ -5,7 +5,6 @@
 // came from a step or a file goes through safeForDisplay.
 import { safeForDisplay } from "../output.js";
 import type { StepResult } from "../safe-edit/plan.js";
-import { summarize } from "../safe-edit/plan.js";
 import type { ManualInstructions } from "../harness/types.js";
 
 const NAME_LIMIT = 200;
@@ -27,6 +26,7 @@ export const UPDATE_COPY = {
   nothingInstalled: "Nothing to update — JubarteAI is not set up here yet.",
   setUp: "To set it up, run: jubarteai init",
   upToDate: "Everything is up to date",
+  applyQuestion: "Apply these changes?",
   checkNothing: "Nothing to update",
   byHand: "Do these by hand:",
   restart: "Restart your editor or agent so it picks up the changes.",
@@ -42,12 +42,6 @@ export const UPDATE_COPY = {
 
 function row(level: ReportRow["level"], name: string, text: string): ReportRow {
   return { level, name, text };
-}
-
-/** One row, update.sh's plain markers: `  [todo] name: text`. */
-export function formatRow(r: ReportRow): string {
-  const marker = r.level === "todo" ? "[todo]" : r.level === "warn" ? "[warn]" : r.level === "info" ? "[info]" : "[ok]  ";
-  return `  ${marker} ${safeForDisplay(r.name, NAME_LIMIT)}: ${safeForDisplay(r.text, TEXT_LIMIT)}`;
 }
 
 /** The CLI version row. A newer version is a change (`--check` exits 2 on it); an unknown one is an advisory. */
@@ -101,19 +95,6 @@ export function byHandLines(manuals: ManualInstructions[]): string[] {
   return out;
 }
 
-/**
- * The plan's results, one line each, indented: summarize's wording, plus what a step that ran says it did (an updated
- * skill's version and restart note, the plugin's /reload-plugins note, D20).
- */
-export function resultLines(results: StepResult[]): string[] {
-  const lines = summarize(results);
-  return results.map((r, i) => {
-    const line = lines[i] ?? "";
-    const done = r.status === "configured" || r.status === "already configured";
-    return done && r.detail !== undefined && r.detail !== "" ? `  ${line} — ${safeForDisplay(r.detail, TEXT_LIMIT)}` : `  ${line}`;
-  });
-}
-
 export type Counts = { ok: number; skipped: number; failed: number; warnings: number };
 
 /** Counts as update.sh's closing line: ok = configured or already configured. `extraFailed` adds failures outside the plan (the CLI install). */
@@ -129,11 +110,11 @@ export function countResults(results: StepResult[], warnings: number, extraFaile
   return { ok, skipped, failed, warnings };
 }
 
-/** The closing lines of an applying run: the counts, the failed note, the restart tip when anything changed. */
-export function closingLines(counts: Counts, opts: { changed: boolean }): string[] {
-  const out = [`Done — ${counts.ok} ok, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.warnings} warning(s)`];
-  if (counts.failed > 0) out.push(`   ${counts.failed} step(s) failed — see above.`);
-  if (opts.changed) out.push(`   ${UPDATE_COPY.restart}`);
+/** The notes before the timeline's tally: the failed note and the restart tip when anything changed. */
+export function closingNotes(counts: Counts, opts: { changed: boolean }): string[] {
+  const out: string[] = [];
+  if (counts.failed > 0) out.push(`${counts.failed} step(s) failed — see above.`);
+  if (opts.changed) out.push(UPDATE_COPY.restart);
   return out;
 }
 
