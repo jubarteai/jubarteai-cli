@@ -238,7 +238,9 @@ describe("the spinner on a terminal", () => {
       const raw = session.raw();
       expect(raw.lastIndexOf("\u001b[?25h")).toBeGreaterThan(raw.lastIndexOf("\u001b[?25l"));
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      // Windows refuses to delete a folder while a process that just exited (or a virus scan) still holds a handle
+      // in it (EPERM/EBUSY); Node's own retry waits that out, and a handle that never goes away still fails.
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });

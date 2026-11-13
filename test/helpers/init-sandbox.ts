@@ -243,7 +243,9 @@ export function createInitSandbox(options: SandboxOptions = {}): InitSandbox {
         if (saved[name] === undefined) delete process.env[name];
         else process.env[name] = saved[name];
       }
-      rmSync(root, { recursive: true, force: true });
+      // Windows refuses to delete a folder while a process that just exited (or a virus scan) still holds a handle
+      // in it (EPERM/EBUSY); Node's own retry waits that out, and a handle that never goes away still fails.
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
