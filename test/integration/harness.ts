@@ -379,7 +379,9 @@ export function createSandbox(options: SandboxOptions = {}): Sandbox {
     read: (path) => readFileSync(path, "utf8"),
     readJson: (path) => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>,
     cleanup() {
-      rmSync(root, { recursive: true, force: true });
+      // Windows refuses to delete a folder while a process that just exited (or a virus scan) still holds a handle
+      // in it (EPERM/EBUSY); Node's own retry waits that out, and a handle that never goes away still fails.
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
   return sandbox;

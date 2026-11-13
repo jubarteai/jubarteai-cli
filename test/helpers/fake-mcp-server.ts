@@ -246,7 +246,9 @@ export function createSandbox(): Sandbox {
         else process.env[key] = value;
       }
       resetEnvTokenForTests();
-      rmSync(dir, { recursive: true, force: true });
+      // Windows refuses to delete a folder while a process that just exited (or a virus scan) still holds a handle
+      // in it (EPERM/EBUSY); Node's own retry waits that out, and a handle that never goes away still fails.
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
