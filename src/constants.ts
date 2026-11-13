@@ -117,3 +117,17 @@ export function cliVersion(): string {
   }
   throw new Error("package.json has no version");
 }
+
+// Company skills sync (`jubarteai skills sync`, the session hooks).
+/** After a failed sync, no new background sync starts for this long. */
+export const SKILLS_BACKOFF_MS = 10 * 60 * 1000;
+/** A sync lock older than this is stale (a crashed process) and is taken over. */
+export const SKILLS_LOCK_STALE_MS = 5 * 60 * 1000;
+export const SKILLS_DOWNLOAD_TIMEOUT_MS = 30_000;
+/** One skill file, and the whole skill, never exceed what the server accepts (5 MiB). */
+export const SKILLS_MAX_TOTAL_BYTES = 5 * 1024 * 1024;
+export const SKILLS_MAX_FILES = 512;
+export const SKILLS_MARKER_FILE = ".jubarteai-skill.json";
+export const SKILLS_TMP_PREFIX = ".jubarteai-tmp-";
+export const SKILLS_STATE_VERSION = 1;
+export const SKILLS_SYNC_TIMEOUT_MS = 20_000;

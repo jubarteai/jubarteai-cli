@@ -1,4 +1,4 @@
-// Static specs of the 16 MCP tools, so `--help` works offline. They mirror the zod schemas in the app
+// Static specs of the 18 MCP tools, so `--help` works offline. They mirror the zod schemas in the app
 // (src/lib/mcp/tools/*.ts): same tool names and the same argument names. The app's drift guard
 // (e2e/cli-binary.spec.ts) compares toolSpecShape() with the live tools/list, so a tool or argument
 // added on the server fails there until this file follows. Enums, ranges and required-ness stay
@@ -205,6 +205,24 @@ export const TOOL_SPECS: ToolSpec[] = [
       flag("title", "string", "Override the drafted title when approving"),
       flag("description", "string", "Override the drafted body when approving", { file: true }),
       flag("snooze_days", "number", "With snooze: days to park it (1-90, default 14)"),
+    ],
+    needsAgent: true,
+  },
+  {
+    tool: "list_skills",
+    command: "list-skills",
+    summary: "List the company skills enabled for you",
+    flags: [flag("repository", "string", "Repository name or remote URL: only skills scoped to it, plus the company-wide ones")],
+    needsAgent: true,
+  },
+  {
+    tool: "get_skill",
+    command: "get-skill",
+    summary: "Fetch an enabled company skill (SKILL.md, one file, or a manifest with download urls)",
+    flags: [
+      flag("name", "string", "Skill name"),
+      flag("path", "string", "A file inside the skill (default SKILL.md)"),
+      flag("manifest", "boolean", "Return every file's path, size, sha256 and a short-lived download url"),
     ],
     needsAgent: true,
   },

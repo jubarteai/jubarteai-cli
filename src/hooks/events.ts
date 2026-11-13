@@ -1,5 +1,6 @@
 // What each hook event does (spec §6.3). Every path ends in a string to print ("" for nothing) and none
 // throws for a server, network or file problem: a hook must never fail the harness (I7).
+import { skillsHookLines } from "../skills/background.js";
 import { basename, isAbsolute, join } from "node:path";
 
 import { isResolveError, resolveSeat } from "../auth/resolve-seat.js";
@@ -178,6 +179,18 @@ function agentFromEnvelope(envelope: Envelope): { agentId: string; name?: string
   return typeof name === "string" && name.length > 0 && name.length <= MAX_AGENT_NAME_CHARS ? { agentId, name } : { agentId };
 }
 
+function skillsRevisionFrom(envelope: Envelope): number | undefined {
+  const result = envelope.result;
+  if (!isRecord(result)) return undefined;
+  const revision = result["skills_revision"];
+  return typeof revision === "number" && Number.isInteger(revision) && revision >= 0 ? revision : undefined;
+}
+
+/** The identity line followed by company-skills lines (a sync notice, a clash), when there are any. */
+function withSkillLines(identity: string, lines: readonly string[]): string {
+  return lines.length === 0 ? identity : `${identity}\n${lines.join("\n")}`;
+}
+
 /**
  * The cached agent for this session, only when it was written for the seat being used: the same test the commands apply
  * (`entryBelongsToSeat`, so an entry made under an environment key must carry that key's fingerprint), or a hook and a
@@ -193,7 +206,11 @@ type Handled = { harness: HarnessId; input: HookInput; seat: ResolvedSeat; bindi
 
 async function sessionStart({ harness, input, seat, binding, runtime }: Handled): Promise<string> {
   const reuse = input.source !== null && REUSE_SOURCES.includes(input.source) ? cachedAgent(harness, input.sessionId, seat) : null;
-  if (reuse !== null) return composeInjection(harness, input.event, identityLine(reuse.agent_id, reuse.name), []);
+  if (reuse !== null) {
+    // Resume/compact: no network call. Only flush what a background sync left for the agent.
+    const lines = skillsHookLines({ cwd: input.cwd, bindingRoot: binding.inheritedFrom ?? binding.root, seat, agentId: null, revision: undefined });
+    return composeInjection(harness, input.event, withSkillLines(identityLine(reuse.agent_id, reuse.name), lines), []);
+  }
 
   const slug = repoSlug(input.cwd, binding.root);
   const description = slug === "" ? harness : `${harness} on ${slug}`;
@@ -227,15 +244,32 @@ async function sessionStart({ harness, input, seat, binding, runtime }: Handled)
       // The identity line below still names the agent, so later commands can pass --agent.
     }
   }
-  return composeInjection(harness, input.event, identityLine(agent.agentId, agent.name), outcome.envelope.messages, overflowSpill(harness, input.sessionId));
+  const lines = skillsHookLines({
+    cwd: input.cwd,
+    bindingRoot: binding.inheritedFrom ?? binding.root,
+    seat,
+    agentId: agent.agentId,
+    revision: skillsRevisionFrom(outcome.envelope),
+  });
+  return composeInjection(harness, input.event, withSkillLines(identityLine(agent.agentId, agent.name), lines), outcome.envelope.messages, overflowSpill(harness, input.sessionId));
 }
 
-async function userPromptSubmit({ harness, input, seat, runtime }: Handled): Promise<string> {
+async function userPromptSubmit({ harness, input, seat, binding, runtime }: Handled): Promise<string> {
   const entry = cachedAgent(harness, input.sessionId, seat);
   if (entry === null) return "";
   const outcome = await runtime.call(seat, "check_inbox", { agent_id: entry.agent_id }, { timeoutMs: runtime.networkTimeoutMs, signal: runtime.signal });
-  if (outcome.exitCode !== 0 || outcome.envelope.messages.length === 0) return "";
-  return composeInjection(harness, input.event, identityLine(entry.agent_id, entry.name), outcome.envelope.messages, overflowSpill(harness, input.sessionId));
+  if (outcome.exitCode !== 0) return "";
+  // `skills_revision` rides on the inbox check: when it changed, a detached sync starts; lines a finished
+  // background sync left (the sync notice, a clash) are injected once.
+  const lines = skillsHookLines({
+    cwd: input.cwd,
+    bindingRoot: binding.inheritedFrom ?? binding.root,
+    seat,
+    agentId: entry.agent_id,
+    revision: skillsRevisionFrom(outcome.envelope),
+  });
+  if (outcome.envelope.messages.length === 0 && lines.length === 0) return "";
+  return composeInjection(harness, input.event, withSkillLines(identityLine(entry.agent_id, entry.name), lines), outcome.envelope.messages, overflowSpill(harness, input.sessionId));
 }
 
 async function sessionEnd({ harness, input, seat, runtime }: Handled): Promise<string> {

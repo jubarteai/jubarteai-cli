@@ -8,6 +8,7 @@ import { initCommand } from "../commands/init.js";
 import { linkCommand } from "../commands/link.js";
 import { loginCommand } from "../commands/login.js";
 import { logoutCommand } from "../commands/logout.js";
+import { skillsCommand } from "../commands/skills.js";
 import { statusCommand } from "../commands/status.js";
 import { TOOL_COMMANDS } from "../commands/tool.js";
 import { uninstallCommand } from "../commands/uninstall.js";
@@ -43,6 +44,7 @@ export const COMMANDS: CommandDef[] = [
   linkCommand,
   doctorCommand,
   updateCommand,
+  skillsCommand,
   uninstallCommand,
   completionCommand,
   loginCommand,
