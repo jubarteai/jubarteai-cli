@@ -7,12 +7,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { startFakeServer } from "./fake-server.js";
 import type { FakeServer } from "./fake-server.js";
-import { IS_WINDOWS, createSandbox } from "./harness.js";
+import { createSandbox } from "./harness.js";
 import type { Sandbox } from "./harness.js";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
-const posix = IS_WINDOWS ? test.skip : test;
 const AGENT_LINE = /Your JubarteAI agent_id is ([0-9a-f-]{36})/;
 
 let fake: FakeServer;
@@ -43,7 +42,7 @@ function worktree(origin: string | null): string {
 }
 
 describe("linked worktrees through the binary", () => {
-  posix("the hook in a worktree connects under the main checkout's binding and names the repo from origin", async () => {
+  test("the hook in a worktree connects under the main checkout's binding and names the repo from origin", async () => {
     expect((await box.run(["link"])).code).toBe(0);
     const tree = worktree("git@github.com:org/JubarteAI.git");
     const input = JSON.stringify({ session_id: "wt-1", cwd: tree, source: "startup" });
@@ -56,7 +55,7 @@ describe("linked worktrees through the binary", () => {
     expect(fake.agents[0]?.seat_id).toBe(fake.identity.seat_id);
   });
 
-  posix("status in the worktree names where the binding came from", async () => {
+  test("status in the worktree names where the binding came from", async () => {
     expect((await box.run(["link"])).code).toBe(0);
     const tree = worktree(null);
     const text = await box.run(["status"], { cwd: tree });
@@ -66,7 +65,7 @@ describe("linked worktrees through the binary", () => {
     expect(json.binding.inherited_from).toBe(tree);
   });
 
-  posix("link run in the worktree writes the main checkout's binding", async () => {
+  test("link run in the worktree writes the main checkout's binding", async () => {
     const tree = worktree(null);
     expect((await box.run(["link"], { cwd: tree })).code).toBe(0);
     expect(box.read(join(box.repo, ".jubarteai", "config.json"))).toContain(fake.identity.company.slug);
@@ -74,7 +73,7 @@ describe("linked worktrees through the binary", () => {
     expect((JSON.parse(again.stdout) as { binding: { found: boolean } }).binding.found).toBe(true);
   });
 
-  posix("a worktree of an unbound repo stays silent", async () => {
+  test("a worktree of an unbound repo stays silent", async () => {
     const tree = worktree(null);
     const input = JSON.stringify({ session_id: "wt-2", cwd: tree, source: "startup" });
     const started = await box.run(["hook", "session-start", "--harness", "claude-code"], { stdin: input, cwd: tree });

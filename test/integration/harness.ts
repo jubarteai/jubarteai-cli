@@ -3,10 +3,10 @@
 // programs the CLI starts (npx, npm, claude, codex) and a scan that proves a key never lands where it must not.
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { FakeServer } from "./fake-server.js";
 
@@ -16,8 +16,8 @@ export const BIN = join(CLI_ROOT, "bin", "jubarteai.js");
 const STUB_SCRIPT = join(HERE, "stubs", "stub.mjs");
 
 export const IS_WINDOWS = process.platform === "win32";
-/** Why the init/update scenarios are POSIX-only: on Windows npm and npx are resolved through the npm that sits next to node, so PATH stubs never see the call. */
-export const WINDOWS_STUB_REASON = "npx/npm resolve through the npm next to node on Windows, so PATH stubs cannot intercept them";
+/** Why a scenario is POSIX-only on Windows: it runs a hook line through `sh`, reads POSIX file modes, or needs a POSIX pty. */
+export const WINDOWS_STUB_REASON = "it relies on sh, POSIX file modes or a POSIX pty";
 
 /** An obviously fake dashboard key (shape `jba_` + 8 to 128 URL-safe characters). */
 export const FAKE_KEY = "jba_FAKEINTEGRATIONKEY0000000000000001";
@@ -101,6 +101,8 @@ export const PTY_SCRIPT = join(HERE, "stubs", "pty-paste.py");
 
 export type Sandbox = {
   root: string;
+  /** The node that runs the binary: process.execPath on POSIX; on Windows a hard link in the sandbox whose npm is the stub. */
+  node: string;
   home: string;
   /** A git repository, the working directory of every run unless said otherwise. */
   repo: string;
@@ -116,7 +118,7 @@ export type Sandbox = {
   env(extra?: Record<string, string | undefined>): NodeJS.ProcessEnv;
   /** Starts any program in the sandbox's environment (stdin is left open for the caller). */
   startCommand(file: string, argv: string[], opts?: RunOptions): Running;
-  /** Runs a shell command line the way a harness runs a registered hook: `sh -c`, the sandbox's environment, JSON on stdin. POSIX only. */
+  /** Runs a shell command line the way a harness runs a registered hook: `sh -c` (cmd.exe /c on Windows), the sandbox's environment, JSON on stdin. */
   runShell(command: string, opts?: RunOptions): Promise<RunResult>;
   /** `login --with-token` against `fake` with `key` (registered on the fake first). */
   signInWithKey(fake: FakeServer, key?: string): Promise<RunResult>;
@@ -182,10 +184,33 @@ export function createSandbox(options: SandboxOptions = {}): Sandbox {
   // PATH: only what the CLI needs (node, git) and the stubs. A real claude, codex or npx on the developer's
   // machine must never be found, so the node folder is not put on PATH on POSIX: node is linked in alone.
   const dirs = [binDir];
+  let node = process.execPath;
   if (IS_WINDOWS) {
-    dirs.push(dirname(process.execPath));
+    // The CLI runs npx and npm as `node <npx-cli.js | npm-cli.js next to node>`, never through a PATH shim. So the
+    // binary runs on a node.exe hard-linked into the sandbox (a copy across volumes) whose node_modules/npm/bin holds
+    // stubs for both; the .cmd shims on PATH are what the CLI's lookup finds first. The real node folder, with the
+    // real npx and npm, is not on PATH.
+    const nodeDir = join(root, "node");
+    const npmBin = join(nodeDir, "node_modules", "npm", "bin");
+    mkdirSync(npmBin, { recursive: true });
+    writeFileSync(join(nodeDir, "node_modules", "npm", "package.json"), '{ "type": "commonjs" }\n');
+    node = join(nodeDir, "node.exe");
+    try {
+      linkSync(process.execPath, node);
+    } catch {
+      copyFileSync(process.execPath, node);
+    }
+    dirs.push(nodeDir);
     const git = findOnPath("git");
     if (git !== null) dirs.push(dirname(git));
+    for (const name of options.stubs ?? ALL_STUBS) {
+      writeFileSync(join(binDir, `${name}.cmd`), `@"${node}" "${STUB_SCRIPT}" ${name} %*\r\n@exit /b %ERRORLEVEL%\r\n`);
+      if (name === "npx" || name === "npm") {
+        writeFileSync(join(npmBin, `${name}-cli.js`), `process.argv.splice(2, 0, ${JSON.stringify(name)});\nimport(${JSON.stringify(pathToFileURL(STUB_SCRIPT).href)});\n`);
+      }
+    }
+    // Windows registers hooks as the bare `jubarteai`: a harness finds it on PATH, as npm's shim would be.
+    writeFileSync(join(binDir, "jubarteai.cmd"), `@"${node}" "${BIN}" %*\r\n@exit /b %ERRORLEVEL%\r\n`);
   } else {
     symlinkSync(process.execPath, join(binDir, "node"));
     dirs.push("/usr/bin", "/bin");
@@ -280,12 +305,13 @@ export function createSandbox(options: SandboxOptions = {}): Sandbox {
     };
   }
 
-  const start = (args: string[], opts: RunOptions = {}): Running => startProcess(process.execPath, [BIN, ...args], args, opts);
+  const start = (args: string[], opts: RunOptions = {}): Running => startProcess(node, [BIN, ...args], args, opts);
   const runChild = (file: string, argv: string[], opts: RunOptions): Promise<RunResult> =>
     startProcess(file, argv, [file, ...argv], { ...opts, stdin: opts.stdin ?? "" }).exit;
 
   const sandbox: Sandbox = {
     root,
+    node,
     home,
     repo,
     outside,
@@ -300,6 +326,8 @@ export function createSandbox(options: SandboxOptions = {}): Sandbox {
     startCommand: (file, argv, opts = {}) => startProcess(file, argv, [file, ...argv], opts),
     env: (extra = {}) => childEnv(box, extra),
     async runShell(command, opts = {}) {
+      // What a harness does with a registered hook line: sh -c on POSIX, cmd.exe on Windows.
+      if (IS_WINDOWS) return runChild(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], opts);
       return runChild("/bin/sh", ["-c", command], opts);
     },
     async signInWithKey(fake, key = FAKE_KEY) {

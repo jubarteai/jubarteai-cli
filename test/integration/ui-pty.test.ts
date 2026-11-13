@@ -17,7 +17,9 @@ import type { Sandbox } from "./harness.js";
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 60_000 });
 
 const pty = loadPty();
-// The stubs are POSIX shell wrappers (see WINDOWS_STUB_REASON in harness.ts), so harness detection needs POSIX.
+// node-pty drives openpty on POSIX and ConPTY on Windows. Only the spinner's signal test is POSIX-only: Windows has no
+// SIGINT for a process to re-raise.
+const ptyTest = pty === null ? test.skip : test;
 const posixPty = pty === null || IS_WINDOWS ? test.skip : test;
 const UP = "\u001b[A";
 const DOWN = "\u001b[B";
@@ -40,9 +42,10 @@ afterEach(async () => {
 });
 
 function start(args: string[], env: Record<string, string | undefined> = {}, size: { cols?: number; rows?: number } = {}): PtySession {
-  const session = spawnPty(pty as NonNullable<typeof pty>, process.execPath, [BIN, ...args], {
+  // The sandbox's node: on Windows its npm is the stub. WT_SESSION is how the CLI knows a Windows terminal draws Unicode.
+  const session = spawnPty(pty as NonNullable<typeof pty>, box.node, [BIN, ...args], {
     cwd: box.repo,
-    env: box.env({ TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8", JUBARTEAI_URL: fake.origin, ...env }),
+    env: box.env({ TERM: "xterm-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8", ...(IS_WINDOWS ? { WT_SESSION: "1" } : {}), JUBARTEAI_URL: fake.origin, ...env }),
     ...size,
   });
   sessions.push(session);
@@ -62,7 +65,7 @@ async function toChecklist(session: PtySession, title = "Choose what to set up")
 }
 
 describe("init on a terminal", () => {
-  posixPty("shows the gradient banner and one checklist; Space unchecks a harness, d shows a redacted entry, Enter applies the rest", async () => {
+  ptyTest("shows the gradient banner and one checklist; Space unchecks a harness, d shows a redacted entry, Enter applies the rest", async () => {
     const session = start(["init", "--keep-mcp"]);
     const at = await toChecklist(session);
     expect(session.raw()).toContain("38;2;0;136;136"); // banner gradient start, 24-bit
@@ -87,7 +90,7 @@ describe("init on a terminal", () => {
     expect(box.findLeaks(["jba_FAKEINTEGRATIONKEY0000000000000001"], { allowFiles: [join(box.home, ".codex", "config.toml")] })).toEqual([]);
   });
 
-  posixPty("--plain prints a numbered list and the number leaves a row out", async () => {
+  ptyTest("--plain prints a numbered list and the number leaves a row out", async () => {
     const session = start(["init", "--plain", "--keep-mcp", "--private-binding"]);
     const account = await session.waitFor("[Y/n]");
     session.send(ENTER);
@@ -104,7 +107,7 @@ describe("init on a terminal", () => {
     expect(existsSync(codexHooks())).toBe(true);
   });
 
-  posixPty("NO_COLOR=1 prints no escape code at all", async () => {
+  ptyTest("NO_COLOR=1 prints no escape code at all", async () => {
     const session = start(["init", "--keep-mcp", "--private-binding"], { NO_COLOR: "1" });
     const account = await session.waitFor("[Y/n]");
     session.send(ENTER);
@@ -114,7 +117,7 @@ describe("init on a terminal", () => {
     expect(session.raw()).not.toContain("\u001b");
   });
 
-  posixPty("a 60-column window gets the compact banner", async () => {
+  ptyTest("a 60-column window gets the compact banner", async () => {
     const session = start(["init", "--keep-mcp", "--private-binding"], {}, { cols: 60 });
     const account = await session.waitFor("[Y/n]");
     expect(session.text()).toContain("◆ JubarteAI");
@@ -126,7 +129,7 @@ describe("init on a terminal", () => {
     expect((await session.exit).exitCode).not.toBe(0);
   });
 
-  posixPty("unchecking every row (or Ctrl-C) applies nothing: Aborted., exit 0 / Cancelled", async () => {
+  ptyTest("unchecking every row (or Ctrl-C) applies nothing: Aborted., exit 0 / Cancelled", async () => {
     const session = start(["init", "--keep-mcp", "--private-binding"]);
     const at = await toChecklist2(session);
     // Header rows toggle their groups: walk the list and switch every group off.
@@ -142,7 +145,7 @@ describe("init on a terminal", () => {
     expect(existsSync(join(box.repo, ".jubarteai"))).toBe(false);
   });
 
-  posixPty("Ctrl-C at the checklist cancels with nothing applied", async () => {
+  ptyTest("Ctrl-C at the checklist cancels with nothing applied", async () => {
     const session = start(["init", "--keep-mcp", "--private-binding"]);
     const at = await toChecklist2(session);
     session.send("\u0003");
@@ -162,7 +165,7 @@ async function toChecklist2(session: PtySession): Promise<number> {
 }
 
 describe("update on a terminal", () => {
-  posixPty("asks one question with Yes preselected; Show prints the exact changes, then Yes applies", async () => {
+  ptyTest("asks one question with Yes preselected; Show prints the exact changes, then Yes applies", async () => {
     // init first (no terminal needed); the stub npx installs no real skill, so update has copies to refresh.
     expect((await box.run(["init", "--yes", "--keep-mcp"], { env: { JUBARTEAI_URL: fake.origin } })).code).toBe(0);
 
@@ -178,7 +181,7 @@ describe("update on a terminal", () => {
 });
 
 describe("uninstall on a terminal", () => {
-  posixPty("shows the uninstaller banner and one checklist; unchecking sign-out keeps the login while the rest is removed", async () => {
+  ptyTest("shows the uninstaller banner and one checklist; unchecking sign-out keeps the login while the rest is removed", async () => {
     expect((await box.run(["init", "--yes", "--keep-mcp"], { env: { JUBARTEAI_URL: fake.origin } })).code).toBe(0);
     expect(existsSync(codexHooks())).toBe(true);
     const login = box.read(box.credentialsFile);

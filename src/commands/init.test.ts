@@ -20,6 +20,10 @@ vi.setConfig({ testTimeout: 60_000 });
 
 const KEY = "jba_INITTESTKEYINITTESTKEY0001";
 const posix = process.platform !== "win32";
+/** Where the credential file sits under the sandbox root, with forward slashes. */
+const CREDENTIALS_REL = posix ? "/home/.config/jubarteai/credentials.json" : "/home/AppData/Roaming/jubarteai/credentials.json";
+/** Files holding `needle`, relative to the sandbox root, with forward slashes. */
+const filesWithKey = (root: string, needle: string): string[] => filesContaining(root, needle).map((f) => f.slice(root.length).replaceAll("\\", "/"));
 const ACME = { id: "33333333-3333-4333-8333-333333333333", slug: "acme", name: "Acme Inc" };
 const BETA = { id: "55555555-5555-4555-8555-555555555555", slug: "beta", name: "Beta LLC" };
 
@@ -33,7 +37,8 @@ function installFakeBin(): void {
   const bin = join(sb.root, "jubarteai.js");
   writeFileSync(bin, "// fake bin\n");
   process.argv[1] = bin;
-  hookCommandPrefix = `"${process.execPath}" "${realpathSync(bin)}"`;
+  // Windows registers the bare `jubarteai` (PowerShell can't parse "node" "script"; GUI apps inherit npm's shims).
+  hookCommandPrefix = posix ? `"${process.execPath}" "${realpathSync(bin)}"` : "jubarteai";
 }
 
 beforeEach(async () => {
@@ -188,7 +193,7 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(result.err).not.toContain(KEY);
     expect(result.out).not.toContain(KEY);
     // The key lives in the credential file and, for Codex's fallback, Codex's user-level config: nowhere else.
-    expect(filesContaining(sb.root, KEY).map((f) => f.slice(sb.root.length)).sort()).toEqual(["/home/.codex/config.toml", "/home/.config/jubarteai/credentials.json"]);
+    expect(filesWithKey(sb.root, KEY).sort()).toEqual(["/home/.codex/config.toml", CREDENTIALS_REL].sort());
   });
 
   it("is idempotent: a second run changes nothing and reports already configured", async () => {
@@ -218,7 +223,8 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(again.err).not.toContain("Trust the Codex hooks");
   });
 
-  it("a re-run after a Node upgrade rewrites the hook commands in place, never beside the old ones", async () => {
+  // The absolute "node" "script" form is POSIX's; Windows writes the bare name, which a Node upgrade doesn't change.
+  it.skipIf(!posix)("a re-run after a Node upgrade rewrites the hook commands in place, never beside the old ones", async () => {
     withEnvKey();
     expect((await run(["init", "--yes"])).code).toBe(0);
     const upgraded = join(sb.root, "v2", "jubarteai.js");
@@ -681,7 +687,8 @@ describe("init: sensitive steps", () => {
     expect(result.code, result.err).toBe(0);
     const settings = json(join(sb.home, ".claude", "settings.json")) as { model: string; permissions: { allow: string[] }; hooks: { SessionStart: Array<{ hooks: Array<{ command: string }> }> } };
     expect(settings.model).toBe("x");
-    expect(settings.permissions.allow).toEqual(["Bash(ls)", "Bash(jubarteai *)"]);
+    // Windows adds the PowerShell spelling beside the Bash rule.
+    expect(settings.permissions.allow).toEqual(posix ? ["Bash(ls)", "Bash(jubarteai *)"] : ["Bash(ls)", "Bash(jubarteai *)", "PowerShell(jubarteai *)"]);
     const commands = settings.hooks.SessionStart.flatMap((g) => g.hooks.map((h) => h.command));
     expect(commands).toContain("other-tool");
     expect(commands).toContain(`${hookCommandPrefix} hook session-start --harness claude-code`);
@@ -733,7 +740,7 @@ describe("init: MCP cleanup and Codex", () => {
     expect(project).not.toContain("mcp_servers");
     // no fallback registration, so the key is in the credential file only
     expect(read(join(sb.home, ".codex", "config.toml"))).not.toContain("[mcp_servers.jubarteai]");
-    expect(filesContaining(sb.root, KEY).map((f) => f.slice(sb.root.length))).toEqual(["/home/.config/jubarteai/credentials.json"]);
+    expect(filesWithKey(sb.root, KEY)).toEqual([CREDENTIALS_REL]);
   });
 
   it("offers Codex's fallback entry as a checklist row, shows it without the key on `d`, and writes it when it stays checked", async () => {

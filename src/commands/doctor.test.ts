@@ -520,7 +520,6 @@ describe("doctor: harnesses, skill and AGENTS.md", () => {
 });
 
 describe("doctor: worktree bindings", () => {
-  const worktreeIt = process.platform === "win32" ? it.skip : it;
   const git = (...args: string[]): void => {
     execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: repo, stdio: "ignore" });
   };
@@ -532,7 +531,7 @@ describe("doctor: worktree bindings", () => {
     return realpathSync(tree);
   }
 
-  worktreeIt("names the main checkout when the worktree inherits its binding", async () => {
+  it("names the main checkout when the worktree inherits its binding", async () => {
     const tree = worktree();
     writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
     const { report } = await runJson(["doctor", "--json"], tree);
@@ -542,7 +541,7 @@ describe("doctor: worktree bindings", () => {
     expect(found.data).toMatchObject({ workspace: "acme", inherited_from: tree });
   });
 
-  worktreeIt("notes when the worktree's own binding hides the main checkout's, and warns when they differ", async () => {
+  it("notes when the worktree's own binding hides the main checkout's, and warns when they differ", async () => {
     const tree = worktree();
     writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
     writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
@@ -553,7 +552,7 @@ describe("doctor: worktree bindings", () => {
     expect(found.detail).toContain("acme");
   });
 
-  worktreeIt("warns, naming the main checkout's file, when only that binding is unreadable", async () => {
+  it("warns, naming the main checkout's file, when only that binding is unreadable", async () => {
     const tree = worktree();
     writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: false });
     writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
@@ -567,7 +566,7 @@ describe("doctor: worktree bindings", () => {
     expect(found.detail).not.toContain("jubarteai link");
   });
 
-  worktreeIt("does not tell the user to delete the valid config.json when the main checkout's config.local.json is the broken one", async () => {
+  it("does not tell the user to delete the valid config.json when the main checkout's config.local.json is the broken one", async () => {
     const tree = worktree();
     writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: true });
     writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });
@@ -580,7 +579,7 @@ describe("doctor: worktree bindings", () => {
     expect(found.detail).not.toContain("delete that file");
   });
 
-  worktreeIt("names config.json, the file read first, when both of the main checkout's files are invalid", async () => {
+  it("names config.json, the file read first, when both of the main checkout's files are invalid", async () => {
     const tree = worktree();
     writeBinding(repo, { workspace: { id: "c1", slug: "acme" }, email: "ada@example.com", shared: true });
     writeBinding(tree, { workspace: { id: "c2", slug: "other" }, email: "ada@example.com", shared: false });

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { startFakeServer } from "./fake-server.js";
 import type { FakeServer } from "./fake-server.js";
-import { FAKE_KEY, IS_WINDOWS, WINDOWS_STUB_REASON, createSandbox, plantJson, previousAgentsMdSection } from "./harness.js";
+import { FAKE_KEY, IS_WINDOWS, createSandbox, plantJson, previousAgentsMdSection } from "./harness.js";
 import type { Sandbox } from "./harness.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 60_000 });
@@ -45,7 +45,7 @@ function summary(stderr: string): Array<{ label: string; status: string }> {
 const settingsPath = (): string => join(box.home, ".claude", "settings.json");
 const agentsMd = (): string => join(box.repo, "AGENTS.md");
 
-describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON})`, () => {
+describe("init and update", () => {
   describe("init --yes", () => {
     beforeEach(async () => {
       await setup({ stubs: ["npx", "npm", "claude"] });
@@ -143,7 +143,8 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       expect(fake.agents[0]?.description).toBe("claude-code on acme-app");
     });
 
-    test("with Copilot present, init registers the preToolUse guard, and its own command denies an agent's login but not inbox (review R-S12)", async () => {
+    // The guard's `bash` line is POSIX shell syntax (`|| true`); Windows runs the `powershell` line instead.
+    test.skipIf(IS_WINDOWS)("with Copilot present, init registers the preToolUse guard, and its own command denies an agent's login but not inbox (review R-S12)", async () => {
       mkdirSync(join(box.home, ".copilot"), { recursive: true });
       await box.signInWithKey(fake);
       const result = await box.run(["init", "--yes"]);
@@ -236,7 +237,7 @@ describe.skipIf(IS_WINDOWS)(`init and update (POSIX only: ${WINDOWS_STUB_REASON}
       // Codex's own user config only, not into any project file.
       const codexConfig = join(box.home, ".codex", "config.toml");
       expect(box.read(codexConfig)).toContain("[mcp_servers.jubarteai]");
-      expect(statSync(codexConfig).mode & 0o777).toBe(0o600);
+      if (!IS_WINDOWS) expect(statSync(codexConfig).mode & 0o777).toBe(0o600);
       expect(box.findLeaks([FAKE_KEY], { allowFiles: [codexConfig] })).toEqual([]);
 
       const again = await box.run(["init", "--yes"]);

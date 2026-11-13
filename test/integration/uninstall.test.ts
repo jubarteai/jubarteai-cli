@@ -8,12 +8,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { loadPty, spawnPty } from "../helpers/pty.js";
 import { startFakeServer } from "./fake-server.js";
 import type { FakeServer } from "./fake-server.js";
-import { BIN, IS_WINDOWS, WINDOWS_STUB_REASON, createSandbox } from "./harness.js";
+import { BIN, createSandbox } from "./harness.js";
 import type { Sandbox } from "./harness.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 60_000 });
 
-const posix = IS_WINDOWS ? test.skip : test;
 const pty = loadPty();
 
 let fake: FakeServer;
@@ -44,8 +43,8 @@ function snapshot(dir: string): Record<string, string> {
   return out;
 }
 
-describe(`init then uninstall${IS_WINDOWS ? ` (skipped: ${WINDOWS_STUB_REASON})` : ""}`, () => {
-  posix("--yes restores every file init touched, keeps the person's own settings, and signs out locally", async () => {
+describe("init then uninstall", () => {
+  test("--yes restores every file init touched, keeps the person's own settings, and signs out locally", async () => {
     mkdirSync(join(box.home, ".claude"), { recursive: true });
     writeFileSync(join(box.home, ".claude", "settings.json"), JSON.stringify({ model: "opus", permissions: { allow: ["Bash(git status)"] } }, null, 2) + "\n");
     writeFileSync(join(box.repo, "AGENTS.md"), "# Acme\n");
@@ -72,7 +71,7 @@ describe(`init then uninstall${IS_WINDOWS ? ` (skipped: ${WINDOWS_STUB_REASON})`
     expect(box.findLeaks(["jba_FAKEINTEGRATIONKEY0000000000000001"])).toEqual([]);
   });
 
-  posix("--keep-login signs nothing out, and is idempotent: a second uninstall removes nothing more", async () => {
+  test("--keep-login signs nothing out, and is idempotent: a second uninstall removes nothing more", async () => {
     expect((await box.signInWithKey(fake)).code).toBe(0);
     expect((await box.run(["init", "--yes"], { env: { JUBARTEAI_URL: fake.origin } })).code).toBe(0);
     const first = await box.run(["uninstall", "--yes", "--keep-login"]);
@@ -85,7 +84,7 @@ describe(`init then uninstall${IS_WINDOWS ? ` (skipped: ${WINDOWS_STUB_REASON})`
     expect(again.stderr).not.toContain("removed");
   });
 
-  posix("in an agent's environment it exits 2 and changes nothing", async () => {
+  test("in an agent's environment it exits 2 and changes nothing", async () => {
     expect((await box.signInWithKey(fake)).code).toBe(0);
     expect((await box.run(["init", "--yes"], { env: { JUBARTEAI_URL: fake.origin } })).code).toBe(0);
     const before = { home: snapshot(box.home), repo: snapshot(box.repo) };
@@ -95,10 +94,10 @@ describe(`init then uninstall${IS_WINDOWS ? ` (skipped: ${WINDOWS_STUB_REASON})`
     expect({ home: snapshot(box.home), repo: snapshot(box.repo) }).toEqual(before);
   });
 
-  (pty === null || IS_WINDOWS ? test.skip : test)("on a terminal, leaving the sign-out row unchecked keeps the saved login", async () => {
+  test.skipIf(pty === null)("on a terminal, leaving the sign-out row unchecked keeps the saved login", async () => {
     expect((await box.signInWithKey(fake)).code).toBe(0);
     expect((await box.run(["init", "--yes"], { env: { JUBARTEAI_URL: fake.origin } })).code).toBe(0);
-    const session = spawnPty(pty as NonNullable<typeof pty>, process.execPath, [BIN, "uninstall", "--plain"], { cwd: box.repo, env: box.env({ TERM: "xterm-256color", LANG: "en_US.UTF-8", JUBARTEAI_URL: fake.origin }) });
+    const session = spawnPty(pty as NonNullable<typeof pty>, box.node, [BIN, "uninstall", "--plain"], { cwd: box.repo, env: box.env({ TERM: "xterm-256color", LANG: "en_US.UTF-8", JUBARTEAI_URL: fake.origin }) });
     try {
       await session.waitFor("press Enter for all: ");
       const row = /(\d+)\. Sign out of every saved login/.exec(session.text());

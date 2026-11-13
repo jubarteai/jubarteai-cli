@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { startFakeServer } from "./fake-server.js";
 import type { FakeServer } from "./fake-server.js";
-import { FAKE_KEY, IS_WINDOWS, WINDOWS_STUB_REASON, createSandbox } from "./harness.js";
+import { FAKE_KEY, IS_WINDOWS, createSandbox } from "./harness.js";
 import type { Sandbox } from "./harness.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 60_000 });
@@ -27,7 +27,7 @@ afterEach(async () => {
   box.cleanup();
 });
 
-describe.skipIf(IS_WINDOWS)(`inside an agent session (POSIX only: ${WINDOWS_STUB_REASON})`, () => {
+describe("inside an agent session", () => {
   for (const variable of ["CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"]) {
     test(`init --yes with ${variable} set leaves the Claude Code settings alone`, async () => {
       expect((await box.signInWithKey(fake)).code).toBe(0);
@@ -45,7 +45,8 @@ describe.skipIf(IS_WINDOWS)(`inside an agent session (POSIX only: ${WINDOWS_STUB
     const result = await box.run(["init", "--yes"]);
     expect(result.code, result.stderr).toBe(0);
     const settings = box.readJson(join(box.home, ".claude", "settings.json")) as { permissions: { allow: string[]; ask: string[] } };
-    expect(settings.permissions.allow).toEqual(["Bash(jubarteai *)"]);
+    // Windows adds the PowerShell spelling of the rule beside the Bash one.
+    expect(settings.permissions.allow).toEqual(IS_WINDOWS ? ["Bash(jubarteai *)", "PowerShell(jubarteai *)"] : ["Bash(jubarteai *)"]);
     for (const sub of ["login", "logout", "link", "init", "update"]) expect(settings.permissions.ask).toContain(`Bash(jubarteai ${sub} *)`);
     // No leading-flag rule: the router refuses `jubarteai --yes init`, and `jubarteai --help` stays pre-approved (R-S8).
     expect(settings.permissions.ask.some((rule) => rule.includes(" -*"))).toBe(false);

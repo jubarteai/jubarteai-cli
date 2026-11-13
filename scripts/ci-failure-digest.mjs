@@ -11,7 +11,7 @@ const CHUNK = 3500; // characters per annotation message
 /** One line per failure: `file > test: first line of the error`. */
 export function failureLines(report, root = "") {
   const lines = [];
-  // vitest reports D:/a/... on Windows while the working directory is D:\\a\\...: compare with forward slashes.
+  // vitest reports D:/a/... on Windows while the working directory is D:\a\...: compare with forward slashes.
   const base = root.replaceAll("\\", "/");
   const rel = (file) => {
     const name = file.replaceAll("\\", "/");
