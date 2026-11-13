@@ -5,7 +5,7 @@ describe("skill paths", () => {
   it("accepts relative forward-slash paths", () => {
     for (const p of ["SKILL.md", "scripts/a.sh", "refs/x/y.md"]) expect(isSafeRelativePath(p)).toBe(true);
   });
-  it.each(["", "/abs", "../x", "a/../b", "a//b", "a\\b", "C:x", "con", "x/NUL.txt", "a/", "a.", "a\0b", "a/\u0007", "x".repeat(600)])("rejects %j", (p) => {
+  it.each(["", "/abs", "../x", "a/../b", "a//b", "a\\b", "C:x", "con", "x/NUL.txt", "a/", "a.", "a\0b", "a/\u0007", "a/\u0085", "run\u202e.sh", "a\u200bb", "\ufeffSKILL.md", "a/\u{e0041}", "x".repeat(600)])("rejects %j", (p) => {
     expect(isSafeRelativePath(p)).toBe(false);
   });
   it("joinInside stays inside the base", () => {

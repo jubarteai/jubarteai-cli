@@ -171,6 +171,7 @@ async function sync(opts: SyncOptions, deps: SyncDeps, state: SkillsState, switc
   );
 
   let parsed: { skills: ListedSkill[]; revision: number | undefined };
+  let serverHasSkills = true;
   if (listed.exitCode === 0 && listed.envelope.error === undefined) {
     const p = parseList(listed.envelope.result);
     if (p === null) return fail(opts, deps, state);
@@ -178,12 +179,13 @@ async function sync(opts: SyncOptions, deps: SyncDeps, state: SkillsState, switc
   } else if (isUnknownTool(listed)) {
     // An older server without company skills: zero skills, nothing to deliver.
     parsed = { skills: [], revision: undefined };
+    serverHasSkills = false;
   } else {
     return fail(opts, deps, state);
   }
 
   const targets = syncTargets(opts.top);
-  const result = empty("synced", parsed.revision ?? state.revision);
+  const result = empty("synced", serverHasSkills ? (parsed.revision ?? state.revision) : null);
   const wanted = new Set(parsed.skills.map((s) => s.name));
   const createdBefore = new Map(targets.map((t) => [t, dirExistsSafe(join(opts.top, t))]));
   for (const t of targets) cleanTemps(join(opts.top, t));
@@ -284,7 +286,9 @@ async function sync(opts: SyncOptions, deps: SyncDeps, state: SkillsState, switc
   const next: SkillsState = {
     ...emptyState(opts.seat.origin),
     workspace_id: opts.workspaceId,
-    revision: result.failures > 0 ? state.revision : (parsed.revision ?? state.revision),
+    // An older server reports no revision. Record "unknown" (null), not the last one seen: if the server comes
+    // back with the same skills_revision it had before, the hooks must still sync instead of seeing "unchanged".
+    revision: result.failures > 0 ? state.revision : serverHasSkills ? (parsed.revision ?? state.revision) : null,
     skills: nextSkills,
     pending_notice: [...state.pending_notice],
     clashes: nextClashes,

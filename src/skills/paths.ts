@@ -17,7 +17,9 @@ export function isSafeRelativePath(path: unknown): path is string {
   if (typeof path !== "string" || path.length === 0 || path.length > MAX_PATH) return false;
   if (path.includes("\0") || path.includes("\\") || path.includes(":") || path.startsWith("/")) return false;
   // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(path)) return false;
+  // Zero-width, bidi, BOM and tag characters make a path read as a different name than it is.
+  if (/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u.test(path)) return false;
   if (posix.isAbsolute(path) || win32.isAbsolute(path)) return false;
   const segments = path.split("/");
   if (segments.length > MAX_DEPTH) return false;

@@ -199,6 +199,34 @@ describe("runSync", () => {
     expect(r.removed).toEqual(["alpha"]);
   });
 
+  it("forgets the revision after an older server answered, so the same revision syncs again when it returns", async () => {
+    skills = [alpha()];
+    revision = 7;
+    await runSync(opts());
+    expect(readState(top, ORIGIN).revision).toBe(7);
+    listError = "Unknown tool: list_skills";
+    await runSync(opts());
+    expect(readState(top, ORIGIN).revision).toBeNull();
+    listError = null;
+    const r = await runSync(opts({ ifChanged: 7 }));
+    expect(r.status).toBe("synced");
+    expect(r.added).toEqual(["alpha"]);
+  });
+
+  it("leaves a symlinked skills folder alone instead of writing through it", async () => {
+    if (process.platform === "win32") return;
+    skills = [alpha()];
+    const outside = join(root, "shared-skills");
+    mkdirSync(outside);
+    mkdirSync(join(top, ".claude"), { recursive: true });
+    const { symlinkSync } = await import("node:fs");
+    symlinkSync(outside, join(top, ".claude/skills"));
+    const r = await runSync(opts());
+    expect(r.status).toBe("synced");
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readMarker(join(top, ".agents/skills/alpha"))).not.toBeNull();
+  });
+
   it("fails without changing anything on a transport error", async () => {
     skills = [alpha()];
     await runSync(opts());

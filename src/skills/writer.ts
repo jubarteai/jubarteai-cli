@@ -45,6 +45,14 @@ export function readMarker(dir: string): SkillMarker | null {
   }
 }
 
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 export type InstallResult = "installed" | "clash";
 
 /**
@@ -54,6 +62,7 @@ export type InstallResult = "installed" | "clash";
  */
 export function installSkill(targetDir: string, name: string, files: readonly SkillFile[], marker: Omit<SkillMarker, "name">): InstallResult {
   if (!isValidSkillName(name)) throw new Error("invalid_name");
+  if (isSymlink(targetDir)) throw new Error("unsafe_target");
   const dest = join(targetDir, name);
   let existing = false;
   try {
