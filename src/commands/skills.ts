@@ -18,7 +18,7 @@ import { runSync } from "../skills/sync.js";
 import type { SyncResult } from "../skills/sync.js";
 import { writeExcludeBlock } from "../skills/exclude.js";
 import { deleteState, inBackoff, readState } from "../skills/state.js";
-import { syncTargets } from "../skills/targets.js";
+import { skippedTargets, syncTargets } from "../skills/targets.js";
 import { listManaged, listUnmanaged, removeManaged } from "../skills/writer.js";
 import { agentFor, seatFor } from "./tool.js";
 
@@ -36,7 +36,11 @@ function bound(ctx: CommandContext): { top: string; workspaceId: string } {
   return { top: gitTop(ctx.cwd) ?? binding.inheritedFrom ?? binding.root, workspaceId: binding.workspace.id };
 }
 
-function summary(result: SyncResult) {
+function skippedNote(skipped: readonly string[]): string {
+  return `${skipped.join(", ")} ${skipped.length === 1 ? "is a symlink" : "are symlinks"}, so company skills are not synced there. Replace the link with a real folder to sync them.`;
+}
+
+function summary(result: SyncResult, skipped: readonly string[]) {
   return {
     status: result.status,
     skills: result.skills,
@@ -45,6 +49,7 @@ function summary(result: SyncResult) {
     removed: result.removed,
     clashes: result.clashes,
     revision: result.revision,
+    ...(skipped.length > 0 ? { skipped_targets: skipped } : {}),
     ...(result.createdFolder ? { notice: "New company skills folder created — start a new session (or /reload-skills in Claude Code) to load them." } : {}),
   };
 }
@@ -56,7 +61,9 @@ async function runSkillsSync(ctx: CommandContext, args: ParsedArgs): Promise<num
   const background = args.flags["background"] === true;
   const ifChanged = typeof args.flags["if-changed"] === "number" ? (args.flags["if-changed"] as number) : undefined;
   const result = await runSync({ seat, agentId, top, workspaceId, background, ...(ifChanged === undefined ? {} : { ifChanged }) });
-  if (!(background || args.flags["quiet"] === true)) writeJson(ctx.stdout, { messages: [], result: summary(result) }, { pretty: ctx.globals.pretty });
+  const skipped = skippedTargets(top);
+  if (!background && skipped.length > 0) ctx.stderr.write(`${skippedNote(skipped)}\n`);
+  if (!(background || args.flags["quiet"] === true)) writeJson(ctx.stdout, { messages: [], result: summary(result, skipped) }, { pretty: ctx.globals.pretty });
   if (result.status === "failed") {
     if (!background) ctx.stderr.write("Company skills couldn't be synced right now. Nothing was removed; try again later.\n");
     return ExitCode.NETWORK;
@@ -87,6 +94,7 @@ function runSkillsStatus(ctx: CommandContext): number {
       result: {
         top,
         targets,
+        skipped_targets: skippedTargets(top).map((target) => ({ target, reason: "symlink" })),
         managed,
         in_the_way: clashes,
         unmanaged_folders: unmanaged,

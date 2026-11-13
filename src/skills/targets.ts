@@ -10,11 +10,23 @@ export const ALWAYS_TARGETS: readonly string[] = [".claude/skills", ".agents/ski
  * folder `init` set up here (it holds jubarteai/SKILL.md) — that is how `.windsurf/skills` is detected.
  */
 export function syncTargets(top: string): string[] {
+  return candidateTargets(top).filter((t) => !leavesRepository(top, t));
+}
+
+/**
+ * The candidate targets the sync leaves alone because the folder (or a parent) is a symlink. Reported by
+ * `skills status` and the foreground `skills sync`, so a skipped folder is never a silent one.
+ */
+export function skippedTargets(top: string): string[] {
+  return candidateTargets(top).filter((t) => leavesRepository(top, t));
+}
+
+function candidateTargets(top: string): string[] {
   const targets = new Set<string>(ALWAYS_TARGETS);
   for (const dirs of Object.values(SKILL_AGENT_DIRS)) {
     if (existsSync(join(top, dirs.project, "jubarteai", "SKILL.md"))) targets.add(dirs.project);
   }
-  return [...targets].filter((t) => !leavesRepository(top, t)).sort();
+  return [...targets].sort();
 }
 
 /**
