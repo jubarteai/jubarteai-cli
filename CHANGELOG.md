@@ -21,4 +21,4 @@ The first stable release. The terminal experience of the old install script, one
 
 - Progress and messages from `init`, `update`, `login`, `link` and `logout` go to stderr; reports (`--help`, `--version`, `status`, `doctor`, `completion`) stay on stdout. `update`'s report moved from stdout to stderr.
 - `init` asks whether to share the workspace binding and Codex's project setting before the checklist, and only on your own terminal.
-- Windows runs in the CI matrix and is reported, but does not yet gate a merge or a release (see RELEASING.md, "Windows in CI").
+- Windows is part of CI and gates a merge and a release like Linux and macOS: the whole suite, the integration and pseudo-terminal (ConPTY) tests included, runs there.

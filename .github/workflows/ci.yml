@@ -64,9 +64,6 @@ jobs:
     name: ${{ matrix.os }} / Node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
-    # Windows is run and reported but does not gate a merge or a release: the suite was written against POSIX
-    # (sh stub binaries, ":" in PATH, /dev/null) and is not portable yet. Remove this line once it is green.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:

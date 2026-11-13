@@ -131,7 +131,9 @@ and checks the banner, the checklist (Space, `d`, Enter), the closing tally, `NO
 
 ## Windows in CI
 
-The CI matrix runs on Windows too, but those jobs are `continue-on-error` (see `.github/workflows/ci.yml`): a Windows failure is visible on the run and does not block a pull request or the release job. The test suite still assumes POSIX in places (shell stubs, `/dev/null`, file modes), so Windows support is unverified until it passes there. The new pseudo-terminal tests (`node-pty`, ConPTY) are written to run on Windows too, and the 1.0 UI tests need no POSIX shell. To gate Windows: read the failing run's logs (`gh run view <id> --log-failed`, which needs `gh auth login`), port the remaining helpers (node stubs plus `.cmd` wrappers in place of `sh` stubs), and delete the `continue-on-error` line once the Windows entry is green, and consider adding a Windows floor (`22.23.5`) to the matrix's `include` list then.
+Windows gates a pull request and a release like Linux and macOS (one job, `windows-latest` / Node 24.x). The suite runs there whole: the init sandbox and the integration harness start the CLI on a `node.exe` hard-linked into the sandbox whose `node_modules/npm/bin` holds the npx/npm stubs (the CLI runs npx and npm as `node <npx-cli.js | npm-cli.js next to node>`, never through a PATH shim), with `.cmd` shims for `claude` and `codex`; the pseudo-terminal tests run on ConPTY. `test/setup-env.ts` mirrors `HOME` into `USERPROFILE` and points `TEMP` at the long name of the runner's 8.3 temp path. The few cases that are POSIX by nature skip on Windows and say why: file mode bits, `sh` syntax in a hook line, the absolute `"node" "script"` hook form (Windows registers the bare `jubarteai`), and a re-raised SIGINT.
+
+When a test fails, the **Failure digest** step lists every failed test as notice annotations on the job (Actions keeps only 10 error annotations per step), which can be read without access to the job log. To widen Windows coverage, add a floor (`22.23.5`) to the matrix's `include` list.
 
 ## Rollback
 
