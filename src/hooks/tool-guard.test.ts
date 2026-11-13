@@ -166,10 +166,15 @@ describe("toolGuardDecision: denies every person command, whatever the spelling"
 
 describe("toolGuardDecision: linear time (review R-S13)", () => {
   /** Milliseconds `fn` takes. The bounds below are far above linear time and far below the old exponential/quadratic. */
+  // Milliseconds of CPU this process spent in `fn`, not wall time: the suite runs test files in parallel, and on a
+  // small shared runner (3-core macOS) the spawn-heavy files beside this one stretched the wall clock past 6 s while the
+  // guard's own work stayed far below it. CPU time is what grows if the scan stops being linear, which is what these
+  // bounds guard against; the budgets are unchanged.
   const time = (fn: () => void): number => {
-    const start = performance.now();
+    const start = process.cpuUsage();
     fn();
-    return performance.now() - start;
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1000;
   };
 
   it("a run of flag tokens before a failed match, then a later person command: a deny, quickly", () => {
