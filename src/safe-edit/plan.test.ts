@@ -9,7 +9,7 @@
 // ported: a config it can't write is reported as failed (exit 1) and left as it was
 // ported: the key never appears in a summary line or a preview
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fakeStream, fakeTerminal } from "../../test/helpers/ui-streams.js";
@@ -30,7 +30,7 @@ afterEach(() => {
 
 function harness() {
   const out = fakeStream();
-  const ui = createUi(out, { plain: true, env: { LANG: "en_US.UTF-8" } });
+  const ui = createUi(out, { plain: true, platform: "linux", env: { LANG: "en_US.UTF-8" } });
   return { out, ui, timeline: ui.timeline() };
 }
 
@@ -245,8 +245,8 @@ describe("applyPlan: on a person's terminal", () => {
     );
     const groups = a.seen[0]?.groups ?? [];
     expect(groups.map((g) => [g.title, g.note, g.rows.map((r) => r.label)])).toEqual([
-      ["Repo", "/work/wt", ["Step agents-md"]],
-      ["Repo", "/work/main", ["Step binding"]],
+      ["Repo", resolve("/work/wt"), ["Step agents-md"]],
+      ["Repo", resolve("/work/main"), ["Step binding"]],
     ]);
     expect(new Set(groups.map((g) => g.key)).size).toBe(2);
   });

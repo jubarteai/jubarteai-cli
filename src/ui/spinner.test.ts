@@ -35,7 +35,7 @@ describe("spin", () => {
       [fakeStream(), { plain: true }],
       [fakeStream({ tty: true, columns: 80 }), { verbose: true }],
     ] as const) {
-      const ui = createUi(out, { ...opts, env: UTF8 });
+      const ui = createUi(out, { ...opts, platform: "linux", env: UTF8 });
       const pending = ui.spin("Working", after(200, () => 7));
       await vi.advanceTimersByTimeAsync(200);
       expect(await pending).toBe(7);
@@ -45,7 +45,7 @@ describe("spin", () => {
 
   it("shows no frame for fast work, braille frames for slow work, and restores the cursor on resolve", async () => {
     const out = fakeStream({ tty: true, columns: 80, depth: 24 });
-    const ui = createUi(out, { env: UTF8 });
+    const ui = createUi(out, { platform: "linux", env: UTF8 });
     const quick = ui.spin("Quick", after(10, () => undefined));
     await vi.advanceTimersByTimeAsync(10);
     await quick;
@@ -61,7 +61,7 @@ describe("spin", () => {
 
   it("uses ASCII frames off a UTF-8 terminal and restores the cursor on reject", async () => {
     const out = fakeStream({ tty: true, columns: 80, depth: 8 });
-    const ui = createUi(out, { env: { LANG: "C" } });
+    const ui = createUi(out, { platform: "linux", env: { LANG: "C" } });
     const failing = expect(
       ui.spin(
         "Boom",
@@ -109,7 +109,7 @@ describe("spin: a terminating signal while a frame is live", () => {
   async function liveSpinner(): Promise<{ out: ReturnType<typeof fakeStream>; finish: () => Promise<void> }> {
     const out = fakeStream({ tty: true, columns: 80, depth: 24 });
     const work = deferred();
-    const pending = createUi(out, { env: UTF8 }).spin("Slow", () => work.promise);
+    const pending = createUi(out, { platform: "linux", env: UTF8 }).spin("Slow", () => work.promise);
     await vi.advanceTimersByTimeAsync(200);
     expect(out.text()).toContain(HIDE);
     return {
@@ -124,7 +124,7 @@ describe("spin: a terminating signal while a frame is live", () => {
   it("listens for SIGINT and SIGTERM only while a frame is live, and never for fast work", async () => {
     const before = { SIGINT: listeners("SIGINT"), SIGTERM: listeners("SIGTERM") };
     // Fast work: done before the start delay, so no frame and no listener, then or later.
-    const quick = createUi(fakeStream({ tty: true, columns: 80, depth: 24 }), { env: UTF8 }).spin("Quick", async () => 1);
+    const quick = createUi(fakeStream({ tty: true, columns: 80, depth: 24 }), { platform: "linux", env: UTF8 }).spin("Quick", async () => 1);
     expect(await quick).toBe(1);
     await vi.advanceTimersByTimeAsync(500);
     for (const signal of SIGNALS) expect(addedSince(signal, before[signal])).toHaveLength(0);

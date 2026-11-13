@@ -97,7 +97,12 @@ jobs:
       - run: npm ci
       # The integration tests drive the built binary.
       - run: npm run build
-      - run: npm test
+      - run: npm test -- --reporter=default --reporter=json --outputFile.json=vitest-report.json
+      # Every failed test as a few notice annotations (Actions keeps only 10 error annotations per step, and
+      # annotations can be read without access to the job log).
+      - name: Failure digest
+        if: failure()
+        run: node scripts/ci-failure-digest.mjs vitest-report.json
 
   # Under a Node below the floor the entry point must refuse with the floor
   # message (exit 1), except `hook`, which exits 0 and says nothing so a harness

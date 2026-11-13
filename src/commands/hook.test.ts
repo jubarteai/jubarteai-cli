@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -320,7 +320,7 @@ describe("detection and per-harness output", () => {
     expect(parsed.additional_context).toContain(AGENT_A);
     expect(result.out.trimEnd().split("\n")).toHaveLength(1);
     expect(readSession("cursor", "cur-1")?.agent_id).toBe(AGENT_A);
-    expect(s.toolCalls()).toEqual([{ name: "connect", arguments: { description: `cursor on ${sandbox.repo.split("/").pop()?.toLowerCase()}` } }]);
+    expect(s.toolCalls()).toEqual([{ name: "connect", arguments: { description: `cursor on ${basename(sandbox.repo).toLowerCase()}` } }]);
   });
 
   it("Devin's environment makes it the Windsurf product, which has no injection: nothing printed, no request", async () => {

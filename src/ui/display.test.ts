@@ -1,18 +1,21 @@
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { displayPath, stripAnsi, truncate, visibleWidth } from "./display.js";
 
 describe("displayPath", () => {
-  const home = "/home/ada";
+  // POSIX-looking fixtures, made absolute for this platform (on Windows "/etc/hosts" is "D:\\etc\\hosts").
+  const home = resolve("/home/ada");
   it("prints ./ under the root, ~/ under home, and the absolute path elsewhere", () => {
     expect(displayPath("/home/ada/work/repo/AGENTS.md", { home, root: "/home/ada/work/repo" })).toBe("./AGENTS.md");
     expect(displayPath("/home/ada/.claude/settings.json", { home, root: "/home/ada/work/repo" })).toBe("~/.claude/settings.json");
-    expect(displayPath("/etc/hosts", { home, root: "/home/ada/work/repo" })).toBe("/etc/hosts");
+    expect(displayPath("/etc/hosts", { home, root: "/home/ada/work/repo" })).toBe(resolve("/etc/hosts"));
     expect(displayPath("/home/ada/work/repo", { home, root: "/home/ada/work/repo" })).toBe(".");
     expect(displayPath("/home/ada", { home })).toBe("~");
   });
   it("is not fooled by a sibling folder with the same prefix", () => {
-    expect(displayPath("/home/ada2/x", { home })).toBe("/home/ada2/x");
+    expect(displayPath("/home/ada2/x", { home })).toBe(resolve("/home/ada2/x"));
   });
   it("makes control characters and secrets safe", () => {
     expect(displayPath("/home/ada/a\u001b[31mb", { home })).toBe("~/a?[31mb");

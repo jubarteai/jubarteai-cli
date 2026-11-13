@@ -53,7 +53,7 @@ describe("INIT_COPY", () => {
       apply: async () => ({ id, label: `Step ${id}`, status }),
     });
     const out = fakeStream();
-    const ui = createUi(out, { plain: true, env: { LANG: "en_US.UTF-8" } });
+    const ui = createUi(out, { plain: true, platform: "linux", env: { LANG: "en_US.UTF-8" } });
     const results = await applyPlan([step("a", "configured"), step("b", "already configured"), step("c", "failed"), { ...step("d", "configured"), sensitive: true }], {
       tty: false,
       yes: false,
@@ -80,7 +80,7 @@ describe("INIT_COPY", () => {
       const term = fakeTerminal();
       try {
         const stream = fakeStream({ tty: true, columns: 100, depth: 24 });
-        const ui = createUi(stream, { ...(plain ? { plain: true } : {}), env: { LANG: "en_US.UTF-8" } });
+        const ui = createUi(stream, { ...(plain ? { plain: true } : {}), platform: "linux", env: { LANG: "en_US.UTF-8" } });
         const pending = applyPlan(
           [{ id: "a", label: "Step a", group: MACHINE_GROUP, files: [], sensitive: false, apply: async () => ({ id: "a", label: "Step a", status: "configured" }) } satisfies PlanStep],
           { tty: true, yes: false, ui, timeline: ui.timeline(), approval: "checklist", title: INIT_COPY.checklistTitle, agentSession: null },

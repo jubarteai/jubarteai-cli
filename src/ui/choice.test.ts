@@ -13,8 +13,8 @@ afterEach(() => {
   term = null;
 });
 
-const richUi = () => createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { env: UTF8 });
-const plainUi = () => createUi(fakeStream(), { plain: true, env: UTF8 });
+const richUi = () => createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { platform: "linux", env: UTF8 });
+const plainUi = () => createUi(fakeStream(), { plain: true, platform: "linux", env: UTF8 });
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
 const base = { question: "Install jubarteai@1.0.0?", options: ["yes", "no", "show"] as const, defaultIndex: 0, details: () => ["npm install -g jubarteai@1.0.0"] };
 

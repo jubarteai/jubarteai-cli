@@ -9,11 +9,11 @@ const UTF8 = { LANG: "en_US.UTF-8" };
 
 function rich(columns = 100) {
   const out = fakeStream({ tty: true, columns, depth: 24 });
-  return { out, ui: createUi(out, { env: UTF8 }) };
+  return { out, ui: createUi(out, { platform: "linux", env: UTF8 }) };
 }
 function plain() {
   const out = fakeStream();
-  return { out, ui: createUi(out, { plain: true, env: UTF8 }) };
+  return { out, ui: createUi(out, { plain: true, platform: "linux", env: UTF8 }) };
 }
 
 const hooks: StepResult = { id: "claude-code:hooks", label: "Add the JubarteAI session hooks to ~/.claude/settings.json", status: "configured" };

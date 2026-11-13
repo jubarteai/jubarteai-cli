@@ -1,5 +1,7 @@
 // What a person approves, built straight from the steps that will run: the checklist's groups and rows, and the exact
 // entries behind `d`. Pure functions, so these tests build steps by hand and never touch a file.
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { HARNESS_LABELS } from "../harness/labels.js";
@@ -133,7 +135,8 @@ describe("exactChanges", () => {
 
   it("shows a step's files, home as ~, when it has no preview", () => {
     const s = step("files", MACHINE_GROUP, { files: [`${HOME}/.codex/hooks.json`, "/etc/elsewhere.json"] });
-    expect(exactChanges([s], allKeys([s]), HOME)).toEqual(["Step files", "      ~/.codex/hooks.json", "      /etc/elsewhere.json"]);
+    // A path outside home is printed absolute for this platform ("D:\\etc\\elsewhere.json" on Windows).
+    expect(exactChanges([s], allKeys([s]), HOME)).toEqual(["Step files", "      ~/.codex/hooks.json", `      ${resolve("/etc/elsewhere.json")}`]);
   });
 
   it("indents every line of a multi-line preview and makes each one safe to print", () => {

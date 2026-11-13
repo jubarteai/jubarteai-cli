@@ -20,7 +20,8 @@ afterEach(() => {
 });
 
 describe("resolveCliCommand", () => {
-  it("quotes this node and the real path of the bin script", () => {
+  // A real temp path holds backslashes on Windows, which the POSIX rule (rightly) refuses to quote.
+  it.skipIf(!posix)("quotes this node and the real path of the bin script", () => {
     expect(resolveCliCommand("/usr/local/bin/node", script, "linux")).toBe(`"/usr/local/bin/node" "${script}"`);
   });
 
@@ -31,7 +32,8 @@ describe("resolveCliCommand", () => {
     expect(resolveCliCommand("/usr/local/bin/node", link, "linux")).toBe(`"/usr/local/bin/node" "${script}"`);
   });
 
-  it("uses the running process by default", () => {
+  // A real temp path holds backslashes on Windows, which the POSIX rule (rightly) refuses to quote.
+  it.skipIf(!posix)("uses the running process by default", () => {
     const original = process.argv[1];
     process.argv[1] = script;
     try {
@@ -99,7 +101,8 @@ describe("resolveCliCommand: where the quoted form can't work", () => {
     expect(cliCommandInfo("/usr/local/bin/node", link, "linux").npx).toBe(true);
   });
 
-  it("does not flag an ordinary install as npx", () => {
+  // A real temp path holds backslashes on Windows, which the POSIX rule (rightly) refuses to quote.
+  it.skipIf(!posix)("does not flag an ordinary install as npx", () => {
     expect(cliCommandInfo("/usr/local/bin/node", script, "linux")).toEqual({ command: `"/usr/local/bin/node" "${script}"`, npx: false });
   });
 });

@@ -5,7 +5,7 @@ import { detectUiMode } from "./env.js";
 
 const tty = (columns = 100, depth = 24) => fakeStream({ tty: true, columns, depth });
 const mode = (stream: object, env: NodeJS.ProcessEnv = {}, extra: { plain?: boolean; verbose?: boolean; platform?: NodeJS.Platform } = {}) =>
-  detectUiMode(stream, { env: { LANG: "en_US.UTF-8", ...env }, ...extra });
+  detectUiMode(stream, { env: { LANG: "en_US.UTF-8", ...env }, platform: "linux", ...extra });
 
 describe("detectUiMode precedence", () => {
   it("is rich on a terminal with the depth the terminal reports", () => {
@@ -56,8 +56,8 @@ describe("detectUiMode precedence", () => {
   });
 
   it("glyph set: UTF-8 locale on POSIX; WT_SESSION, VS Code or ConEmu on Windows", () => {
-    expect(detectUiMode(tty(), { env: { LANG: "C" } }).unicode).toBe(false);
-    expect(detectUiMode(tty(), { env: { LC_ALL: "en_US.utf8", LANG: "C" } }).unicode).toBe(true);
+    expect(detectUiMode(tty(), { env: { LANG: "C" }, platform: "linux" }).unicode).toBe(false);
+    expect(detectUiMode(tty(), { env: { LC_ALL: "en_US.utf8", LANG: "C" }, platform: "linux" }).unicode).toBe(true);
     expect(detectUiMode(tty(), { env: {}, platform: "win32" }).unicode).toBe(false);
     expect(detectUiMode(tty(), { env: { WT_SESSION: "x" }, platform: "win32" }).unicode).toBe(true);
     expect(detectUiMode(tty(), { env: { TERM_PROGRAM: "vscode" }, platform: "win32" }).unicode).toBe(true);

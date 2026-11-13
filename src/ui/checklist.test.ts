@@ -14,8 +14,8 @@ afterEach(() => {
   term = null;
 });
 
-const richUi = () => createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { env: UTF8 });
-const plainUi = () => createUi(fakeStream(), { plain: true, env: UTF8 });
+const richUi = () => createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { platform: "linux", env: UTF8 });
+const plainUi = () => createUi(fakeStream(), { plain: true, platform: "linux", env: UTF8 });
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
 
 function groups(): ChecklistGroup[] {
@@ -102,7 +102,7 @@ describe("checklist: a list taller than the terminal", () => {
 
   it("uses ASCII arrows for the more lines off a UTF-8 locale", async () => {
     term = fakeTerminal({ rows: 12 });
-    const pending = checklist(createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { env: { LANG: "C" } }), tallInput());
+    const pending = checklist(createUi(fakeStream({ tty: true, columns: 100, depth: 24 }), { platform: "linux", env: { LANG: "C" } }), tallInput());
     await vi.waitFor(() => expect(lastFrame(term?.shown() ?? "").join("\n")).toMatch(/v \d+ more/));
     expect(term.shown()).not.toMatch(/[↑↓]/);
     term.type("\u001b[A");
@@ -214,7 +214,7 @@ describe("checklist: rich form", () => {
     term = fakeTerminal();
     const wide = input();
     wide.groups[0]!.rows[0]!.label = "x".repeat(300);
-    const pending = checklist(createUi(fakeStream({ tty: true, columns: 50, depth: 24 }), { env: UTF8 }), wide);
+    const pending = checklist(createUi(fakeStream({ tty: true, columns: 50, depth: 24 }), { platform: "linux", env: UTF8 }), wide);
     await tick();
     for (const line of stripAnsi(term.shown()).split("\n")) expect(Array.from(line).length).toBeLessThanOrEqual(50);
     term.type("\r");
