@@ -110,14 +110,20 @@ describe("syntax checks with the shells that are installed", () => {
     expect(check.status, check.stderr).toBe(0);
   });
 
-  it("PowerShell parses the script (skipped loudly when pwsh is not installed)", () => {
-    const probe = spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8" });
-    if (probe.error !== undefined || probe.status !== 0) {
+  // One pwsh start, not a probe and then a parse: a cold pwsh takes seconds on a CI runner, and two of them overran
+  // vitest's 5 s default on Ubuntu. ENOENT means pwsh is not installed, and the check is skipped loudly.
+  it("PowerShell parses the script (skipped loudly when pwsh is not installed)", { timeout: 60_000 }, () => {
+    const script = completionScript("powershell", COMMANDS);
+    const check = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", "$null = [scriptblock]::Create([Console]::In.ReadToEnd()); 'ok'"], {
+      input: script,
+      encoding: "utf8",
+      timeout: 55_000,
+    });
+    if ((check.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
       console.warn("PowerShell completion syntax check skipped: pwsh is not installed here");
       return;
     }
-    const script = completionScript("powershell", COMMANDS);
-    const check = spawnSync("pwsh", ["-NoProfile", "-Command", "$null = [scriptblock]::Create([Console]::In.ReadToEnd()); 'ok'"], { input: script, encoding: "utf8" });
+    expect(check.error, "pwsh did not finish").toBeUndefined();
     expect(check.stdout.trim(), check.stderr).toBe("ok");
   });
 });
