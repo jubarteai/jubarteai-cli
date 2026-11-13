@@ -16,6 +16,13 @@ async function run(argv: string[]) {
   return { code, out, err };
 }
 
+/** Whether `shell` can be started here. A runner without zsh (Ubuntu) or fish skips that shell's syntax check. */
+function installed(shell: string): boolean {
+  if (process.platform === "win32") return false; // bash on a Windows runner may be WSL's stub; these checks are POSIX-only.
+  const probe = spawnSync(shell, ["-c", "exit 0"], { stdio: "ignore" });
+  return probe.error === undefined && probe.status === 0;
+}
+
 const publicNames = COMMANDS.filter((command) => command.group !== "internal").map((command) => command.name);
 
 describe("completion scripts", () => {
@@ -78,7 +85,7 @@ describe("completion scripts", () => {
 
   it("quotes descriptions with apostrophes and colons so the script stays valid", () => {
     const registry = [{ name: "odd", summary: "It's a: test", group: "setup" as const, flags: [{ name: "x", type: "boolean" as const, description: "don't [do] it: really" }], run: async () => 0 }];
-    for (const shell of ["bash", "zsh"] as const) {
+    for (const shell of (["bash", "zsh"] as const).filter(installed)) {
       const check = spawnSync(shell, ["-n"], { input: completionScript(shell, registry), encoding: "utf8" });
       expect(check.status, `${shell}: ${check.stderr}`).toBe(0);
     }
@@ -86,9 +93,8 @@ describe("completion scripts", () => {
 });
 
 describe("syntax checks with the shells that are installed", () => {
-  const available = (shell: string): boolean => spawnSync(shell, ["--version"], { stdio: "ignore" }).status === 0 || shell === "bash" || shell === "zsh";
   for (const shell of ["bash", "zsh"] as const) {
-    it.skipIf(process.platform === "win32" || !available(shell))(`${shell} -n accepts the script`, () => {
+    it.skipIf(!installed(shell))(`${shell} -n accepts the script`, () => {
       const check = spawnSync(shell, ["-n"], { input: completionScript(shell, COMMANDS), encoding: "utf8" });
       expect(check.status, check.stderr).toBe(0);
     });

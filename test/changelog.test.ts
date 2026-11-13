@@ -1,11 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error the release script is plain JavaScript outside the TypeScript project
 import { changelogSection } from "../scripts/changelog-section.mjs";
 
-const CLI_ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath, not .pathname: on Windows .pathname is "/D:/a/..." and node cannot open the script.
+const CLI_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const section = changelogSection as (markdown: string, version: string) => string | null;
 
 describe("changelog-section", () => {

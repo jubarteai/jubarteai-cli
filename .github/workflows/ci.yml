@@ -35,6 +35,11 @@ jobs:
           # "22.x" would otherwise resolve to an older release preinstalled on the runner.
           check-latest: true
           cache: npm
+      # The completion tests syntax-check the zsh and fish scripts with the real shells and skip a shell that is
+      # missing. Ubuntu runners ship neither, so install them here; macOS already has zsh.
+      - name: Install zsh and fish for the completion syntax checks
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zsh fish
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
