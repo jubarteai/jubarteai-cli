@@ -7,8 +7,9 @@ import { statSync } from "node:fs";
 import { SKILLS_LOCK_STALE_MS } from "../constants.js";
 import { gitTop } from "../git/layout.js";
 import { childEnv } from "../process-env.js";
-import { clashNotice } from "./notice.js";
+import { clashNotice, skippedTargetsNotice } from "./notice.js";
 import { lockPath, readState, shouldSync, writeState } from "./state.js";
+import { skippedTargets } from "./targets.js";
 
 export type HookSkillsInput = {
   cwd: string;
@@ -67,7 +68,18 @@ export function skillsHookLines(input: HookSkillsInput, deps: Partial<HookSkills
         dirty = true;
       }
     }
-    if (dirty) writeState(top, { ...state, pending_notice: [], clashes: state.clashes });
+    // A skills folder the sync leaves alone because it is a symlink: told once (a background sync can't print,
+    // and one can become a link after the last sync), again only after it stops and starts being one. Only in a
+    // repo whose workspace has had company skills, so a symlinked folder elsewhere stays quiet.
+    let skippedReported = state.skipped_reported;
+    if (state.synced_at !== null && (state.revision ?? 0) > 0) {
+      const skipped = skippedTargets(top);
+      const fresh = skipped.filter((t) => !skippedReported.includes(t));
+      if (fresh.length > 0) lines.push(skippedTargetsNotice(fresh).slice(0, LINE_MAX));
+      if (fresh.length > 0 || skippedReported.some((t) => !skipped.includes(t))) dirty = true;
+      skippedReported = skipped;
+    }
+    if (dirty) writeState(top, { ...state, pending_notice: [], clashes: state.clashes, skipped_reported: skippedReported });
 
     // An environment key can't be handed to a detached child (it is scrubbed from child environments), so only
     // saved logins start a background sync.

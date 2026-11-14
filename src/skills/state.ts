@@ -19,6 +19,8 @@ export type SkillsState = {
   /** Names whose clash (an unmanaged folder of the same name) was already shown to the agent. */
   clashes: Record<string, { reported: boolean; dir?: string }>;
   created_dirs: string[];
+  /** Symlinked targets the sync skips whose hook notice was already shown (a target that stops being skipped drops out). */
+  skipped_reported: string[];
   last_failure_at: number | null;
   synced_at: number | null;
 };
@@ -33,6 +35,7 @@ export function emptyState(origin: string): SkillsState {
     pending_notice: [],
     clashes: {},
     created_dirs: [],
+    skipped_reported: [],
     last_failure_at: null,
     synced_at: null,
   };
@@ -77,6 +80,7 @@ export function readState(top: string, origin: string): SkillsState {
       pending_notice: Array.isArray(raw["pending_notice"]) ? raw["pending_notice"].filter((l): l is string => typeof l === "string") : [],
       clashes: isRecord(raw["clashes"]) ? (raw["clashes"] as Record<string, { reported: boolean; dir?: string }>) : {},
       created_dirs: Array.isArray(raw["created_dirs"]) ? raw["created_dirs"].filter((l): l is string => typeof l === "string") : [],
+      skipped_reported: Array.isArray(raw["skipped_reported"]) ? raw["skipped_reported"].filter((l): l is string => typeof l === "string") : [],
       last_failure_at: typeof raw["last_failure_at"] === "number" ? raw["last_failure_at"] : null,
       synced_at: typeof raw["synced_at"] === "number" ? raw["synced_at"] : null,
     };

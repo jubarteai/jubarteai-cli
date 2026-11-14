@@ -293,6 +293,7 @@ async function sync(opts: SyncOptions, deps: SyncDeps, state: SkillsState, switc
     pending_notice: [...state.pending_notice],
     clashes: nextClashes,
     created_dirs: state.created_dirs,
+    skipped_reported: state.skipped_reported,
     last_failure_at: result.failures > 0 ? deps.now() : null,
     synced_at: deps.now(),
   };

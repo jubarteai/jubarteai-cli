@@ -16,7 +16,7 @@ Company skills: the skills your workspace's owners and admins approve are synced
 ### Notes
 
 - Files are downloaded from signed storage URLs with no credentials and no redirects, and each file's size and sha256 are checked before anything is written. Folders are staged and swapped in, so an interrupted sync leaves the old or the new folder, never half of one.
-- A skills folder that is a symlink (a shared `.claude/skills`, say) is never written through. `skills status` lists it under `skipped_targets`, and a foreground `skills sync` prints a line saying so (and carries `skipped_targets` in its result), so the skip is never silent.
+- A skills folder that is a symlink (a shared `.claude/skills`, say) is never written through. `skills status` lists it under `skipped_targets`, a foreground `skills sync` prints a line saying so (and carries `skipped_targets` in its result), and the hooks tell the agent once per folder (also when the folder becomes a link after the last sync, and again if it stops and starts being one), so the skip is never silent.
 - An older server without company skills is treated as having none. Nothing changes for workspaces on a plan without them.
 
 ## 1.0.0

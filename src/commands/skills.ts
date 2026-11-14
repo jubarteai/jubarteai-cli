@@ -14,6 +14,7 @@ import { findBinding } from "../binding/binding.js";
 import { gitTop } from "../git/layout.js";
 import { writeJson } from "../output.js";
 import { isInteractive, confirm } from "../prompt.js";
+import { skippedTargetsNotice } from "../skills/notice.js";
 import { runSync } from "../skills/sync.js";
 import type { SyncResult } from "../skills/sync.js";
 import { writeExcludeBlock } from "../skills/exclude.js";
@@ -36,9 +37,7 @@ function bound(ctx: CommandContext): { top: string; workspaceId: string } {
   return { top: gitTop(ctx.cwd) ?? binding.inheritedFrom ?? binding.root, workspaceId: binding.workspace.id };
 }
 
-function skippedNote(skipped: readonly string[]): string {
-  return `${skipped.join(", ")} ${skipped.length === 1 ? "is a symlink" : "are symlinks"}, so company skills are not synced there. Replace the link with a real folder to sync them.`;
-}
+const skippedNote = skippedTargetsNotice;
 
 function summary(result: SyncResult, skipped: readonly string[]) {
   return {
