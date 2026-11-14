@@ -25,6 +25,7 @@ import type { CleanupScope, InitCtx, ManualInstructions } from "../harness/types
 import { planInstructionRemoval } from "../install/agents-md.js";
 import { cliCommandInfo } from "../install/cli-command.js";
 import { planSkillRemoval } from "../install/skill.js";
+import { companySkillsRemoval } from "../skills/uninstall-step.js";
 import { safeForDisplay } from "../output.js";
 import { homeDir } from "../paths.js";
 import { isInteractive } from "../prompt.js";
@@ -207,6 +208,10 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   });
 
   const steps = items.filter((item): item is PlanStep => !isManual(item));
+  // Company skills this CLI synced into the repo: removed only when the person says so (default No on a terminal,
+  // --yes removes, no terminal and no --yes keeps them and says how to remove them later).
+  const companySkills = root === null ? null : await companySkillsRemoval(ctx.cwd, { yes, tty, projectRoot: root });
+  if (companySkills?.step != null) steps.push(companySkills.step);
   const manuals = items.filter(isManual).filter((m, i, all) => all.findIndex((o) => o.title === m.title && o.lines.join("\n") === m.lines.join("\n")) === i);
   const seats = savedSeats();
   const signOut = !flag("keep-login") && seats.length > 0 ? signOutStep(seats) : null;
@@ -236,6 +241,7 @@ async function run(ctx: CommandContext, args: ParsedArgs): Promise<number> {
   if (signedOut?.status === "configured") {
     for (const [, seat] of seats) lines.push(`${seatLabel(seat)}: ${UNINSTALL_COPY.stillWorks}`);
   }
+  if (companySkills?.keptHint != null) lines.push("", companySkills.keptHint);
   if (manuals.length > 0) {
     lines.push("", "Do these by hand:");
     for (const item of manuals) {

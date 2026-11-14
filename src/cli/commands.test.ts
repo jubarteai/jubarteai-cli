@@ -23,7 +23,7 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
   return { code, out: out.text(), err: err.text() };
 }
 
-const SETUP = ["init", "link", "doctor", "update", "uninstall", "completion"];
+const SETUP = ["init", "link", "doctor", "update", "skills", "uninstall", "completion"];
 const ACCOUNT = ["login", "logout", "status"];
 const TOOL_COMMAND_NAMES = TOOL_SPECS.map((spec) => spec.command);
 /** Every command of spec 5.3-5.5 a person sees in plain `--help` (hook is internal). */
@@ -45,7 +45,7 @@ describe("COMMANDS", () => {
 
   it("registers setup, account, connect, exactly the spec 5.3 tool commands, call, inbox and hook, in help order", () => {
     expect(COMMANDS.map((command) => command.name)).toEqual([...PUBLIC_COMMANDS, "hook"]);
-    expect(TOOL_COMMAND_NAMES).toHaveLength(16);
+    expect(TOOL_COMMAND_NAMES).toHaveLength(18);
     expect(TOOL_COMMAND_NAMES[0]).toBe("connect");
     expect(COMMANDS.filter((command) => command.group === "setup").map((command) => command.name)).toEqual(SETUP);
     expect(COMMANDS.filter((command) => command.group === "account").map((command) => command.name)).toEqual(ACCOUNT);

@@ -12,9 +12,11 @@ const APP_SHAPE: Record<string, string[]> = {
   disconnect: ["agent_id"],
   echo_current_task: ["agent_id", "branches", "description", "paths", "refs", "repositories", "tickets", "title"],
   get_knowledge: ["agent_id", "id", "name"],
+  get_skill: ["agent_id", "manifest", "name", "path"],
   list_agents: ["agent_id"],
   list_knowledge_gaps: ["agent_id", "limit", "status"],
   list_knowledge_merges: ["agent_id", "limit", "status"],
+  list_skills: ["agent_id", "repository"],
   message_agents: ["agent_id", "all", "content", "priority", "reply_to", "to_agent_ids"],
   release: ["agent_id", "resource"],
   resolve_knowledge_merge: ["action", "agent_id", "description", "id", "snooze_days", "title"],
@@ -24,8 +26,8 @@ const APP_SHAPE: Record<string, string[]> = {
 };
 
 describe("TOOL_SPECS", () => {
-  it("covers exactly the 16 tools the app registers, with their argument names", () => {
-    expect(Object.keys(APP_SHAPE)).toHaveLength(16);
+  it("covers exactly the 18 tools the app registers, with their argument names", () => {
+    expect(Object.keys(APP_SHAPE)).toHaveLength(18);
     expect(toolSpecShape()).toEqual(APP_SHAPE);
   });
 

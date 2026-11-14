@@ -22,7 +22,7 @@ export const PERSON_COMMANDS = ["login", "logout", "link", "init", "update", "un
 export const PERSON_COMMAND_LIST = `${PERSON_COMMANDS.slice(0, -1).join(", ")} and ${PERSON_COMMANDS[PERSON_COMMANDS.length - 1]}`;
 
 /** Read-only commands outside the tool group that an agent is told to run (status, doctor) or uses to drain its inbox. */
-const AGENT_EXTRA_COMMANDS = ["call", "inbox", "status", "doctor"] as const;
+const AGENT_EXTRA_COMMANDS = ["call", "inbox", "status", "doctor", "skills"] as const;
 
 /** Every command an allowlist may pre-approve: each MCP tool command (connect included), then call, inbox, status, doctor. */
 export const AGENT_COMMANDS: readonly string[] = Object.freeze([...TOOL_SPECS.map((spec) => spec.command), ...AGENT_EXTRA_COMMANDS]);

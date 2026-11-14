@@ -38,6 +38,8 @@ const run = (argv: string[]) => runCli(TOOL_COMMANDS, argv, sandbox.repo);
 // One row per command: the argv, the tool it must call and the arguments it must send.
 const CASES: Array<[command: string, argv: string[], tool: string, args: Record<string, unknown>]> = [
   ["disconnect", ["disconnect"], "disconnect", {}],
+  ["list-skills", ["list-skills", "--repository", "acme-app"], "list_skills", { repository: "acme-app" }],
+  ["get-skill", ["get-skill", "--name", "pdf-tools", "--manifest"], "get_skill", { name: "pdf-tools", manifest: true }],
   ["list-agents", ["list-agents"], "list_agents", {}],
   [
     "echo-current-task",
@@ -85,11 +87,11 @@ const CASES: Array<[command: string, argv: string[], tool: string, args: Record<
   ],
 ];
 
-describe("the 15 tool commands", () => {
+describe("the 17 tool commands", () => {
   it("cover every command of TOOL_COMMANDS", () => {
     const covered = new Set(CASES.map(([, argv]) => argv[0]));
     expect([...covered].sort()).toEqual(TOOL_COMMANDS.map((c) => c.name).sort());
-    expect(TOOL_COMMANDS).toHaveLength(15);
+    expect(TOOL_COMMANDS).toHaveLength(17);
     expect(TOOL_COMMANDS.every((c) => c.group === "tools")).toBe(true);
   });
 

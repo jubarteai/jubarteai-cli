@@ -2,6 +2,23 @@
 
 All notable changes to the `jubarteai` command line. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows [Semantic Versioning](https://semver.org/); see [STABILITY.md](STABILITY.md) for what 1.x promises.
 
+## 1.1.0
+
+Company skills: the skills your workspace's owners and admins approve are synced into each repository, so every connected agent uses them like local skills.
+
+### Added
+
+- **`jubarteai skills sync | status | clean`.** `sync` writes the workspace's enabled skills into the repo's skill folders (`.claude/skills` and `.agents/skills`, plus any other harness folder `init` set up, such as `.windsurf/skills`), removes the ones no longer enabled, and keeps them out of `git status` with a managed block in `.git/info/exclude`. Each folder carries an ownership marker; a folder without one is never touched and is reported as a clash. `status` is offline. `clean` removes only what the CLI synced.
+- **Automatic sync from the hooks.** `connect` and `check_inbox` now return a `skills_revision`; when it differs from what the repo last synced, the session-start and prompt hooks start a detached background sync (never waiting for it) and, once, tell the agent what changed. After a failure, a new sync waits 10 minutes.
+- **Two tools: `list-skills` and `get-skill`** (`list_skills`, `get_skill`), also usable without the CLI sync. `get-skill --manifest` returns each file's path, size, sha256, executable bit and a short-lived download URL.
+- **`uninstall`** asks whether to remove the company skills it synced into the repo (default No; `--yes` removes them; without a terminal they are kept and `jubarteai skills clean` is named).
+
+### Notes
+
+- Files are downloaded from signed storage URLs with no credentials and no redirects, and each file's size and sha256 are checked before anything is written. Folders are staged and swapped in, so an interrupted sync leaves the old or the new folder, never half of one.
+- A skills folder that is a symlink (a shared `.claude/skills`, say) is never written through. `skills status` lists it under `skipped_targets`, a foreground `skills sync` prints a line saying so (and carries `skipped_targets` in its result), and the hooks tell the agent once per folder (also when the folder becomes a link after the last sync, and again if it stops and starts being one), so the skip is never silent.
+- An older server without company skills is treated as having none. Nothing changes for workspaces on a plan without them.
+
 ## 1.0.0
 
 The first stable release. The terminal experience of the old install script, one approval for everything, and a command line you can depend on.

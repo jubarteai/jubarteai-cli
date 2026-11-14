@@ -81,6 +81,15 @@
         "name": "string"
       }
     },
+    "get-skill": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "manifest": "boolean",
+        "name": "string",
+        "path": "string"
+      }
+    },
     "hook": {
       "group": "internal",
       "flags": {
@@ -136,6 +145,13 @@
         "json": "json",
         "limit": "number",
         "status": "string"
+      }
+    },
+    "list-skills": {
+      "group": "tools",
+      "flags": {
+        "json": "json",
+        "repository": "string"
       }
     },
     "login": {
@@ -196,6 +212,14 @@
         "repositories": "string[]"
       }
     },
+    "skills": {
+      "group": "setup",
+      "flags": {
+        "background": "boolean",
+        "if-changed": "number",
+        "quiet": "boolean"
+      }
+    },
     "status": {
       "group": "account",
       "flags": {
@@ -250,9 +274,11 @@
     "create_knowledge": "create-knowledge",
     "echo_current_task": "echo-current-task",
     "get_knowledge": "get-knowledge",
+    "get_skill": "get-skill",
     "list_agents": "list-agents",
     "list_knowledge_gaps": "list-knowledge-gaps",
     "list_knowledge_merges": "list-knowledge-merges",
+    "list_skills": "list-skills",
     "message_agents": "message-agents",
     "resolve_knowledge_merge": "resolve-knowledge-merge",
     "search_knowledge": "search-knowledge",

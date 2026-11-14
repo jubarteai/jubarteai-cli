@@ -28,6 +28,8 @@ export const SERVER_TOOLS = [
   "echo_current_task",
   "search_knowledge",
   "get_knowledge",
+  "list_skills",
+  "get_skill",
   "create_knowledge",
   "update_knowledge",
   "verify_knowledge",

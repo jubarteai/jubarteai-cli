@@ -317,7 +317,7 @@ describe("tool commands", () => {
   });
 
   // One row per tool command: the flags that exercise its arguments. The fake accepts anything; the table
-  // is checked against the CLI's own list of tools and against the server's 16.
+  // is checked against the CLI's own list of tools and against the server's 18.
   const COMMANDS: Record<string, { args: string[]; expect?: Record<string, unknown> }> = {
     connect: { args: ["--description", "again"] },
     disconnect: { args: [] },
@@ -334,6 +334,8 @@ describe("tool commands", () => {
     release: { args: ["--resource", "src/a.ts"], expect: { resource: "src/a.ts" } },
     "list-knowledge-gaps": { args: ["--status", "open", "--limit", "5"], expect: { status: "open", limit: 5 } },
     "list-knowledge-merges": { args: ["--limit", "5"], expect: { limit: 5 } },
+    "list-skills": { args: ["--repository", "acme-app"], expect: { repository: "acme-app" } },
+    "get-skill": { args: ["--name", "pdf-tools", "--manifest"], expect: { name: "pdf-tools", manifest: true } },
     "resolve-knowledge-merge": { args: ["--id", "m1", "--action", "snooze", "--snooze-days", "7"], expect: { id: "m1", action: "snooze", snooze_days: 7 } },
   };
 

@@ -202,6 +202,18 @@ jubarteai call <tool> --json '{"limit": 5}'
 
 `call` fills in `agent_id` from `--agent` or the session when the tool needs one.
 
+## Company skills
+
+Skills your workspace's owners and admins approve in the dashboard (Skills Repository) are synced into the repo you work in, so agents use them like local skills:
+
+```bash
+jubarteai skills sync      # write the enabled skills into .claude/skills and .agents/skills
+jubarteai skills status    # what is synced here, and what is in the way (offline)
+jubarteai skills clean     # remove only the folders this CLI synced
+```
+
+With hooks installed (`jubarteai init`), the session hooks sync in the background whenever the workspace's skill set changes; run `sync` yourself for a harness without hooks. Synced folders are listed in `.git/info/exclude`, carry a `.jubarteai-skill.json` marker, and a folder you made yourself with the same name is never overwritten. `list-skills` and `get-skill` give the same skills through the tools.
+
 ## Inbox
 
 ```sh
