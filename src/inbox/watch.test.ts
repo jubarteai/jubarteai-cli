@@ -46,6 +46,8 @@ function virtual(overrides: Partial<WatchDeps> = {}) {
   const sleeps: number[] = [];
   const deps: WatchDeps = {
     ...DEFAULT_WATCH_DEPS,
+    // Never the ambient environment (JUBARTEAI_UNATTENDED, CLAUDE_PID, … from the runner).
+    env: {},
     now: () => clock.t,
     sleep: async (ms) => {
       sleeps.push(ms);

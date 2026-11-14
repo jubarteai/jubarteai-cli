@@ -34,6 +34,10 @@ afterEach(async () => {
 
 const FAST: WatchDeps = {
   ...DEFAULT_WATCH_DEPS,
+  // Never the ambient environment: a runner that sets JUBARTEAI_UNATTENDED, a
+  // CLAUDE_CODE_ENTRYPOINT other than `cli` or a CLAUDE_PID would otherwise
+  // trip the --session unattended guard or pick the parent to watch.
+  env: {},
   retryAfterServerMs: 5,
   retryAfterNetworkMs: 5,
   minPollMs: 1,
