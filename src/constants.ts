@@ -50,6 +50,16 @@ export const INBOX_RETRY_AFTER_NETWORK_MS = 5_000;
 export const INBOX_MIN_POLL_MS = 1_000;
 /** Retry delays get up to this fraction added, so many watchers don't retry in step. */
 export const INBOX_RETRY_JITTER = 0.2;
+/** The extend endpoint, appended to the watch address the server issued (`<origin>/api/mcp/inbox-watch` + this). */
+export const INBOX_EXTEND_SUFFIX = "/extend";
+/** Longest one extend request may last (the server answers within about 8 s). */
+export const INBOX_EXTEND_TIMEOUT_MS = 10_000;
+/** A session watch renews this long before it expires, so a retry or two fit before the old expiry (or half the window, if shorter). */
+export const INBOX_RENEW_AHEAD_MS = 120_000;
+/** A session watch stops for good after this long, whatever the server says. */
+export const INBOX_SESSION_MAX_MS = 12 * 60 * 60 * 1000;
+/** How often a session watch checks that the process that started it is still there. */
+export const INBOX_PARENT_CHECK_MS = 15_000;
 
 /** Hosts for which a plain `http://` origin is accepted (local development only). */
 export const LOOPBACK_HOSTS: readonly string[] = ["127.0.0.1", "localhost", "[::1]"];
