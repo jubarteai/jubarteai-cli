@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { acquireWatchLock, DEFAULT_LOCK_DEPS } from "./lock.js";
+import { acquireWatchLock, DEFAULT_LOCK_DEPS, isWatchLockHeld } from "./lock.js";
 import type { LockDeps } from "./lock.js";
 
 const AGENT_A = "11111111-1111-4111-8111-111111111111";
@@ -185,6 +185,33 @@ describe("acquireWatchLock", () => {
     chmodSync(dir, 0o777);
     expect(await acquireWatchLock(AGENT_A, "watch", deps(111, new Set([111])))).toEqual({ kind: "unavailable" });
     expect(lstatSync(dir).isDirectory()).toBe(true);
+  });
+});
+
+describe("isWatchLockHeld", () => {
+  it("is true while a live watcher holds the lock, false once it is released or its process is gone, and never changes anything", async () => {
+    const alive = new Set([111]);
+    expect(isWatchLockHeld(AGENT_A, deps(999, alive))).toBe(false);
+    const held = await acquireWatchLock(AGENT_A, "session", deps(111, alive));
+    expect(held.kind).toBe("acquired");
+    expect(isWatchLockHeld(AGENT_A, deps(999, alive))).toBe(true);
+    expect(isWatchLockHeld(AGENT_B, deps(999, alive))).toBe(false);
+    alive.delete(111);
+    expect(isWatchLockHeld(AGENT_A, deps(999, alive))).toBe(false);
+    // Reading never reclaimed or removed the stale file.
+    expect(existsSync(lockFile(AGENT_A))).toBe(true);
+    alive.add(111);
+    if (held.kind === "acquired") held.lock.release();
+    expect(isWatchLockHeld(AGENT_A, deps(999, alive))).toBe(false);
+  });
+
+  it("treats a fresh unreadable lock as held (a holder may be mid-write) and an old one as not", () => {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(lockFile(AGENT_A), "", { mode: 0o600 });
+    expect(isWatchLockHeld(AGENT_A, deps(999, new Set()))).toBe(true);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockFile(AGENT_A), old, old);
+    expect(isWatchLockHeld(AGENT_A, deps(999, new Set()))).toBe(false);
   });
 });
 

@@ -19,10 +19,19 @@ import { NOT_SIGNED_IN_LINE, UNREACHABLE_LINE, composeInjection, formatInjection
 import type { HookInput } from "./input.js";
 import { homeDir } from "../paths.js";
 import { readJsonObject } from "../safe-edit/json-edit.js";
+import { unattendedReason } from "../inbox/guards.js";
+import { isWatchLockHeld } from "../inbox/lock.js";
+import { hasRunningWatcher, stopReminderOutput } from "./stop-watch.js";
 
-export type HookEvent = "session-start" | "user-prompt-submit" | "session-end";
+export type HookEvent = "session-start" | "user-prompt-submit" | "session-end" | "stop";
 
-export const HOOK_EVENTS: readonly HookEvent[] = ["session-start", "user-prompt-submit", "session-end"];
+export const HOOK_EVENTS: readonly HookEvent[] = ["session-start", "user-prompt-submit", "session-end", "stop"];
+
+/**
+ * Events a harness registers that `update` adds to an install that predates them (the three session events are `init`'s to
+ * finish; a later release's new event arrives with `update`). `stop` is Claude Code's: it asks the agent to arm its inbox watcher.
+ */
+export const REFRESH_ADDS_EVENTS: readonly HookEvent[] = ["stop"];
 
 /** `session-end` is best effort: harnesses give it about a second (spec §6.3). */
 export const SESSION_END_NETWORK_TIMEOUT_MS = 1_000;
@@ -41,7 +50,7 @@ const MAX_SLUG_CHARS = 100;
  * and this one stays out (else two agents connect per session). Windsurf, Zed and OpenCode get no hook of ours.
  */
 const OWN_HOOKS: Readonly<Record<HarnessId, { hint: HarnessId; keys: Partial<Record<HookEvent, string>> } | null>> = {
-  "claude-code": { hint: "claude-code", keys: { "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "session-end": "SessionEnd" } },
+  "claude-code": { hint: "claude-code", keys: { "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "session-end": "SessionEnd", stop: "Stop" } },
   codex: { hint: "codex", keys: { "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "session-end": "SessionEnd" } },
   "gemini-cli": { hint: "gemini-cli", keys: { "session-start": "SessionStart", "user-prompt-submit": "BeforeAgent", "session-end": "SessionEnd" } },
   cursor: { hint: "cursor", keys: { "session-start": "sessionStart", "session-end": "sessionEnd" } },
@@ -129,6 +138,8 @@ export type HookRuntime = {
   endTimeoutMs: number;
   /** Aborted when the hook's overall budget runs out. */
   signal: AbortSignal;
+  /** The environment the Stop hook's unattended-run check reads (process.env when omitted). */
+  env?: NodeJS.ProcessEnv;
 };
 
 function bindingFor(cwd: string): Binding | null {
@@ -247,6 +258,21 @@ async function sessionEnd({ harness, input, seat, runtime }: Handled): Promise<s
 }
 
 /**
+ * The Stop event (Claude Code only): ask an agent that is about to go idle to arm its inbox watcher, once. Silent when this
+ * Stop is a re-entry after our own block (`stop_hook_active`, so it can't loop), when the run is unattended, when the session
+ * has no agent, and when a watcher is already running: one of the session's background tasks, or a live watcher process
+ * holding the per-agent lock (which also keeps an `already_watching` answer from being asked for again and again).
+ */
+function stopEvent({ harness, input, seat, runtime }: Handled): string {
+  if (harness !== "claude-code" || input.stopHookActive) return "";
+  if (unattendedReason(runtime.env ?? process.env) !== null) return "";
+  const entry = cachedAgent(harness, input.sessionId, seat);
+  if (entry === null) return "";
+  if (hasRunningWatcher(input.backgroundTasks, entry.agent_id) || isWatchLockHeld(entry.agent_id)) return "";
+  return stopReminderOutput(entry.agent_id);
+}
+
+/**
  * Runs one hook event and returns the exact stdout text ("" prints nothing). Outside a bound repo, with
  * no harness known, for a hook another harness's own registered hook duplicates, or for a harness with no
  * injection on this event, it does nothing at all (D28, I7),
@@ -258,7 +284,8 @@ export async function runHookEvent(input: HookInput, runtime: HookRuntime): Prom
   // Another harness's hook running here (Claude Code's, imported by Cursor) defers only to a hook of this harness's own
   // that is really registered: Cursor installed after init, or its hooks declined, leaves this one to do the work.
   if (input.hint !== null && input.hint !== harness && ownHookRegistered(harness, input.event, homeDir(), process.env)) return "";
-  if (input.event !== "session-end" && !injectionSupported(harness, input.event)) return "";
+  if (input.event === "stop" && harness !== "claude-code") return "";
+  if (input.event !== "session-end" && input.event !== "stop" && !injectionSupported(harness, input.event)) return "";
   const binding = bindingFor(input.cwd);
   if (binding === null) return "";
 
@@ -274,5 +301,7 @@ export async function runHookEvent(input: HookInput, runtime: HookRuntime): Prom
       return userPromptSubmit(handled);
     case "session-end":
       return sessionEnd(handled);
+    case "stop":
+      return stopEvent(handled);
   }
 }

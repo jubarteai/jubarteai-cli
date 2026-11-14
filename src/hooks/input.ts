@@ -6,6 +6,8 @@ import { isAbsolute } from "node:path";
 import { HARNESS_IDS, sessionFromEnv } from "../session/harness-env.js";
 import type { HarnessId } from "../session/harness-env.js";
 import type { HookEvent } from "./events.js";
+import { parseBackgroundTasks } from "./stop-watch.js";
+import type { BackgroundTask } from "./stop-watch.js";
 
 export type HookInput = {
   harness: HarnessId | null;
@@ -15,6 +17,10 @@ export type HookInput = {
   sessionId: string | null;
   source: string | null;
   cwd: string;
+  /** Claude Code's Stop payload: true when this Stop is a re-entry after a hook already blocked one. */
+  stopHookActive: boolean;
+  /** Claude Code's Stop payload: the session's background tasks (bounded; empty when the payload has none). */
+  backgroundTasks: BackgroundTask[];
 };
 
 const MAX_SESSION_ID_CHARS = 256;
@@ -100,5 +106,14 @@ export function parseHookInput(
     if (fromEnv !== null && (harness === null || fromEnv.harness === harness)) sessionId = fromEnv.sessionId;
   }
   const source = doc !== null && typeof doc["source"] === "string" && SOURCE_RE.test(doc["source"]) ? doc["source"] : null;
-  return { harness, hint, event, sessionId, source, cwd: cwdFrom(doc) ?? fallbackCwd };
+  return {
+    harness,
+    hint,
+    event,
+    sessionId,
+    source,
+    cwd: cwdFrom(doc) ?? fallbackCwd,
+    stopHookActive: doc !== null && doc["stop_hook_active"] === true,
+    backgroundTasks: doc === null ? [] : parseBackgroundTasks(doc["background_tasks"]),
+  };
 }

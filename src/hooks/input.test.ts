@@ -19,6 +19,8 @@ describe("parseHookInput", () => {
       sessionId: "s-1",
       source: "resume",
       cwd: CWD,
+      stopHookActive: false,
+      backgroundTasks: [],
     });
   });
 
@@ -59,7 +61,7 @@ describe("parseHookInput", () => {
 
   it("returns nulls, never throws, for malformed or non-object stdin", () => {
     for (const raw of ["", "not json", "[1,2]", "null", "\"s\"", "{"]) {
-      expect(parse(raw)).toEqual({ harness: "claude-code", hint: "claude-code", event: "session-start", sessionId: null, source: null, cwd: FALLBACK });
+      expect(parse(raw)).toEqual({ harness: "claude-code", hint: "claude-code", event: "session-start", sessionId: null, source: null, cwd: FALLBACK, stopHookActive: false, backgroundTasks: [] });
     }
   });
 });
@@ -98,5 +100,16 @@ describe("harnessFromHint", () => {
     expect(harnessFromHint("emacs")).toBeNull();
     expect(harnessFromHint(undefined)).toBeNull();
     expect(harnessFromHint(true)).toBeNull();
+  });
+
+  it("reads the Stop payload's re-entry flag and background tasks, bounded", () => {
+    expect(parse({}).stopHookActive).toBe(false);
+    expect(parse({ stop_hook_active: true }).stopHookActive).toBe(true);
+    expect(parse({ stop_hook_active: "true" }).stopHookActive).toBe(false);
+    expect(parse({}).backgroundTasks).toEqual([]);
+    expect(parse({ background_tasks: [{ type: "shell", status: "running", command: "sleep 1", id: "x" }, "junk"] }).backgroundTasks).toEqual([
+      { type: "shell", status: "running", command: "sleep 1" },
+    ]);
+    expect(parse({ background_tasks: "no" }).backgroundTasks).toEqual([]);
   });
 });

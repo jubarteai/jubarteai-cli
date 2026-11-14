@@ -95,6 +95,7 @@ export async function runHook(ctx: CommandContext, args: ParsedArgs, deps: HookD
       networkTimeoutMs: deps.networkTimeoutMs,
       endTimeoutMs: deps.endTimeoutMs,
       signal: controller.signal,
+      env: deps.env,
     };
     const work = (async (): Promise<string> => {
       const read = await readAllStdin(ctx.stdin, controller.signal, ARG_INPUT_MAX_BYTES);
@@ -133,7 +134,7 @@ export const hookCommand: CommandDef = {
   name: "hook",
   summary: "Run a harness hook (internal; registered by init)",
   group: "internal",
-  usage: "hook <session-start|user-prompt-submit|session-end|pre-tool-use> [--harness <id>]",
+  usage: "hook <session-start|user-prompt-submit|session-end|stop|pre-tool-use> [--harness <id>]",
   flags: [{ name: "harness", type: "string", description: "The harness that registered the hook (a hint; the detected one wins)" }],
   run: (ctx, args) => runHook(ctx, args),
 };

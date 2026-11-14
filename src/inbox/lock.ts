@@ -204,3 +204,14 @@ export async function acquireWatchLock(agentId: string, mode: LockMode, deps: Lo
   // Contention that never settled means other processes are racing for it: someone holds it.
   return { kind: "held", pid: 0, mode: "unknown" };
 }
+
+/**
+ * Whether a live watcher holds the lock for `agentId`, read-only (nothing is created, reclaimed or removed). The Stop
+ * hook uses it so it never asks an agent to arm a watcher that another process is already running.
+ */
+export function isWatchLockHeld(agentId: string, deps: LockDeps = DEFAULT_LOCK_DEPS): boolean {
+  const holder = readHolder(join(deps.dir(), fileNameFor(agentId)));
+  if (holder === null) return false;
+  if (holder === "malformed") return ageMs(join(deps.dir(), fileNameFor(agentId)), deps.now()) <= MALFORMED_GRACE_MS;
+  return deps.isAlive(holder.pid);
+}

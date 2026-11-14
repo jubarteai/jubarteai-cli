@@ -12,7 +12,8 @@ import { resetEnvTokenForTests } from "../process-env.js";
 import { resolveAgent } from "../session/agent.js";
 import { keyFingerprint, readSession, sessionKey, writeSession } from "../session/cache.js";
 import type { HarnessId } from "../session/harness-env.js";
-import { SESSION_END_NETWORK_TIMEOUT_MS, ownHookFile, ownHookRegistered, parseHookEvent, runHookEvent } from "./events.js";
+import { acquireWatchLock, DEFAULT_LOCK_DEPS } from "../inbox/lock.js";
+import { SESSION_END_NETWORK_TIMEOUT_MS, ownHookEvents, ownHookFile, ownHookRegistered, parseHookEvent, runHookEvent } from "./events.js";
 import type { HookEvent, HookRuntime } from "./events.js";
 import { identityLine } from "./inject.js";
 import type { HookInput } from "./input.js";
@@ -51,7 +52,7 @@ function runtime(over: Partial<HookRuntime> = {}): HookRuntime {
 
 function input(event: HookEvent, over: Partial<HookInput> = {}): HookInput {
   const harness = over.harness === undefined ? "claude-code" : over.harness;
-  return { harness, hint: harness, event, sessionId: "sess-1", source: "startup", cwd: sandbox.repo, ...over };
+  return { harness, hint: harness, event, sessionId: "sess-1", source: "startup", cwd: sandbox.repo, stopHookActive: false, backgroundTasks: [], ...over };
 }
 
 const MESSAGES = [{ id: "m1", from_name: "Peer", content: "<untrusted_content>hello</untrusted_content>", priority: "normal" }];
@@ -614,5 +615,100 @@ describe("parseHookEvent", () => {
     expect(parseHookEvent("session-end")).toBe("session-end");
     expect(parseHookEvent("SessionStart")).toBeNull();
     expect(parseHookEvent(undefined)).toBeNull();
+  });
+});
+
+describe("stop (Claude Code: arm the inbox watcher before going idle)", () => {
+  const watcherTask = (command: string, status = "running") => ({ type: "shell", status, command });
+
+  async function ready(): Promise<FakeServer> {
+    bind(sandbox.repo);
+    const s = await connectingServer();
+    sandbox.signIn(s.origin);
+    writeSession("claude-code", "sess-1", { harness: "claude-code", agent_id: AGENT_A, seat_id: SEAT_ID, origin: s.origin, name: "Swift Otter" }, { overwrite: true });
+    return s;
+  }
+
+  it("blocks the stop once, naming the agent and the exact command, with no network call", async () => {
+    const s = await ready();
+    const out = await runHookEvent(input("stop"), runtime());
+    expect(out.endsWith("\n")).toBe(true);
+    const body = JSON.parse(out) as { decision: string; reason: string };
+    expect(Object.keys(body).sort()).toEqual(["decision", "reason"]);
+    expect(body.decision).toBe("block");
+    expect(body.reason).toContain(`jubarteai inbox --agent ${AGENT_A} --watch --session`);
+    expect(body.reason).toContain("run_in_background");
+    expect(s.requests).toHaveLength(0);
+    expectNoSecrets(out);
+  });
+
+  it("stays silent when a watcher for this agent is already running as a background task", async () => {
+    await ready();
+    for (const command of [
+      `jubarteai inbox --agent ${AGENT_A} --watch --session`,
+      `jubarteai inbox --watch --session`,
+      `"/usr/local/bin/node" "/usr/local/lib/node_modules/jubarteai/bin/jubarteai.js" inbox --agent ${AGENT_A} --watch`,
+    ]) {
+      expect(await runHookEvent(input("stop", { backgroundTasks: [watcherTask(command)] }), runtime()), command).toBe("");
+    }
+  });
+
+  it("asks again when the only watcher listed isn't running, isn't a watch, or belongs to another agent", async () => {
+    await ready();
+    for (const task of [
+      watcherTask(`jubarteai inbox --agent ${AGENT_A} --watch --session`, "completed"),
+      watcherTask(`jubarteai inbox --agent ${AGENT_A}`),
+      watcherTask(`jubarteai inbox --agent ${AGENT_B} --watch --session`),
+      watcherTask("sleep 600"),
+    ]) {
+      const out = await runHookEvent(input("stop", { backgroundTasks: [task] }), runtime());
+      expect(JSON.parse(out), task.command).toMatchObject({ decision: "block" });
+    }
+  });
+
+  it("never blocks a stop that is itself the re-entry after our block (no loop)", async () => {
+    await ready();
+    expect(await runHookEvent(input("stop", { stopHookActive: true }), runtime())).toBe("");
+  });
+
+  it("stays silent for an unattended run", async () => {
+    await ready();
+    expect(await runHookEvent(input("stop"), runtime({ env: { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" } }))).toBe("");
+    expect(await runHookEvent(input("stop"), runtime({ env: { CLAUDE_CODE_SESSION_ATTENDED: "0" } }))).toBe("");
+  });
+
+  it("stays silent when a live watcher process already holds this agent's lock", async () => {
+    await ready();
+    const held = await acquireWatchLock(AGENT_A, "session", DEFAULT_LOCK_DEPS);
+    expect(held.kind).toBe("acquired");
+    try {
+      expect(await runHookEvent(input("stop"), runtime())).toBe("");
+    } finally {
+      if (held.kind === "acquired") held.lock.release();
+    }
+    expect(JSON.parse(await runHookEvent(input("stop"), runtime()))).toMatchObject({ decision: "block" });
+  });
+
+  it("stays silent without a cached agent for the session, outside a bound repo, and when signed out", async () => {
+    const s = await ready();
+    expect(await runHookEvent(input("stop", { sessionId: "another-session" }), runtime())).toBe("");
+    expect(await runHookEvent(input("stop", { sessionId: null }), runtime())).toBe("");
+    expect(await runHookEvent(input("stop", { cwd: sandbox.dir }), runtime())).toBe("");
+    expect(s.requests).toHaveLength(0);
+  });
+
+  it("is Claude Code's alone: a hook another harness imported (Cursor) and every other harness stay silent", async () => {
+    await ready();
+    for (const harness of ["cursor", "codex", "gemini-cli", "vscode", "copilot-cli", "windsurf", "zed", "opencode"] as const) {
+      expect(await runHookEvent(input("stop", { harness, hint: "claude-code" }), runtime()), harness).toBe("");
+    }
+  });
+
+  it("is registered for Claude Code only", () => {
+    expect(ownHookEvents("claude-code")).toEqual(["session-start", "user-prompt-submit", "session-end", "stop"]);
+    for (const harness of ["codex", "cursor", "gemini-cli", "vscode", "copilot-cli", "windsurf", "zed", "opencode"] as const) {
+      expect(ownHookEvents(harness)).not.toContain("stop");
+    }
+    expect(parseHookEvent("stop")).toBe("stop");
   });
 });
