@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
+import { chmodSync, mkdirSync, readdirSync } from "node:fs";
 import type http from "node:http";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { parseArgs } from "../cli/args.js";
@@ -534,6 +536,91 @@ describe("inbox --watch --session", () => {
     const probe = await acquireWatchLock(AGENT_A, "watch", DEFAULT_LOCK_DEPS);
     expect(probe.kind).toBe("acquired");
     if (probe.kind === "acquired") probe.lock.release();
+  });
+
+  /** Parent-watch deps whose session is already gone: a parent watch, once started, aborts on its first check. */
+  const goneParent = (): WatchDeps["parent"] => ({
+    isAlive: () => false,
+    ppid: () => 100,
+    setInterval: (fn) => {
+      queueMicrotask(fn);
+      return {};
+    },
+    clearInterval: () => undefined,
+    checkEveryMs: 15_000,
+  });
+
+  it("only a --session watch watches its parent: a plain --watch carries on when CLAUDE_PID is gone", async () => {
+    const deps: WatchDeps = { ...FAST, env: { CLAUDE_PID: "4242" }, parent: goneParent() };
+    await startWatchServer((_req, res, i) => sendJson(res, 200, { pending: i >= 2 ? 1 : 0 }));
+    const plain = await runWatch(["--watch"], deps);
+    expect(plain.code).toBe(0);
+    expect(jsonLines(plain.out)[1]).toEqual({ pending: 1 });
+
+    // The same deps do stop a session watch.
+    await startWatchServer(pending(1));
+    const session = await runWatch(["--watch", "--session"], deps);
+    expect(session.code).toBe(0);
+    expect(jsonLines(session.out)).toEqual([{ stopped: "parent_gone" }]);
+  });
+
+  it("messages drained by the arming call end a --session watch at once: line 1, {pending:n}, no poll and no renewal", async () => {
+    const messages = [{ id: "m1", content: "<untrusted_content>are you touching messages.ts?</untrusted_content>" }];
+    const { server } = await startWatchServer(() => undefined, {
+      messages,
+      expiresInMs: 150,
+      extend: (_req, res) => sendJson(res, 200, { expires_at: futureIso(150) }),
+    });
+    const result = await runWatch(["--watch", "--session"]);
+    expect(result.code).toBe(0);
+    const lines = jsonLines(result.out);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ messages, result: { count: 1 } });
+    expect(lines[1]).toEqual({ pending: 1 });
+    expect(server.requests.filter((r) => r.method === "GET")).toHaveLength(0);
+    expect(server.requests.filter((r) => r.url === "/api/mcp/inbox-watch/extend")).toHaveLength(0);
+    expectNoSecrets(result.out + result.err);
+  });
+
+  it("a signal wins over a parent that is gone too: {stopped:interrupted}, exit 130", async () => {
+    let tick: (() => void) | null = null;
+    const { server } = await startWatchServer(() => undefined);
+    const signals = new EventEmitter();
+    const deps: WatchDeps = {
+      ...FAST,
+      signals: signals as unknown as WatchDeps["signals"],
+      env: { CLAUDE_PID: "4242" },
+      parent: {
+        isAlive: () => false,
+        ppid: () => 100,
+        setInterval: (fn) => {
+          tick = fn;
+          return {};
+        },
+        clearInterval: () => undefined,
+        checkEveryMs: 15_000,
+      },
+    };
+    const running = runWatch(["--watch", "--session"], deps);
+    await waitFor(() => server.requests.some((r) => r.method === "GET"));
+    signals.emit("SIGINT");
+    (tick as unknown as () => void)();
+    const result = await running;
+    expect(result.code).toBe(130);
+    expect(jsonLines(result.out).at(-1)).toEqual({ stopped: "interrupted" });
+  });
+
+  it.skipIf(process.platform === "win32")("watches without a lock, rather than refusing, when the lock folder can't be used safely", async () => {
+    // A lock folder open to other users is "unavailable": the lock only saves waste, so the watch goes on unlocked.
+    const unsafe = join(dirname(sandbox.repo), "open-locks");
+    mkdirSync(unsafe);
+    chmodSync(unsafe, 0o777);
+    expect((await acquireWatchLock(AGENT_A, "watch", { ...DEFAULT_LOCK_DEPS, dir: () => unsafe })).kind).toBe("unavailable");
+    await startWatchServer(pending(1));
+    const result = await runWatch(["--watch", "--session"], { ...FAST, lock: { ...DEFAULT_LOCK_DEPS, dir: () => unsafe } });
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out)[1]).toEqual({ pending: 1 });
+    expect(readdirSync(unsafe)).toEqual([]);
   });
 
   it("stops {stopped:session_limit} once the session limit has passed", async () => {

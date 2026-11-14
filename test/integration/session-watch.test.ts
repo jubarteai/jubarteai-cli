@@ -130,6 +130,24 @@ describe.concurrent("inbox --watch --session (built binary)", () => {
     expect(s.fake.requests.length).toBe(before);
   }));
 
+  test("JUBARTEAI_UNATTENDED opts out a session that reports itself interactive: {stopped:unattended} and nothing sent", async () => withScene(async (s) => {
+    // What an automated runner driving a full `claude` session looks like to the other two signals.
+    const interactive = { CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ATTENDED: "1" };
+    for (const optOut of ["1", "true"]) {
+      const before = s.fake.requests.length;
+      const result = await s.box.run(["inbox", "--watch", "--session", "--agent", s.agentId], { env: { ...s.session, ...interactive, JUBARTEAI_UNATTENDED: optOut } });
+      expect(result.code, optOut).toBe(0);
+      expect(lines(result.stdout), optOut).toEqual([{ stopped: "unattended" }]);
+      expect(s.fake.requests.length, optOut).toBe(before);
+    }
+    // A false value is no opt-out: the session watch arms (and, with a message already queued, wakes at once).
+    s.fake.enqueueMessage(s.agentId, "hello");
+    const armed = await s.box.run(["inbox", "--watch", "--session", "--agent", s.agentId], { env: { ...s.session, ...interactive, JUBARTEAI_UNATTENDED: "0" } });
+    expect(armed.code).toBe(0);
+    expect(lines(armed.stdout).at(-1)).toEqual({ pending: 1 });
+    expect(s.fake.toolCalls().filter((c) => c.name === "check_inbox")).toHaveLength(1);
+  }));
+
   test.skipIf(IS_WINDOWS)("stops {stopped:parent_gone} within about 20 s when the process that started it is killed", async () => withScene(async (s) => {
     // A shell starts the watcher in the background and names both pids; killing the shell re-parents the watcher.
     const script = `"${s.box.node}" "${BIN}" inbox --watch --session --minutes 1 --agent ${s.agentId} & echo "PIDS $$ $!"; wait`;

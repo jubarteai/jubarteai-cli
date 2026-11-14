@@ -210,6 +210,40 @@ describe("runWatchSession", () => {
     expect(watch.polls()).toBe(0);
   });
 
+  it("polls between renewals when the server answers an expiry nearer than the renewal lead", async () => {
+    const watch = await watching(() => ({ body: { pending: 0 } }));
+    const { clock, deps } = virtual({ minPollMs: 1_000 });
+    // Every renewal "succeeds" with an expiry 10 s out, well inside the 120 s lead. Without a floor between renewals the
+    // loop would ask again at once, back to back, and never poll for a message.
+    const pollsAtRenewal: number[] = [];
+    const renewedAt: number[] = [];
+    const extend: WatchDeps["extend"] = async () => {
+      pollsAtRenewal.push(watch.polls());
+      renewedAt.push(clock.t);
+      return pollsAtRenewal.length <= 5
+        ? { kind: "extended", expiresAtMs: clock.t + 10_000 }
+        : { kind: "stopped", reason: "agent_disconnected" };
+    };
+    const result = await runWatchSession(watch.url, TOKEN, { expiresAtMs: T0 + 5 * 60_000, minutes: 5, startedAtMs: T0 }, { ...deps, extend }, never);
+    expect(result).toEqual({ kind: "stopped", reason: "agent_disconnected" });
+    expect(pollsAtRenewal).toHaveLength(6);
+    for (let i = 1; i < pollsAtRenewal.length; i += 1) {
+      expect(pollsAtRenewal[i]! - pollsAtRenewal[i - 1]!, `polls before renewal ${i + 1}`).toBeGreaterThanOrEqual(1);
+      expect(renewedAt[i]! - renewedAt[i - 1]!, `time before renewal ${i + 1}`).toBeGreaterThanOrEqual(1_000);
+    }
+  });
+
+  it("retries a poll that answered with a server error after the server delay, and carries on watching", async () => {
+    const watch = await watching((i) => (i < 2 ? { status: 503, body: { error: "unavailable" } } : { body: { pending: 1 } }));
+    const { clock, deps, sleeps } = virtual({ retryAfterServerMs: 7_000, retryAfterNetworkMs: 3_000 });
+    const { calls, extend } = extender(clock, [extended(clock)]);
+    const result = await runWatchSession(watch.url, TOKEN, { expiresAtMs: T0 + 5 * 60_000, minutes: 5, startedAtMs: T0 }, { ...deps, extend }, never);
+    expect(result).toEqual({ kind: "pending", pending: 1 });
+    expect(watch.polls()).toBe(3);
+    expect(sleeps).toEqual([7_000, 7_000]);
+    expect(calls).toHaveLength(0);
+  });
+
   it("never lets a server push the expiry further than the window it asked for", async () => {
     const watch = await watching(() => ({ body: { pending: 0 } }));
     const { clock, deps } = virtual({ sessionMaxMs: 100 * 24 * 60 * 60 * 1000 });
