@@ -169,4 +169,56 @@ describe("hook", () => {
     expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
     expect(parsed.hookSpecificOutput.additionalContext).toMatch(AGENT_LINE);
   });
+
+  describe("stop (Claude Code: arm the inbox watcher before going idle)", () => {
+    const watcher = (agentId: string) => ({ type: "shell", status: "running", command: `jubarteai inbox --agent ${agentId} --watch --session` });
+
+    test("asks an agent that is about to go idle to arm a watcher: one block, no network call, exit 0", async () => {
+      const agentId = AGENT_LINE.exec((await hook("session-start", "sess-1", { source: "startup" })).stdout)?.[1] as string;
+      const before = fake.requests.length;
+      const result = await hook("stop", "sess-1", { stop_hook_active: false, background_tasks: [] });
+      expect(result.code).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout.trimEnd().split("\n")).toHaveLength(1);
+      const body = JSON.parse(result.stdout) as { decision: string; reason: string };
+      expect(body.decision).toBe("block");
+      expect(body.reason).toContain(`jubarteai inbox --agent ${agentId} --watch --session`);
+      expect(fake.requests.length).toBe(before);
+      expect(box.findLeaks([FAKE_KEY])).toEqual([]);
+    });
+
+    test("is silent once a watcher is running, on the re-entry after its own block, and outside a bound repo", async () => {
+      const agentId = AGENT_LINE.exec((await hook("session-start", "sess-1", { source: "startup" })).stdout)?.[1] as string;
+      const running = await hook("stop", "sess-1", { stop_hook_active: true, background_tasks: [watcher(agentId)] });
+      expect(running.code).toBe(0);
+      expect(running.stdout).toBe("");
+      expect((await hook("stop", "sess-1", { stop_hook_active: true, background_tasks: [] })).stdout).toBe("");
+      expect((await hook("stop", "sess-1", { background_tasks: [watcher(agentId)] })).stdout).toBe("");
+      const outside = await hook("stop", "sess-1", { background_tasks: [] }, { cwd: box.outside });
+      expect(outside.code).toBe(0);
+      expect(outside.stdout).toBe("");
+      // A session with no agent has nothing to watch for.
+      expect((await hook("stop", "sess-none", { background_tasks: [] })).stdout).toBe("");
+    });
+
+    test("is silent in an unattended run and in a harness that imported the hook", async () => {
+      await hook("session-start", "sess-1", { source: "startup" });
+      const input = JSON.stringify({ session_id: "sess-1", cwd: box.repo, background_tasks: [] });
+      const sdk = await box.run(["hook", "stop", "--harness", "claude-code"], { stdin: input, env: { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" } });
+      expect(sdk.code).toBe(0);
+      expect(sdk.stdout).toBe("");
+      const cursorInput = JSON.stringify({ session_id: "sess-1", cwd: box.repo, cursor_version: "1.0", conversation_id: "c-1", background_tasks: [] });
+      const imported = await box.run(["hook", "stop", "--harness", "claude-code"], { stdin: cursorInput });
+      expect(imported.code).toBe(0);
+      expect(imported.stdout).toBe("");
+    });
+
+    test("garbage on stdin never fails the harness", async () => {
+      for (const stdin of ["", "{not json", "[]", "null"]) {
+        const result = await box.run(["hook", "stop", "--harness", "claude-code"], { stdin });
+        expect(result.code, stdin).toBe(0);
+        expect(result.stdout).toBe("");
+      }
+    });
+  });
 });

@@ -1,5 +1,5 @@
 // A self-contained node:http stand-in for the JubarteAI app, for the integration tests that drive the
-// built binary: POST /api/mcp (tools/call for all 16 tools), GET /api/mcp/inbox-watch, POST /api/cli/token
+// built binary: POST /api/mcp (tools/call for all 16 tools), GET /api/mcp/inbox-watch, POST /api/mcp/inbox-watch/extend, POST /api/cli/token
 // (a real PKCE check against the challenge it saw), GET /api/cli/whoami, and an `authorize()` helper that
 // plays the browser: it takes the URL the CLI printed and calls the CLI's loopback callback.
 // Every key, code and token here is random and fake.
@@ -61,6 +61,11 @@ export type FakeServer = {
   mcpMode: "ok" | "unauthorized" | "server_error" | "redirect";
   /** Where the "redirect" mode sends the caller (an origin the key must never reach). */
   redirectTo: string | null;
+  /**
+   * How POST /api/mcp/inbox-watch/extend answers: moves the token's expiry ("ok"), a 404 like an older server
+   * ("not_found"), 401 invalid_or_expired_watch ("unauthorized") or 410 agent_disconnected ("gone").
+   */
+  extendMode: "ok" | "not_found" | "unauthorized" | "gone";
   /** The next call of this tool answers with `error` in its envelope. */
   failTool(tool: string, message: string): void;
   identity: Identity;
@@ -112,7 +117,13 @@ export async function startFakeServer(): Promise<FakeServer> {
   const authorizeUrls: string[] = [];
   const minted: string[] = [];
   let counter = 0;
-  const state = { identity: DEFAULT_IDENTITY, mcpMode: "ok" as FakeServer["mcpMode"], redirectTo: null as string | null };
+  const watchExpiry = new Map<string, number>();
+  const state = {
+    identity: DEFAULT_IDENTITY,
+    mcpMode: "ok" as FakeServer["mcpMode"],
+    redirectTo: null as string | null,
+    extendMode: "ok" as FakeServer["extendMode"],
+  };
 
   const record = (req: IncomingMessage): Recorded => {
     const path = new URL(req.url ?? "/", "http://fake").pathname;
@@ -242,11 +253,12 @@ export async function startFakeServer(): Promise<FakeServer> {
         if (typeof watchMinutes === "number") {
           const watchToken = `jbw_${b64url(randomBytes(24))}`;
           watchTokens.set(watchToken, agentId);
+          watchExpiry.set(watchToken, Date.now() + Math.min(watchMinutes, 120) * 60_000);
           result["watch"] = {
             command: `curl -fsS -H "Authorization: Bearer ${watchToken}" ${origin}/api/mcp/inbox-watch`,
             url: `${origin}/api/mcp/inbox-watch`,
             token: watchToken,
-            expires_at: new Date(Date.now() + Math.min(watchMinutes, 120) * 60_000).toISOString(),
+            expires_at: new Date(watchExpiry.get(watchToken) ?? Date.now()).toISOString(),
           };
         }
         return result;
@@ -311,6 +323,25 @@ export async function startFakeServer(): Promise<FakeServer> {
     tick();
   }
 
+  async function inboxWatchExtend(req: IncomingMessage, res: ServerResponse, entry: Recorded): Promise<void> {
+    const text = await readBody(req);
+    try {
+      entry.body = JSON.parse(text) as unknown;
+    } catch {
+      entry.body = null;
+    }
+    if (state.extendMode === "not_found") return send(res, 404, { error: "not_found" });
+    const header = req.headers.authorization ?? "";
+    const watchToken = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+    if (!watchTokens.has(watchToken) || state.extendMode === "unauthorized") return send(res, 401, { error: "invalid_or_expired_watch" });
+    if (state.extendMode === "gone") return send(res, 410, { error: "agent_disconnected" });
+    const minutes = isRecord(entry.body) && typeof entry.body["minutes"] === "number" ? Math.min(Math.max(1, Math.floor(entry.body["minutes"])), 120) : null;
+    if (minutes === null) return send(res, 400, { error: "invalid_request" });
+    const expiresAt = Date.now() + minutes * 60_000;
+    watchExpiry.set(watchToken, expiresAt);
+    send(res, 200, { expires_at: new Date(expiresAt).toISOString() });
+  }
+
   const server: Server = createServer((req, res) => {
     const entry = record(req);
     const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -318,6 +349,7 @@ export async function startFakeServer(): Promise<FakeServer> {
     else if (req.method === "GET" && entry.path === "/api/cli/whoami") whoami(req, res);
     else if (req.method === "POST" && entry.path === "/api/mcp") void mcp(req, res, entry, origin);
     else if (req.method === "GET" && entry.path === "/api/mcp/inbox-watch") inboxWatch(req, res);
+    else if (req.method === "POST" && entry.path === "/api/mcp/inbox-watch/extend") void inboxWatchExtend(req, res, entry);
     else send(res, 404, { error: "not_found" });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -341,6 +373,12 @@ export async function startFakeServer(): Promise<FakeServer> {
     },
     set mcpMode(value) {
       state.mcpMode = value;
+    },
+    get extendMode() {
+      return state.extendMode;
+    },
+    set extendMode(value) {
+      state.extendMode = value;
     },
     get redirectTo() {
       return state.redirectTo;
