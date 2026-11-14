@@ -17,7 +17,8 @@ import {
   startFakeServer,
   waitFor,
 } from "../../test/helpers/fake-mcp-server.js";
-import type { FakeServer, Sandbox } from "../../test/helpers/fake-mcp-server.js";
+import type { FakeServer, RecordedRequest, Sandbox } from "../../test/helpers/fake-mcp-server.js";
+import { acquireWatchLock, DEFAULT_LOCK_DEPS } from "../inbox/lock.js";
 import { DEFAULT_WATCH_DEPS, inboxCommand, runInbox } from "./inbox.js";
 import type { WatchDeps } from "./inbox.js";
 
@@ -45,7 +46,7 @@ type Setup = { server: FakeServer; checkInboxArgs: () => Record<string, unknown>
 /** A server whose check_inbox hands out a watch pointing at its own inbox-watch endpoint. */
 async function startWatchServer(
   watch: WatchHandler,
-  opts: { expiresInMs?: number; messages?: unknown[]; watchField?: (origin: string) => unknown } = {},
+  opts: { expiresInMs?: number; messages?: unknown[]; watchField?: (origin: string) => unknown; extend?: (req: RecordedRequest, res: http.ServerResponse, index: number) => void } = {},
 ): Promise<Setup> {
   let origin = "";
   const server = await startFakeServer({
@@ -65,6 +66,7 @@ async function startWatchServer(
       },
     }),
     watch,
+    ...(opts.extend === undefined ? {} : { extend: opts.extend }),
   });
   origin = server.origin;
   servers.push(server);
@@ -362,5 +364,188 @@ describe("inbox --watch", () => {
       outputs.push(result.out, result.err);
     }
     expectNoSecrets(outputs.join(""));
+  });
+});
+
+describe("inbox --watch --session", () => {
+  const futureIso = (ms: number): string => new Date(Date.now() + ms).toISOString();
+
+  it("needs --watch, and sends nothing without it", async () => {
+    const server = await startFakeServer();
+    servers.push(server);
+    sandbox.signIn(server.origin);
+    expect((await runCli([inboxCommand], ["inbox", "--session", "--agent", AGENT_A], sandbox.repo)).code).toBe(2);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it.each([
+    ["the SDK entrypoint", { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" }],
+    ["an unattended run", { CLAUDE_CODE_SESSION_ATTENDED: "0" }],
+  ])("refuses %s with {stopped:unattended}, exit 0 and not one request", async (_label, env) => {
+    const { server } = await startWatchServer(pending(1));
+    const result = await runWatch(["--watch", "--session"], { ...FAST, env: env as NodeJS.ProcessEnv });
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out)).toEqual([{ stopped: "unattended" }]);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("does not apply the unattended guard to a plain --watch", async () => {
+    await startWatchServer(pending(1));
+    const result = await runWatch(["--watch"], { ...FAST, env: { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" } });
+    expect(jsonLines(result.out)[1]).toEqual({ pending: 1 });
+  });
+
+  it.each([["--watch"], ["--watch --session"]])("%s: a second watcher for the same agent answers {stopped:already_watching} before check_inbox", async (flags) => {
+    const { server, checkInboxArgs } = await startWatchServer(pending(1));
+    const holder = await acquireWatchLock(AGENT_A, "session", DEFAULT_LOCK_DEPS);
+    expect(holder.kind).toBe("acquired");
+    try {
+      const result = await runWatch(flags.split(" "));
+      expect(result.code).toBe(0);
+      expect(jsonLines(result.out)).toEqual([{ stopped: "already_watching" }]);
+      expect(checkInboxArgs()).toEqual([]);
+      expect(server.requests).toHaveLength(0);
+    } finally {
+      if (holder.kind === "acquired") holder.lock.release();
+    }
+    // Once the holder is gone the same agent can watch again.
+    const next = await runWatch(["--watch"]);
+    expect(jsonLines(next.out)[1]).toEqual({ pending: 1 });
+  });
+
+  it("a different agent isn't blocked by the first one's lock", async () => {
+    await startWatchServer(pending(1));
+    const holder = await acquireWatchLock(AGENT_A, "watch", DEFAULT_LOCK_DEPS);
+    try {
+      const { ctx, out } = makeCtx(sandbox.repo, { agent: "bbbbbbbb-0000-4000-8000-00000000000b" });
+      const code = await runInbox(ctx, parseArgs(["--watch"], inboxCommand.flags), FAST);
+      expect(code).toBe(0);
+      expect(jsonLines(out())[1]).toEqual({ pending: 1 });
+    } finally {
+      if (holder.kind === "acquired") holder.lock.release();
+    }
+  });
+
+  it("releases the lock on every way out", async () => {
+    const handlers: Array<[string, WatchHandler]> = [
+      ["a wake-up", pending(1)],
+      ["a 410", (_req, res) => sendJson(res, 410, { error: "agent_disconnected" })],
+      ["a 401", (_req, res) => sendJson(res, 401, { error: "invalid_or_expired_watch" })],
+    ];
+    for (const [label, handler] of handlers) {
+      await startWatchServer(handler);
+      await runWatch(["--watch", "--session"]);
+      const probe = await acquireWatchLock(AGENT_A, "watch", DEFAULT_LOCK_DEPS);
+      expect(probe.kind, label).toBe("acquired");
+      if (probe.kind === "acquired") probe.lock.release();
+    }
+    // An older server's refusal (no url/token) also leaves nothing behind.
+    await startWatchServer(pending(1), { watchField: () => ({ command: "c", expires_at: futureIso(60_000) }) });
+    await runWatch(["--watch", "--session"]);
+    const probe = await acquireWatchLock(AGENT_A, "watch", DEFAULT_LOCK_DEPS);
+    expect(probe.kind).toBe("acquired");
+    if (probe.kind === "acquired") probe.lock.release();
+  });
+
+  it("renews through the extend endpoint, keeps watching past the original expiry and wakes on a message", async () => {
+    const extendBodies: unknown[] = [];
+    const extendAuth: Array<string | undefined> = [];
+    const { server } = await startWatchServer(
+      (_req, res, i) => sendJson(res, 200, { pending: i >= 6 ? 1 : 0 }),
+      {
+        expiresInMs: 150,
+        extend: (req, res) => {
+          extendBodies.push(req.body);
+          extendAuth.push(req.headers["authorization"]);
+          sendJson(res, 200, { expires_at: futureIso(150) });
+        },
+      },
+    );
+    const started = Date.now();
+    const result = await runWatch(["--watch", "--session"], { ...FAST, minPollMs: 60 });
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out)[1]).toEqual({ pending: 1 });
+    expect(Date.now() - started).toBeGreaterThan(300);
+    expect(extendBodies.length).toBeGreaterThanOrEqual(1);
+    expect(extendBodies.every((b) => JSON.stringify(b) === JSON.stringify({ minutes: 30 }))).toBe(true);
+    expect(extendAuth.every((a) => a === `Bearer ${FAKE_WATCH_TOKEN}`)).toBe(true);
+    expect(server.requests.some((r) => r.method === "POST" && r.url === "/api/mcp/inbox-watch/extend")).toBe(true);
+    // One check_inbox for the whole session: renewing never goes through the MCP route again.
+    expect(server.toolCalls()).toHaveLength(1);
+    expectNoSecrets(result.out + result.err);
+  });
+
+  it("with a server that has no extend endpoint (404) it ends {stopped:expired} at the original expiry", async () => {
+    const { server } = await startWatchServer(pending(0), { expiresInMs: 200 });
+    const result = await runWatch(["--watch", "--session"], { ...FAST, minPollMs: 30 });
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out)[1]).toEqual({ stopped: "expired" });
+    expect(server.requests.filter((r) => r.url === "/api/mcp/inbox-watch/extend")).toHaveLength(1);
+  });
+
+  it.each([
+    [401, { error: "invalid_or_expired_watch" }, "invalid_or_expired_watch"],
+    [410, { error: "agent_disconnected" }, "agent_disconnected"],
+  ])("a %s from the renewal stops the watch with %s", async (status, body, reason) => {
+    await startWatchServer(pending(0), { expiresInMs: 150, extend: (_req, res) => sendJson(res, status, body) });
+    const result = await runWatch(["--watch", "--session"], { ...FAST, minPollMs: 30 });
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out)[1]).toEqual({ stopped: reason });
+  });
+
+  it("a network error on the renewal is retried and the watch still ends expired if it never succeeds", async () => {
+    const { server } = await startWatchServer(pending(0), { expiresInMs: 250, extend: (_req, res) => void res.socket?.destroy() });
+    const result = await runWatch(["--watch", "--session"], { ...FAST, minPollMs: 30 });
+    expect(jsonLines(result.out)[1]).toEqual({ stopped: "expired" });
+    expect(server.requests.filter((r) => r.url === "/api/mcp/inbox-watch/extend").length).toBeGreaterThan(1);
+  });
+
+  it("stops {stopped:parent_gone}, exit 0, when the session that started it is gone", async () => {
+    let tick: (() => void) | null = null;
+    let gone = false;
+    const { server } = await startWatchServer(() => undefined); // a poll that never answers
+    const deps: WatchDeps = {
+      ...FAST,
+      parent: {
+        isAlive: () => !gone,
+        ppid: () => 100,
+        setInterval: (fn) => {
+          tick = fn;
+          return {};
+        },
+        clearInterval: () => undefined,
+        checkEveryMs: 15_000,
+      },
+      env: { CLAUDE_PID: "4242" },
+    };
+    const running = runWatch(["--watch", "--session"], deps);
+    await waitFor(() => server.requests.some((r) => r.method === "GET"));
+    gone = true;
+    (tick as unknown as () => void)();
+    const result = await running;
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out).at(-1)).toEqual({ stopped: "parent_gone" });
+    // The lock is released: the next watcher gets in.
+    const probe = await acquireWatchLock(AGENT_A, "watch", DEFAULT_LOCK_DEPS);
+    expect(probe.kind).toBe("acquired");
+    if (probe.kind === "acquired") probe.lock.release();
+  });
+
+  it("stops {stopped:session_limit} once the session limit has passed", async () => {
+    await startWatchServer(pending(0), { expiresInMs: 60_000, extend: (_req, res) => sendJson(res, 200, { expires_at: futureIso(60_000) }) });
+    const result = await runWatch(["--watch", "--session"], { ...FAST, minPollMs: 40, sessionMaxMs: 250 });
+    expect(result.code).toBe(0);
+    expect(jsonLines(result.out)[1]).toEqual({ stopped: "session_limit" });
+  });
+
+  it("SIGINT is still an interruption: exit 130", async () => {
+    const { server } = await startWatchServer(() => undefined);
+    const signals = new EventEmitter();
+    const running = runWatch(["--watch", "--session"], { ...FAST, signals: signals as unknown as WatchDeps["signals"] });
+    await waitFor(() => server.requests.some((r) => r.method === "GET"));
+    signals.emit("SIGINT");
+    const result = await running;
+    expect(result.code).toBe(130);
+    expect(jsonLines(result.out).at(-1)).toEqual({ stopped: "interrupted" });
   });
 });

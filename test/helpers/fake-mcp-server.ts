@@ -35,6 +35,8 @@ export type FakeOptions = {
   mcp?: (req: RecordedRequest, res: http.ServerResponse) => boolean;
   /** Answers GET /api/mcp/inbox-watch; `index` counts the calls (0, 1, …). */
   watch?: (req: RecordedRequest, res: http.ServerResponse, index: number) => void;
+  /** Answers POST /api/mcp/inbox-watch/extend (the renewal); without it the route is a 404, like an older server's. */
+  extend?: (req: RecordedRequest, res: http.ServerResponse, index: number) => void;
 };
 
 export type FakeServer = {
@@ -66,6 +68,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 export async function startFakeServer(options: FakeOptions = {}): Promise<FakeServer> {
   const requests: RecordedRequest[] = [];
   let watchCalls = 0;
+  let extendCalls = 0;
   const server = http.createServer((req, res) => {
     void (async () => {
       const text = await readBody(req);
@@ -91,6 +94,10 @@ export async function startFakeServer(options: FakeOptions = {}): Promise<FakeSe
       }
       if (recorded.url === "/api/mcp/inbox-watch" && recorded.method === "GET" && options.watch !== undefined) {
         options.watch(recorded, res, watchCalls++);
+        return;
+      }
+      if (recorded.url === "/api/mcp/inbox-watch/extend" && recorded.method === "POST" && options.extend !== undefined) {
+        options.extend(recorded, res, extendCalls++);
         return;
       }
       sendJson(res, 404, { error: "not_found" });
