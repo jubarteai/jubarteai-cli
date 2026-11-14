@@ -381,6 +381,7 @@ describe("inbox --watch --session", () => {
   it.each([
     ["the SDK entrypoint", { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" }],
     ["an unattended run", { CLAUDE_CODE_SESSION_ATTENDED: "0" }],
+    ["the explicit opt-out on an interactive-looking session", { CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ATTENDED: "1", JUBARTEAI_UNATTENDED: "1" }],
   ])("refuses %s with {stopped:unattended}, exit 0 and not one request", async (_label, env) => {
     const { server } = await startWatchServer(pending(1));
     const result = await runWatch(["--watch", "--session"], { ...FAST, env: env as NodeJS.ProcessEnv });

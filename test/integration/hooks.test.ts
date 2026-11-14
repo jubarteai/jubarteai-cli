@@ -207,6 +207,12 @@ describe("hook", () => {
       const sdk = await box.run(["hook", "stop", "--harness", "claude-code"], { stdin: input, env: { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" } });
       expect(sdk.code).toBe(0);
       expect(sdk.stdout).toBe("");
+      // The explicit opt-out silences a session that reports itself interactive (an automated runner driving a full `claude`).
+      const interactive = { CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ATTENDED: "1" };
+      expect(JSON.parse((await box.run(["hook", "stop", "--harness", "claude-code"], { stdin: input, env: interactive })).stdout)).toMatchObject({ decision: "block" });
+      const optedOut = await box.run(["hook", "stop", "--harness", "claude-code"], { stdin: input, env: { ...interactive, JUBARTEAI_UNATTENDED: "1" } });
+      expect(optedOut.code).toBe(0);
+      expect(optedOut.stdout).toBe("");
       const cursorInput = JSON.stringify({ session_id: "sess-1", cwd: box.repo, cursor_version: "1.0", conversation_id: "c-1", background_tasks: [] });
       const imported = await box.run(["hook", "stop", "--harness", "claude-code"], { stdin: cursorInput });
       expect(imported.code).toBe(0);

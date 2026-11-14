@@ -5,15 +5,23 @@ import { INBOX_PARENT_CHECK_MS, INBOX_SESSION_MAX_MS } from "../constants.js";
 /** A session watch stops for good after this long (spec §3.4). */
 export const SESSION_MAX_MS = INBOX_SESSION_MAX_MS;
 
+/** The opt-out an automated runner sets for a session the harness reports as interactive (see `unattendedReason`). */
+export const UNATTENDED_ENV = "JUBARTEAI_UNATTENDED";
+
+const TRUTHY = new Set(["1", "true", "yes", "on"]);
+
 /**
- * Why this process is an unattended run, or null when it looks interactive. Claude Code sets
- * `CLAUDE_CODE_ENTRYPOINT` (`cli` for an interactive session; anything else, e.g. `sdk-cli`, is a
- * programmatic run) and `CLAUDE_CODE_SESSION_ATTENDED` (`0` when nobody is at the keyboard). Both are
- * undocumented, so this fails open: with neither present, or with unrecognised values, the run counts
- * as interactive. An automated pipeline that reports itself as an interactive session can't be told
- * apart from here (the skill's "interactive sessions only" rule covers it).
+ * Why this process is an unattended run, or null when it looks interactive. Three signals, any of which counts:
+ * `JUBARTEAI_UNATTENDED` set to a true value (`1`, `true`, `yes`, `on`: the explicit opt-out for an automated
+ * runner, such as a pipeline or CI step, that drives a full `claude` session and so looks interactive to the
+ * other two); Claude Code's `CLAUDE_CODE_ENTRYPOINT` (`cli` for an interactive session; anything else, e.g.
+ * `sdk-cli`, is a programmatic run); and `CLAUDE_CODE_SESSION_ATTENDED` (`0` when nobody is at the keyboard).
+ * The last two are undocumented, so this fails open: with none present, or with unrecognised values, the run
+ * counts as interactive. The opt-out is the only way to tell an automated run that reports itself as an
+ * interactive session; the skill's "interactive sessions only" rule covers the rest.
  */
 export function unattendedReason(env: NodeJS.ProcessEnv = process.env): "unattended" | null {
+  if (TRUTHY.has((env[UNATTENDED_ENV] ?? "").trim().toLowerCase())) return "unattended";
   const entrypoint = env["CLAUDE_CODE_ENTRYPOINT"];
   if (entrypoint !== undefined && entrypoint !== "" && entrypoint !== "cli") return "unattended";
   if (env["CLAUDE_CODE_SESSION_ATTENDED"] === "0") return "unattended";

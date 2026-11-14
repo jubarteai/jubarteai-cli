@@ -11,7 +11,7 @@
 // One exception: the shared Copilot file's step writes its entries as a set, so refreshing it also adds the deny-only
 // preToolUse guard when it is missing (a file from before the guard), even when the session hooks are current; the step
 // stays sensitive, previews it, and is labelled as adding the guard when that is all it changes.
-import { REFRESH_ADDS_EVENTS, ownHookEvents, ownHookRegistered } from "../hooks/events.js";
+import { REFRESH_ADDS_EVENTS, ownHookCommands, ownHookEvents, ownHookRegistered } from "../hooks/events.js";
 import { PERSON_COMMAND_LIST } from "../harness/agent-commands.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import { COPILOT_HOOKS_STEP_ID, copilotRefreshAddsGuardOnly } from "../harness/vscode.js";
@@ -41,6 +41,27 @@ export type HookRefreshPlan = {
 function hasEveryEvent(adapter: HarnessAdapter, ctx: InitCtx): boolean {
   const events = ownHookEvents(adapter.id).filter((event) => !REFRESH_ADDS_EVENTS.includes(event));
   return events.length > 0 && events.every((event) => ownHookRegistered(adapter.id, event, ctx.home, ctx.env));
+}
+
+/**
+ * What the refresh does to this adapter's hook file, in words: it only adds the hooks a later release introduced
+ * (`REFRESH_ADDS_EVENTS`) when those are missing and every other entry already carries the wanted command; it rewrites
+ * the program when some entry is stale; and it does both when both are true. The event hooks it adds are named, so a
+ * user is never told "refresh" for a change that registers a new hook that can block a turn from ending.
+ */
+function refreshLabel(adapter: HarnessAdapter, ctx: InitCtx, files: string[]): string {
+  const events = ownHookEvents(adapter.id);
+  const missing = events.filter((event) => REFRESH_ADDS_EVENTS.includes(event) && !ownHookRegistered(adapter.id, event, ctx.home, ctx.env));
+  const program = ctx.hookCommand ?? ctx.cliCommand;
+  const stale = events.some((event) => {
+    if (missing.includes(event)) return false;
+    const commands = ownHookCommands(adapter.id, event, ctx.home, ctx.env);
+    return commands.length !== 1 || !commands[0]?.startsWith(`${program} hook ${event} `);
+  });
+  const where = `${adapter.label} (${files.join(", ")})`;
+  if (missing.length === 0) return `Refresh the hook command in ${where}`;
+  const added = `the ${missing.join(" and ")} hook`;
+  return stale ? `Refresh the hook command and add ${added} in ${where}` : `Add ${added} to ${where}`;
 }
 
 /**
@@ -78,7 +99,7 @@ export async function planHookRefresh(adapters: HarnessAdapter[], ctx: InitCtx):
       const label =
         step.id === COPILOT_HOOKS_STEP_ID && copilotRefreshAddsGuardOnly(ctx)
           ? `Add the preToolUse guard to ${step.files.join(", ")} (denies an agent's ${PERSON_COMMAND_LIST})`
-          : `Refresh the hook command in ${adapter.label} (${step.files.join(", ")})`;
+          : refreshLabel(adapter, ctx, step.files);
       plan.steps.push({
         ...step,
         label,

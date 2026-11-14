@@ -47,7 +47,8 @@ async function server(opts: Parameters<typeof startFakeServer>[0] = {}): Promise
 }
 
 function runtime(over: Partial<HookRuntime> = {}): HookRuntime {
-  return { call: callTool, networkTimeoutMs: 5000, endTimeoutMs: 1000, signal: new AbortController().signal, ...over };
+  // env: {} keeps the Stop hook's unattended-run check off this process's own CLAUDE_CODE_* variables, which differ per harness.
+  return { call: callTool, networkTimeoutMs: 5000, endTimeoutMs: 1000, signal: new AbortController().signal, env: {}, ...over };
 }
 
 function input(event: HookEvent, over: Partial<HookInput> = {}): HookInput {
@@ -675,6 +676,14 @@ describe("stop (Claude Code: arm the inbox watcher before going idle)", () => {
     await ready();
     expect(await runHookEvent(input("stop"), runtime({ env: { CLAUDE_CODE_ENTRYPOINT: "sdk-cli" } }))).toBe("");
     expect(await runHookEvent(input("stop"), runtime({ env: { CLAUDE_CODE_SESSION_ATTENDED: "0" } }))).toBe("");
+  });
+
+  it("stays silent when JUBARTEAI_UNATTENDED opts the run out, even for a session that reports itself interactive", async () => {
+    await ready();
+    const interactive = { CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ATTENDED: "1" };
+    expect(JSON.parse(await runHookEvent(input("stop"), runtime({ env: interactive })))).toMatchObject({ decision: "block" });
+    expect(await runHookEvent(input("stop"), runtime({ env: { ...interactive, JUBARTEAI_UNATTENDED: "1" } }))).toBe("");
+    expect(JSON.parse(await runHookEvent(input("stop"), runtime({ env: { ...interactive, JUBARTEAI_UNATTENDED: "0" } })))).toMatchObject({ decision: "block" });
   });
 
   it("stays silent when a live watcher process already holds this agent's lock", async () => {

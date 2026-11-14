@@ -99,24 +99,29 @@ function commandStrings(value: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/** The commands `harness`'s own hook file registers for our `event` hook; empty when none, or the file is unreadable. */
+export function ownHookCommands(harness: HarnessId, event: HookEvent, home: string, env: NodeJS.ProcessEnv): string[] {
+  const own = OWN_HOOKS[harness];
+  const key = own?.keys[event];
+  const file = ownHookFile(harness, home, env);
+  if (own === null || key === undefined || file === null) return [];
+  try {
+    const read = readJsonObject(file);
+    if (read.status !== "ok") return [];
+    const hooks = read.doc["hooks"];
+    if (!isRecord(hooks)) return [];
+    return commandStrings(hooks[key]).filter((command) => isOurHookCommand(command, event, own.hint));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Whether `harness`'s own hook file holds our hook for `event` (a command ending `hook <event> --harness <its id>`
  * under the event's key). Read-only and never throws: a missing, unreadable or unparsable file is "no".
  */
 export function ownHookRegistered(harness: HarnessId, event: HookEvent, home: string, env: NodeJS.ProcessEnv): boolean {
-  const own = OWN_HOOKS[harness];
-  const key = own?.keys[event];
-  const file = ownHookFile(harness, home, env);
-  if (own === null || key === undefined || file === null) return false;
-  try {
-    const read = readJsonObject(file);
-    if (read.status !== "ok") return false;
-    const hooks = read.doc["hooks"];
-    if (!isRecord(hooks)) return false;
-    return commandStrings(hooks[key]).some((command) => isOurHookCommand(command, event, own.hint));
-  } catch {
-    return false;
-  }
+  return ownHookCommands(harness, event, home, env).length > 0;
 }
 
 /** The events `init` registers a hook for in `harness`'s own hook file; empty for a harness it registers none in. */

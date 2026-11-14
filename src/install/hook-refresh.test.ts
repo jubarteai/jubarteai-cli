@@ -50,6 +50,8 @@ describe("planHookRefresh", () => {
     const plan = await planHookRefresh([claudeCodeAdapter], ctx(NEW));
     expect(plan.steps).toHaveLength(1);
     expect(plan.steps[0]).toMatchObject({ sensitive: true, files: [file] });
+    // Stale program and no Stop hook yet: both are said.
+    expect(plan.steps[0]?.label).toBe(`Refresh the hook command and add the stop hook in Claude Code (${file})`);
     expect(plan.steps[0]?.preview).toContain(NEW.replaceAll('"', '\\"'));
 
     const results = await applyPlan(plan.steps, { tty: false, yes: true, agentSession: null, ...applyUi() });
@@ -60,6 +62,20 @@ describe("planHookRefresh", () => {
     const written = JSON.parse(fs.readFileSync(file, "utf8")) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
     expect(written.hooks["Stop"]?.[0]?.hooks[0]?.command).toBe(`${NEW} hook stop --harness claude-code`);
     expect((await planHookRefresh([claudeCodeAdapter], ctx(NEW))).steps).toEqual([]);
+  });
+
+  it("labels a step that only adds the Stop hook (program current, hook missing) as adding it, and a stale program with the Stop hook present as a refresh", async () => {
+    const file = path.join(home, ".claude", "settings.json");
+    writeHooks(file, NEW, "claude-code", HOOK_EVENTS);
+    const addOnly = await planHookRefresh([claudeCodeAdapter], ctx(NEW));
+    expect(addOnly.steps).toHaveLength(1);
+    expect(addOnly.steps[0]?.label).toBe(`Add the stop hook to Claude Code (${file})`);
+    const done = await applyPlan(addOnly.steps, { tty: false, yes: true, agentSession: null, ...applyUi() });
+    expect(done[0]?.label).toBe(`Add the stop hook to Claude Code (${file})`);
+
+    writeHooks(file, OLD, "claude-code", [...HOOK_EVENTS, { name: "Stop", arg: "stop", timeout: 8 }]);
+    const refreshOnly = await planHookRefresh([claudeCodeAdapter], ctx(NEW));
+    expect(refreshOnly.steps[0]?.label).toBe(`Refresh the hook command in Claude Code (${file})`);
   });
 
   it("reports an adapter with only some events as incomplete and plans nothing for it", async () => {

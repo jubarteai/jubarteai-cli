@@ -831,7 +831,9 @@ describe.skipIf(!posix)("update: hook commands after a Node upgrade (R-S4)", () 
     writeClaudeHooks(NEW_HOOK_COMMAND, BEFORE_STOP_HOOK);
     const check = await update(["--check"]);
     expect(check.code).toBe(2);
-    expect(check.out).toContain("[todo] Refresh the hook command in Claude Code");
+    // The program is current, so the step is labelled for what it does: it adds the Stop hook, it doesn't refresh a command.
+    expect(check.out).toContain("[todo] Add the stop hook to Claude Code");
+    expect(check.out).not.toContain("Refresh the hook command");
 
     const r = await update(["--yes"]);
     expect(r.code).toBe(0);

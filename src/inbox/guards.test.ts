@@ -13,6 +13,10 @@ describe("unattendedReason", () => {
     ["attended alone", { CLAUDE_CODE_SESSION_ATTENDED: "1" }],
     ["a garbage ATTENDED value", { CLAUDE_CODE_SESSION_ATTENDED: "yes" }],
     ["an empty ATTENDED value", { CLAUDE_CODE_SESSION_ATTENDED: "" }],
+    ["JUBARTEAI_UNATTENDED empty", { JUBARTEAI_UNATTENDED: "" }],
+    ["JUBARTEAI_UNATTENDED=0", { JUBARTEAI_UNATTENDED: "0", CLAUDE_CODE_ENTRYPOINT: "cli" }],
+    ["JUBARTEAI_UNATTENDED=false", { JUBARTEAI_UNATTENDED: "false" }],
+    ["JUBARTEAI_UNATTENDED=maybe", { JUBARTEAI_UNATTENDED: "maybe" }],
   ])("is null for %s (fails open)", (_label, env) => {
     expect(unattendedReason(env as NodeJS.ProcessEnv)).toBeNull();
   });
@@ -22,6 +26,10 @@ describe("unattendedReason", () => {
     ["any other entrypoint", { CLAUDE_CODE_ENTRYPOINT: "github-action" }],
     ["ATTENDED=0", { CLAUDE_CODE_SESSION_ATTENDED: "0" }],
     ["ATTENDED=0 with entrypoint cli", { CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ATTENDED: "0" }],
+    ["the explicit opt-out on an interactive-looking session", { JUBARTEAI_UNATTENDED: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CODE_SESSION_ATTENDED: "1" }],
+    ["the opt-out spelled true", { JUBARTEAI_UNATTENDED: "true" }],
+    ["the opt-out spelled YES with spaces", { JUBARTEAI_UNATTENDED: " YES " }],
+    ["the opt-out spelled on", { JUBARTEAI_UNATTENDED: "on" }],
   ])("is unattended for %s", (_label, env) => {
     expect(unattendedReason(env as NodeJS.ProcessEnv)).toBe("unattended");
   });
