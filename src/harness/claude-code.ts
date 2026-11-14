@@ -26,6 +26,13 @@ export const HOOK_EVENTS = [
   { name: "SessionEnd", arg: "session-end", timeout: 5 },
 ] as const;
 
+/**
+ * Claude Code's own event list: the three above plus `Stop`, which asks an agent about to go idle to arm its inbox watcher
+ * (src/hooks/stop-watch.ts). Codex reuses HOOK_EVENTS (its adapter is built from it) and must not get `Stop`: the hook
+ * answers Claude Code's Stop payload only.
+ */
+export const CLAUDE_HOOK_EVENTS = [...HOOK_EVENTS, { name: "Stop", arg: "stop", timeout: HOOK_REGISTERED_TIMEOUT_S }] as const;
+
 /** One registered event; `timeout` is in the harness's own unit (seconds for Claude Code and Codex, milliseconds for Gemini CLI). */
 export type HookEventSpec = { name: string; arg: string; timeout: number };
 
@@ -326,7 +333,7 @@ export function readSettings(file: string): JsonSettings {
 
 /** The hook entries use the hook command (absolute when init resolved one); the permission rule keeps the bare name. */
 function hooksSpec(ctx: Pick<InitCtx, "cliCommand" | "hookCommand">): HooksEditSpec {
-  return { events: HOOK_EVENTS, cliCommand: ctx.hookCommand ?? ctx.cliCommand, harness: ID };
+  return { events: CLAUDE_HOOK_EVENTS, cliCommand: ctx.hookCommand ?? ctx.cliCommand, harness: ID };
 }
 
 async function detect(env: DetectEnv): Promise<boolean> {
@@ -442,9 +449,9 @@ async function uninstall(ctx: InitCtx): Promise<Array<PlanStep | ManualInstructi
     label: `Remove the JubarteAI session hooks from ${shown}`,
     file,
     home: ctx.home,
-    preview: [`${shown}:`, ...HOOK_EVENTS.map((e) => `  hooks.${e.name}: the entry running "hook ${e.arg} --harness ${ID}"`)].join("\n"),
-    byHand: HOOK_EVENTS.map((e) => `the hooks.${e.name} entry that runs "hook ${e.arg} --harness ${ID}"`),
-    edit: (doc) => removeNestedHooks(doc, HOOK_EVENTS, ID),
+    preview: [`${shown}:`, ...CLAUDE_HOOK_EVENTS.map((e) => `  hooks.${e.name}: the entry running "hook ${e.arg} --harness ${ID}"`)].join("\n"),
+    byHand: CLAUDE_HOOK_EVENTS.map((e) => `the hooks.${e.name} entry that runs "hook ${e.arg} --harness ${ID}"`),
+    edit: (doc) => removeNestedHooks(doc, CLAUDE_HOOK_EVENTS, ID),
   });
   return [permission, hooks].filter((item): item is PlanStep | ManualInstructions => item !== null);
 }

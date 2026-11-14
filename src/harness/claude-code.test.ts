@@ -59,19 +59,50 @@ const COMMANDS = {
   SessionStart: "jubarteai hook session-start --harness claude-code",
   UserPromptSubmit: "jubarteai hook user-prompt-submit --harness claude-code",
   SessionEnd: "jubarteai hook session-end --harness claude-code",
+  Stop: "jubarteai hook stop --harness claude-code",
 };
 
 describe("permission and hooks", () => {
-  it("merges the permission rule and the three hooks into a fresh settings.json", async () => {
+  it("merges the permission rule and the four hooks (the Stop hook included) into a fresh settings.json", async () => {
     const results = await applyAll(ctx());
     expect(results.map((r) => r.status)).toEqual(["configured", "configured"]);
     const doc = readSettings();
     expect(doc["permissions"]).toEqual({ allow: ["Bash(jubarteai *)"], ask: ASK_BASH });
     const hooks = doc["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
-    expect(Object.keys(hooks)).toEqual(["SessionStart", "UserPromptSubmit", "SessionEnd"]);
+    expect(Object.keys(hooks)).toEqual(["SessionStart", "UserPromptSubmit", "SessionEnd", "Stop"]);
     expect(hooks["SessionStart"]).toEqual([{ hooks: [{ type: "command", command: COMMANDS.SessionStart, timeout: 8 }] }]);
     expect(hooks["UserPromptSubmit"]?.[0]?.hooks[0]).toEqual({ type: "command", command: COMMANDS.UserPromptSubmit, timeout: 8 });
     expect(hooks["SessionEnd"]?.[0]?.hooks[0]).toEqual({ type: "command", command: COMMANDS.SessionEnd, timeout: 5 });
+    // The Stop hook is a plain synchronous command with the usual short timeout: it only decides, it never waits.
+    expect(hooks["Stop"]).toEqual([{ hooks: [{ type: "command", command: COMMANDS.Stop, timeout: 8 }] }]);
+  });
+
+  it("an install from before the Stop hook (the three session hooks) is partial; init adds Stop and keeps the rest", async () => {
+    writeSettings({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command: COMMANDS.SessionStart, timeout: 8 }] }],
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: COMMANDS.UserPromptSubmit, timeout: 8 }] }],
+        SessionEnd: [{ hooks: [{ type: "command", command: COMMANDS.SessionEnd, timeout: 5 }] }],
+        Stop: [{ hooks: [{ type: "command", command: "other-tool on-stop" }] }],
+      },
+    });
+    expect((await claudeCodeAdapter.inspect(ctx())).hooks).toBe("partial");
+    await applyAll(ctx());
+    expect((await claudeCodeAdapter.inspect(ctx())).hooks).toBe("configured");
+    const hooks = readSettings()["hooks"] as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
+    // Another tool's Stop hook stays, ours is added beside it.
+    expect(hooks["Stop"]?.flatMap((g) => g.hooks.map((h) => h["command"]))).toEqual(["other-tool on-stop", COMMANDS.Stop]);
+  });
+
+  it("uninstall removes the Stop hook with the others and leaves another tool's Stop hook", async () => {
+    writeSettings({ hooks: { Stop: [{ hooks: [{ type: "command", command: "other-tool on-stop" }] }] } });
+    await applyAll(ctx());
+    const steps = (await claudeCodeAdapter.uninstall(ctx())).filter((s): s is PlanStep => isStep(s));
+    const results = await applyPlan(steps, { tty: false, yes: true, ...applyUi() });
+    expect(results.map((r) => r.status)).not.toContain("failed");
+    const hooks = (readSettings()["hooks"] ?? {}) as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>;
+    expect(Object.keys(hooks)).toEqual(["Stop"]);
+    expect(hooks["Stop"]?.flatMap((g) => g.hooks.map((h) => h["command"]))).toEqual(["other-tool on-stop"]);
   });
 
   it("keeps other keys, other allow rules and other tools' hooks on the same events", async () => {

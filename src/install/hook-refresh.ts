@@ -11,7 +11,7 @@
 // One exception: the shared Copilot file's step writes its entries as a set, so refreshing it also adds the deny-only
 // preToolUse guard when it is missing (a file from before the guard), even when the session hooks are current; the step
 // stays sensitive, previews it, and is labelled as adding the guard when that is all it changes.
-import { ownHookEvents, ownHookRegistered } from "../hooks/events.js";
+import { REFRESH_ADDS_EVENTS, ownHookEvents, ownHookRegistered } from "../hooks/events.js";
 import { PERSON_COMMAND_LIST } from "../harness/agent-commands.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import { COPILOT_HOOKS_STEP_ID, copilotRefreshAddsGuardOnly } from "../harness/vscode.js";
@@ -34,9 +34,12 @@ export type HookRefreshPlan = {
   incomplete: HarnessAdapter[];
 };
 
-/** Whether every event `init` registers for this adapter is registered in its hook file (read-only). */
+/**
+ * Whether every session event `init` registers for this adapter is registered in its hook file (read-only). An event a later
+ * release added (REFRESH_ADDS_EVENTS) may be missing: `update` writes it along with the refresh.
+ */
 function hasEveryEvent(adapter: HarnessAdapter, ctx: InitCtx): boolean {
-  const events = ownHookEvents(adapter.id);
+  const events = ownHookEvents(adapter.id).filter((event) => !REFRESH_ADDS_EVENTS.includes(event));
   return events.length > 0 && events.every((event) => ownHookRegistered(adapter.id, event, ctx.home, ctx.env));
 }
 

@@ -29,7 +29,7 @@ import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routeWith } from "../cli/router.js";
-import { HOOK_EVENTS } from "../harness/claude-code.js";
+import { CLAUDE_HOOK_EVENTS, HOOK_EVENTS } from "../harness/claude-code.js";
 import { CODEX_CODES } from "../harness/codex.js";
 import type { HarnessAdapter, ManualInstructions } from "../harness/types.js";
 import { harnessGroup } from "../safe-edit/plan.js";
@@ -177,11 +177,17 @@ const OLD_HOOK_COMMAND = '"/opt/node-22/bin/node" "/opt/node-22/lib/node_modules
 const claudeSettingsFile = (): string => join(sb.home, ".claude", "settings.json");
 const OTHER_HOOK = { type: "command", command: "echo other-tool", timeout: 3 };
 
-/** ~/.claude/settings.json as `init` leaves it: our three hooks with `program`, plus another tool's hook and a permission rule. */
-function writeClaudeHooks(program: string, events: readonly string[] = HOOK_EVENTS.map((e) => e.name)): Record<string, unknown> {
+const BEFORE_STOP_HOOK = HOOK_EVENTS.map((e) => e.name);
+
+/**
+ * ~/.claude/settings.json as `init` leaves it: our four hooks with `program` (the Stop one beside another tool's Stop hook),
+ * plus a permission rule. Pass `BEFORE_STOP_HOOK` for an install from before our Stop hook existed.
+ */
+function writeClaudeHooks(program: string, events: readonly string[] = CLAUDE_HOOK_EVENTS.map((e) => e.name)): Record<string, unknown> {
   const hooks: Record<string, unknown> = { Stop: [{ hooks: [OTHER_HOOK] }] };
-  for (const e of HOOK_EVENTS.filter((h) => events.includes(h.name))) {
-    hooks[e.name] = [{ hooks: [{ type: "command", command: `${program} hook ${e.arg} --harness claude-code`, timeout: e.timeout }] }];
+  for (const e of CLAUDE_HOOK_EVENTS.filter((h) => events.includes(h.name))) {
+    const entry = { hooks: [{ type: "command", command: `${program} hook ${e.arg} --harness claude-code`, timeout: e.timeout }] };
+    hooks[e.name] = e.name === "Stop" ? [...(hooks[e.name] as unknown[]), entry] : [entry];
   }
   const doc = { permissions: { allow: ["Bash(jubarteai *)"] }, hooks };
   writeJsonFile(claudeSettingsFile(), doc);
@@ -798,7 +804,7 @@ describe.skipIf(!posix)("update: hook commands after a Node upgrade (R-S4)", () 
     expect(readFileSync(claudeSettingsFile(), "utf8")).toBe(before);
   });
 
-  it("--yes rewrites the program of our three entries in place: no new entry, other hooks and settings untouched", async () => {
+  it("--yes rewrites the program of our entries in place: no new entry, other hooks and settings untouched", async () => {
     writeClaudeHooks(OLD_HOOK_COMMAND);
     const r = await update(["--yes"]);
 
@@ -808,7 +814,10 @@ describe.skipIf(!posix)("update: hook commands after a Node upgrade (R-S4)", () 
     for (const e of HOOK_EVENTS) {
       expect(doc.hooks[e.name]).toEqual([{ hooks: [{ type: "command", command: `${NEW_HOOK_COMMAND} hook ${e.arg} --harness claude-code`, timeout: e.timeout }] }]);
     }
-    expect(doc.hooks["Stop"]).toEqual([{ hooks: [OTHER_HOOK] }]);
+    expect(doc.hooks["Stop"]).toEqual([
+      { hooks: [OTHER_HOOK] },
+      { hooks: [{ type: "command", command: `${NEW_HOOK_COMMAND} hook stop --harness claude-code`, timeout: 8 }] },
+    ]);
     expect(Object.keys(doc.hooks).sort()).toEqual(["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     expect(readClaudeSettings()).toMatchObject({ permissions: { allow: ["Bash(jubarteai *)"] } });
 
@@ -816,6 +825,23 @@ describe.skipIf(!posix)("update: hook commands after a Node upgrade (R-S4)", () 
     const again = await update(["--check"]);
     expect(again.code).toBe(0);
     expect(again.out).not.toContain("[todo]");
+  });
+
+  it("an install from before the Stop hook (three events) gets it with the update, beside another tool's Stop hook", async () => {
+    writeClaudeHooks(NEW_HOOK_COMMAND, BEFORE_STOP_HOOK);
+    const check = await update(["--check"]);
+    expect(check.code).toBe(2);
+    expect(check.out).toContain("[todo] Refresh the hook command in Claude Code");
+
+    const r = await update(["--yes"]);
+    expect(r.code).toBe(0);
+    const doc = readClaudeSettings();
+    expect(doc.hooks["Stop"]).toEqual([
+      { hooks: [OTHER_HOOK] },
+      { hooks: [{ type: "command", command: `${NEW_HOOK_COMMAND} hook stop --harness claude-code`, timeout: 8 }] },
+    ]);
+    expect(doc.hooks["SessionStart"]).toHaveLength(1);
+    expect((await update(["--check"])).code).toBe(0);
   });
 
   it("without a terminal and without --yes the sensitive step is not applied, and says which flag applies it", async () => {

@@ -56,6 +56,9 @@ describe("planHookRefresh", () => {
     expect(results.map((r) => r.status)).toEqual(["configured"]);
     expect(fs.readFileSync(file, "utf8")).toContain(NEW.replaceAll('"', '\\"'));
     expect(fs.readFileSync(file, "utf8")).not.toContain("/old/node");
+    // An install from before the Stop hook (three events) gets it with the refresh, written with the new program.
+    const written = JSON.parse(fs.readFileSync(file, "utf8")) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+    expect(written.hooks["Stop"]?.[0]?.hooks[0]?.command).toBe(`${NEW} hook stop --harness claude-code`);
     expect((await planHookRefresh([claudeCodeAdapter], ctx(NEW))).steps).toEqual([]);
   });
 

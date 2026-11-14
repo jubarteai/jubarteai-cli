@@ -96,6 +96,8 @@ describe("hooks", () => {
     expect(hooks["SessionStart"]).toEqual([{ hooks: [{ type: "command", command: "jubarteai hook session-start --harness codex", timeout: 8 }] }]);
     expect(hooks["UserPromptSubmit"]?.[0]?.hooks[0]).toEqual({ type: "command", command: "jubarteai hook user-prompt-submit --harness codex", timeout: 8 });
     expect(hooks["SessionEnd"]?.[0]?.hooks[0]).toEqual({ type: "command", command: "jubarteai hook session-end --harness codex", timeout: 3 });
+    // The Stop hook is Claude Code's alone (it answers that harness's Stop payload): Codex shares the other three, not it.
+    expect(Object.keys(hooks)).toEqual(["SessionStart", "UserPromptSubmit", "SessionEnd"]);
   });
 
   it("is idempotent and keeps other tools' hooks and keys", async () => {
