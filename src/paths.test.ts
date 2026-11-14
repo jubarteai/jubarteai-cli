@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { configDir, credentialsPath, homeDir, sessionsDir } from "./paths.js";
+import { configDir, credentialsPath, homeDir, sessionsDir, watchLocksDir } from "./paths.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -89,5 +89,13 @@ describe("paths", () => {
     stubPlatform("win32");
     stubGetuid(4242);
     expect(sessionsDir()).toBe(join(tmpdir(), "jubarteai", "sessions"));
+  });
+
+  it("keeps the watcher locks next to the sessions, keyed by uid on POSIX", () => {
+    stubPlatform("linux");
+    stubGetuid(4242);
+    expect(watchLocksDir()).toBe(join(tmpdir(), "jubarteai-4242", "watch"));
+    stubPlatform("win32");
+    expect(watchLocksDir()).toBe(join(tmpdir(), "jubarteai", "watch"));
   });
 });

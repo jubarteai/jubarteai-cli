@@ -38,3 +38,15 @@ export function sessionsDir(): string {
   }
   return join(tmpdir(), `${CLI_NAME}-${process.getuid()}`, "sessions");
 }
+
+/**
+ * Per-agent watcher locks (`<agent id>.lock`, see src/inbox/lock.ts). Same placement and reasoning as
+ * sessionsDir: the temp directory is per boot (a lock left by a crash can't outlive a reboot and meet a
+ * reused process id) and, on POSIX, per uid.
+ */
+export function watchLocksDir(): string {
+  if (process.platform === "win32" || typeof process.getuid !== "function") {
+    return join(tmpdir(), CLI_NAME, "watch");
+  }
+  return join(tmpdir(), `${CLI_NAME}-${process.getuid()}`, "watch");
+}
