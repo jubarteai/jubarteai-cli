@@ -152,10 +152,10 @@ describe("init with an environment key and --yes (the bootstrap path)", () => {
     expect(read(join(sb.repo, "AGENTS.md"))).toContain("<!-- jubarteai:begin -->");
     expect(read(join(sb.repo, "CLAUDE.md"))).toContain("@AGENTS.md");
 
-    // Claude Code: permission rule and the three hooks, in the fake ~/.claude/settings.json
+    // Claude Code: permission rule and the four hooks (the Stop hook included), in the fake ~/.claude/settings.json
     const settings = json(join(sb.home, ".claude", "settings.json")) as { permissions: { allow: string[] }; hooks: Record<string, unknown> };
     expect(settings.permissions.allow).toContain("Bash(jubarteai *)");
-    expect(Object.keys(settings.hooks).sort()).toEqual(["SessionEnd", "SessionStart", "UserPromptSubmit"]);
+    expect(Object.keys(settings.hooks).sort()).toEqual(["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     // the hook names this node and this install by absolute path (a desktop-launched editor has no nvm on PATH); the permission rule keeps the bare name
     expect(read(join(sb.home, ".claude", "settings.json"))).toContain(JSON.stringify(`${hookCommandPrefix} hook session-start --harness claude-code`));
     expect(read(join(sb.home, ".codex", "hooks.json"))).toContain(JSON.stringify(`${hookCommandPrefix} hook session-start --harness codex`));
