@@ -6,9 +6,10 @@ From 1.0.0 the `jubarteai` command line follows semantic versioning. This page s
 
 - **Command names**, and the snake_case aliases of the tool commands (`search_knowledge` runs `search-knowledge`). A command is never renamed or removed in a minor or patch release; a replacement gets a new name and the old one stays as an alias.
 - **Flags and their types** on every command, and the global flags `--workspace`, `--agent`, `--pretty`, `--yes`, `--plain`, `--verbose`, `--help`, `--version`. A flag is never removed or given a different meaning; a new flag is optional.
+- **The `inbox --watch` last line**: one JSON line, `{"pending":n}` or `{"stopped":"<reason>"}`, exit 0 (130 or 143 for an interrupt). A new reason is additive, so a caller treats an unknown one as "the watch ended". 1.1 adds `already_watching`, `unattended`, `parent_gone` and `session_limit`.
 - **Exit codes** `0` to `5`: `0` success, `1` the server returned an `error` (or `doctor` found a failure, or `update` hit a failed step), `2` usage error (or `update --check` found something to change), `3` authentication, `4` network or server error, `5` not signed in.
 - **The tool-command envelope** on stdout: one line of JSON, `{"messages":[…],"result":…}` or `{"messages":[…],"error":"…"}`, `messages` first; and, for transport failures, `{"messages":[],"error":"…","code":"…"}`.
-- **The hook command line** harnesses run: `jubarteai hook <session-start|user-prompt-submit|session-end> --harness <id>`, its JSON on stdin and its silence outside a bound repo.
+- **The hook command line** harnesses run: `jubarteai hook <session-start|user-prompt-submit|session-end> --harness <id>`, its JSON on stdin and its silence outside a bound repo. (1.1 adds `stop`, registered for Claude Code only: a new event is additive.)
 - **File formats marked `version: 1`**: the repo binding (`.jubarteai/config.json`, `config.local.json`), the saved logins (`credentials.json`) and the session cache. A change to them is additive, or a new `version` that 1.x still reads.
 - **Environment variables**: `JUBARTEAI_TOKEN`, `JUBARTEAI_URL`, `JUBARTEAI_UI` (`plain` or `rich`), `JUBARTEAI_BANNER` (`off`), `NO_COLOR` and `FORCE_COLOR` as documented in the README.
 - **`status --json` and `doctor --json`**: fields are only added, never removed or retyped.

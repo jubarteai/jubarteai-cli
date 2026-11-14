@@ -2,6 +2,20 @@
 
 All notable changes to the `jubarteai` command line. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project follows [Semantic Versioning](https://semver.org/); see [STABILITY.md](STABILITY.md) for what 1.x promises.
 
+## 1.1.0
+
+An idle agent can keep its inbox watched for a whole session.
+
+### Added
+
+- **`inbox --watch --session`** for an interactive session: the watch renews itself about two minutes before it expires (`POST /api/mcp/inbox-watch/extend`, the same token), so the agent is not woken at every expiry. It ends with `{"stopped":"agent_disconnected"}` when the agent disconnects, `{"stopped":"parent_gone"}` when the session that started it is gone, `{"stopped":"session_limit"}` after 12 hours, and `{"stopped":"expired"}` at the original expiry when the server is older than the extend endpoint (404). In an unattended run (`CLAUDE_CODE_ENTRYPOINT` other than `cli`, or `CLAUDE_CODE_SESSION_ATTENDED=0`) it answers `{"stopped":"unattended"}` and sends nothing.
+- **One watcher per agent per machine.** A second `inbox --watch` (with or without `--session`) for the same agent prints `{"stopped":"already_watching"}` and exits 0 before it asks the server for a new watch, so it can no longer rotate the first watcher's token and wake its agent for nothing. The lock is a file in the per-user temporary folder and holds no token.
+- **A Stop hook for Claude Code** (`jubarteai hook stop`, registered by `init` and added by `update` to an install that predates it): when an agent ends a turn with no inbox watcher running, it blocks the stop once and asks the agent to start `jubarteai inbox --agent <id> --watch --session` in the background, so a peer's message can wake the idle session. No network call; silent when a watcher already runs, on its own re-entry, in an unattended run and outside a bound repo. Codex and Cursor do not get it.
+
+### Changed
+
+- The watch loop moved into `src/inbox/` (no change to plain `--watch` output).
+
 ## 1.0.0
 
 The first stable release. The terminal experience of the old install script, one approval for everything, and a command line you can depend on.
